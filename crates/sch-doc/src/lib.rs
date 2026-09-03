@@ -72,11 +72,11 @@ pub use doc::{SchDoc, SnapshotId};
 pub use edit::{WireClip, is_drawing};
 pub use error::{Error, Result};
 pub use libsyms::SymbolSource;
-pub use page::{PAGE_MARGIN, PageFit};
 pub use model::{
     Field, Item, Junction, Label, LabelKind, LibSymbols, Mirror, NoConnect, Pose, Rectangle,
     Retained, Sheet, SheetPin, SymbolInst, Text, Wire, WireFault, WireFaultKind,
 };
+pub use page::{PAGE_MARGIN, PageFit, STANDARD_PAGES, TITLE_BLOCK_BAND, standard_page};
 pub use pins::{PlacedPin, placed_pins};
 pub use text::{escape, unescape};
 

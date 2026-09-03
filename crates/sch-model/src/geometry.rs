@@ -80,7 +80,6 @@ pub fn field_pad(it: &Item, w: f64, h: f64) -> [f64; 4] {
     }
     let text = text_width(&it.value).max(text_width(&it.refdes));
     let spill = (text / 2.0 - w / 2.0).max(0.0);
-    let _ = h;
     [spill, spill, BAND, BAND]
 }
 
@@ -179,3 +178,51 @@ pub fn pin_endpoint(
         .into()
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use kicad_symbol::geometry::{PinGeom, SymbolGeometry};
+
+    fn part(refdes: &str, value: &str, pins: usize) -> Item {
+        let pin = |n: usize| PinGeom {
+            number: (n + 1).to_string(),
+            name: "~".into(),
+            at: geom::Point2::new(0.0, if n == 0 { 3.81 } else { -3.81 }),
+            angle: 0.0,
+            length: 2.54,
+            unit: 1,
+        };
+        Item {
+            refdes: refdes.into(),
+            block: String::new(),
+            part: "Device:R".into(),
+            value: value.into(),
+            footprint: None,
+            geom: SymbolGeometry {
+                lib_id: "Device:R".into(),
+                pins: (0..pins).map(pin).collect(),
+                raw_definition: String::new(),
+            },
+            pins: Vec::new(),
+            at: [0.0, 0.0].into(),
+            angle: 0.0,
+            unit: 1,
+            mirror: false,
+            frozen: false,
+            preseeded: false,
+        }
+    }
+
+    #[test]
+    fn a_tall_passive_claims_no_text_column() {
+        let r = part("R1", "100nF", 2);
+        assert_eq!(item_rect(&r, r.at), body_rect(&r, r.at));
+    }
+
+    #[test]
+    fn an_ic_keeps_the_band_its_fields_land_in() {
+        let u = part("U1", "MCP1703", 3);
+        let (body, full) = (body_rect(&u, u.at), item_rect(&u, u.at));
+        assert!(full.min_y < body.min_y && full.max_y > body.max_y);
+    }
+}

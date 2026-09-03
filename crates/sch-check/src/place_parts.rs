@@ -286,7 +286,7 @@ impl Intent {
 }
 
 /// The sheet a payload without an explicit `block` fills.
-pub const DEFAULT_BLOCK: &str = "main";
+pub use sch_model::result::DEFAULT_BLOCK;
 
 /// Lower the input to a [`Design`]: pin keys resolved to physical pin numbers
 /// against the symbol table, `decouple` expanded into [`Origin::Synthesized`]
@@ -514,7 +514,9 @@ fn is_no_connect_name(net: &str) -> bool {
     let upper = net.to_ascii_uppercase();
     upper == "NC"
         || upper == "N/C"
-        || upper.strip_prefix("NC_").is_some_and(|rest| !rest.is_empty())
+        || upper
+            .strip_prefix("NC_")
+            .is_some_and(|rest| !rest.is_empty())
         || upper
             .strip_prefix("NC")
             .is_some_and(|rest| !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit()))
@@ -809,47 +811,47 @@ fn expand_decouple(
 /// macro's recursion limit is real; it also keeps the grammar in one readable place.
 fn relations_schema() -> Value {
     json!({
-                        "type": "array",
-                        "description":
-                            "Relative placement. `b` and `anchor` may name a part already \
-                             on the sheet. Example: \
-                             {\"kind\":\"group\",\"name\":\"leds\",\"members\":[\"R3\",\"D1\"],\
-                             \"side\":\"right\",\"anchor\":\"U1\"}",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "kind": {
-                                    "type": "string",
-                                    "enum": ["left_of", "right_of", "above", "below",
-                                             "group", "align"]
-                                },
-                                "a": {"type": "string"},
-                                "b": {"type": "string"},
-                                "name": {"type": "string"},
-                                "members": {
-                                    "type": "array",
-                                    "items": {"type": "string"},
-                                    "minItems": 1
-                                },
-                                "side": {
-                                    "description":
-                                        "An edge, or an [edge, anchor] pair, or \
-                                         {side, anchor}.",
-                                    "anyOf": [
-                                        {"type": "string",
-                                         "enum": ["left", "right", "top", "bottom"]},
-                                        {"type": "array", "minItems": 2, "maxItems": 2},
-                                        {"type": "object"}
-                                    ]
-                                },
-                                "anchor": {"type": "string"},
-                                "axis": {
-                                    "type": "string",
-                                    "enum": ["horizontal", "vertical"]
-                                }
-                            },
-                            "required": ["kind"]
-                        }})
+    "type": "array",
+    "description":
+        "Relative placement. `b` and `anchor` may name a part already \
+         on the sheet. Example: \
+         {\"kind\":\"group\",\"name\":\"leds\",\"members\":[\"R3\",\"D1\"],\
+         \"side\":\"right\",\"anchor\":\"U1\"}",
+    "items": {
+        "type": "object",
+        "properties": {
+            "kind": {
+                "type": "string",
+                "enum": ["left_of", "right_of", "above", "below",
+                         "group", "align"]
+            },
+            "a": {"type": "string"},
+            "b": {"type": "string"},
+            "name": {"type": "string"},
+            "members": {
+                "type": "array",
+                "items": {"type": "string"},
+                "minItems": 1
+            },
+            "side": {
+                "description":
+                    "An edge, or an [edge, anchor] pair, or \
+                     {side, anchor}.",
+                "anyOf": [
+                    {"type": "string",
+                     "enum": ["left", "right", "top", "bottom"]},
+                    {"type": "array", "minItems": 2, "maxItems": 2},
+                    {"type": "object"}
+                ]
+            },
+            "anchor": {"type": "string"},
+            "axis": {
+                "type": "string",
+                "enum": ["horizontal", "vertical"]
+            }
+        },
+        "required": ["kind"]
+    }})
 }
 
 pub fn place_parts_input_schema() -> Value {

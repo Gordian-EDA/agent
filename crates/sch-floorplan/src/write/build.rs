@@ -447,10 +447,10 @@ impl SchematicWriter {
     /// optional note under its bottom-left — the way a human sheet says where one
     /// functional block ends and the next begins.
     ///
-    /// Returns the frame rect, or `None` when the block has nothing on this sheet. Call
-    /// AFTER [`Self::prepare`], so the fields are where the solver put them; `prepare` is
+    /// Draws nothing when the block has no parts on this sheet. Call AFTER
+    /// [`Self::prepare`], so the fields are where the solver put them; `prepare` is
     /// idempotent and re-running it reframes the sheet with the frames included.
-    pub fn add_block_frame(&mut self, title: &str, note: Option<&str>, members: &[String]) -> Option<Rect> {
+    pub fn add_block_frame(&mut self, title: &str, note: Option<&str>, members: &[String]) {
         /// Air between the block's outermost ink and its frame.
         const FRAME_PAD: f64 = 3.81;
         const TITLE_SIZE: f64 = 1.778;
@@ -479,18 +479,26 @@ impl SchematicWriter {
             let (r, v) = super::field_anchors(inst);
             for (pos, text) in [(r, &inst.refdes), (v, &inst.value)] {
                 if !text.is_empty() {
-                    grow(super::field_box(pos.at, pos.justify, sch_model::text::text_width(text)));
+                    grow(super::field_box(
+                        pos.at,
+                        pos.justify,
+                        sch_model::text::text_width(text),
+                    ));
                 }
             }
         }
-        let b = bbox?;
+        let Some(b) = bbox else { return };
         let frame = Rect::new(
             b.min_x - FRAME_PAD,
             b.min_y - FRAME_PAD,
             b.max_x + FRAME_PAD,
             b.max_y + FRAME_PAD,
         );
-        self.add_rect([frame.min_x, frame.min_y], [frame.max_x, frame.max_y], title);
+        self.add_rect(
+            [frame.min_x, frame.min_y],
+            [frame.max_x, frame.max_y],
+            title,
+        );
         self.add_text(
             title,
             [frame.min_x, frame.min_y - 1.27],
@@ -507,7 +515,6 @@ impl SchematicWriter {
                 &format!("{title}:note"),
             );
         }
-        Some(frame)
     }
 
     /// Add a graphic rectangle annotation.
@@ -815,7 +822,9 @@ impl SchematicWriter {
             }
         }
         for w in &self.wires {
-            scene.segments.push(NetSegment::new(w.a, w.b, w.net.clone()));
+            scene
+                .segments
+                .push(NetSegment::new(w.a, w.b, w.net.clone()));
         }
         scene.points.extend(self.beside.points.iter().cloned());
         scene.segments.extend(self.beside.segments.iter().cloned());

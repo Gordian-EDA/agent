@@ -5,7 +5,7 @@
 use std::fmt::Write as _;
 
 use geom::stable_uuid;
-use sch_doc::PAGE_MARGIN;
+use sch_doc::{PAGE_MARGIN, TITLE_BLOCK_BAND, standard_page};
 
 use super::{
     Dir, Instance, NoConnect, PinLabel, ROOT_SHEET_KEY, SchematicWriter, field_anchors,
@@ -22,30 +22,14 @@ impl SchematicWriter {
     /// than a strip of arbitrary geometry. Content larger than A2 falls back to a
     /// `User` page sized to fit: an unconventional page beats an invisible drawing.
     fn page(&self) -> Option<(&'static str, [f64; 2])> {
-        const STANDARD: [(&str, [f64; 2]); 3] = [
-            ("A4", [297.0, 210.0]),
-            ("A3", [420.0, 297.0]),
-            ("A2", [594.0, 420.0]),
-        ];
-        // KiCAD draws the title block inside the page at bottom-right, so a sheet that
-        // carries one must keep that band clear of content.
-        const TITLE_BLOCK_BAND: f64 = 33.0;
         let bbox = self.content_bbox()?;
         let band = if self.title.is_some() {
             TITLE_BLOCK_BAND
         } else {
             0.0
         };
-        let need = [
-            bbox.max_x + PAGE_MARGIN,
-            bbox.max_y + PAGE_MARGIN + band,
-        ];
-        Some(
-            STANDARD
-                .into_iter()
-                .find(|(_, size)| size[0] >= need[0] && size[1] >= need[1])
-                .unwrap_or(("User", need)),
-        )
+        let need = [bbox.max_x + PAGE_MARGIN, bbox.max_y + PAGE_MARGIN + band];
+        Some(standard_page(need).unwrap_or(("User", need)))
     }
 
     /// Size `[w, h]` of the laid-out content, for the multi-block composer's tile
@@ -560,7 +544,10 @@ mod tests {
             "a sheet this small belongs on A4, got {:?}",
             text.lines().find(|l| l.contains("(paper")),
         );
-        assert!(text.contains("(title_block"), "the title must reach the sheet");
+        assert!(
+            text.contains("(title_block"),
+            "the title must reach the sheet"
+        );
     }
 
     #[test]
@@ -578,8 +565,15 @@ mod tests {
             .split_whitespace()
             .filter_map(|token| token.trim_end_matches(')').parse::<f64>().ok())
             .collect();
-        assert_eq!(nums.len(), 2, "paper dimensions should parse from {paper:?}");
-        assert!(nums[0] > 900.0 && nums[1] > 500.0, "the page must hold the content, got {paper:?}");
+        assert_eq!(
+            nums.len(),
+            2,
+            "paper dimensions should parse from {paper:?}"
+        );
+        assert!(
+            nums[0] > 900.0 && nums[1] > 500.0,
+            "the page must hold the content, got {paper:?}"
+        );
     }
 
     #[test]

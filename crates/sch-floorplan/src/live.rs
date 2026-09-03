@@ -54,10 +54,7 @@ use crate::floorplan::place::incidence;
 use crate::region::{RegionProblem, arrange as region_arrange};
 use sch_model::engine::PlacementEngine;
 use sch_model::geometry::item_rect;
-
-/// Block name the parts already on the sheet are lifted into. Prefixed so it cannot
-/// collide with a block an author named.
-const SHEET_BLOCK: &str = "$sheet";
+use sch_model::result::SHEET_BLOCK;
 
 /// Clearance added around a selected part when deciding which wires belong to it.
 const TOUCH_MARGIN: f64 = 1.27;
@@ -646,7 +643,9 @@ pub fn add_parts(
     }
     report.unplaced = std::mem::take(&mut audit.unplaced);
     report.dangling = std::mem::take(&mut audit.dangling);
-    report.did_you_mean = std::mem::take(&mut audit.did_you_mean).into_iter().collect();
+    report.did_you_mean = std::mem::take(&mut audit.did_you_mean)
+        .into_iter()
+        .collect();
     Ok(report)
 }
 
@@ -871,7 +870,8 @@ fn rearrange_inner(
             // the layout chose, so it is an ordinary symbol again.
             let left_bench = crate::bench::unbench(doc, &chosen);
             owned.extend(footprints(&placed));
-            let erase = selection_drawing(doc, &owned, &held);
+            let mut erase = selection_drawing(doc, &owned, &held);
+            erase.extend(stale_frames(doc, &chosen));
             let redrawn = doc.retain_drawing(|item| !erase.contains(&drawing_key(item)));
             // The held half of a nameless boundary net needs the minted name too:
             // one label each side is what makes the two halves one net again.
@@ -1050,10 +1050,54 @@ fn drawing_key(item: &sch_doc::Item) -> String {
         sch_doc::Item::NoConnect(n) => n.uuid.clone(),
         sch_doc::Item::Label(l) => l.uuid.clone(),
         sch_doc::Item::Text(t) => t.uuid.clone(),
+        sch_doc::Item::Rectangle(r) => r.uuid.clone(),
         sch_doc::Item::Symbol(s) => s.uuid.clone(),
-        _ => String::new(),
+        // Sheets, `lib_symbols` and undecoded nodes are never offered to `retain_drawing`.
+        sch_doc::Item::Sheet(_) | sch_doc::Item::LibSymbols(_) | sch_doc::Item::Other(_) => {
+            String::new()
+        }
     }
 }
+
+/// The block frames a re-arrange invalidates: every rectangle enclosing a part that is
+/// about to move, with the caption and note drawn against it.
+///
+/// A frame is drawn around where a block's parts WERE; once they move it is a box around
+/// the wrong thing, and nothing on this path can redraw it (the sheet is lifted as one
+/// region, so the block names live only on the symbols). Dropping it is the honest
+/// outcome — the next `place_parts` for that block draws it again.
+fn stale_frames(doc: &SchDoc, chosen: &BTreeSet<String>) -> BTreeSet<String> {
+    let moving: Vec<Rect> = doc
+        .symbols()
+        .filter(|s| chosen.contains(s.refdes()))
+        .filter_map(|s| sch_doc::body_rect(doc, s))
+        .collect();
+    let stale: Vec<Rect> = doc
+        .items()
+        .iter()
+        .filter_map(|item| match item {
+            sch_doc::Item::Rectangle(r) => Some(Rect::from_points(r.start, r.end)),
+            _ => None,
+        })
+        .filter(|frame| moving.iter().any(|body| frame.overlaps(body)))
+        .collect();
+    doc.items()
+        .iter()
+        .filter(|item| match item {
+            sch_doc::Item::Rectangle(r) => stale.contains(&Rect::from_points(r.start, r.end)),
+            // A caption sits just above its frame and a note just below it, so both are
+            // caught by an inflated test rather than by containment.
+            sch_doc::Item::Text(t) => stale
+                .iter()
+                .any(|f| f.inflate(FRAME_TEXT_REACH).contains(t.at.point())),
+            _ => false,
+        })
+        .map(drawing_key)
+        .collect()
+}
+
+/// How far outside its frame a block's caption or note is drawn.
+const FRAME_TEXT_REACH: f64 = 6.35;
 
 /// Quantise to 1 um, as the connectivity extractor does, so float dust never splits a
 /// join.
@@ -1460,7 +1504,11 @@ fn seated_items(doc: &SchDoc, netlist: &Netlist) -> Vec<Item> {
                 .collect();
             Some(Item {
                 refdes: symbol.refdes().to_string(),
-                block: String::new(),
+                block: symbol
+                    .fields
+                    .get(sch_model::result::AP_BLOCK)
+                    .map(|f| f.value.clone())
+                    .unwrap_or_default(),
                 part: symbol.lib_id.clone(),
                 value: symbol.value().to_string(),
                 footprint: None,
@@ -1560,7 +1608,10 @@ fn beside_scene_excluding(doc: &SchDoc, redrawn: &[Item]) -> sch_model::route::R
                 .iter()
                 .filter(move |pin| pin.unit.max(1) == item.unit.max(1))
                 .map(move |pin| {
-                    key(sch_model::geometry::pin_endpoint(pin, item.at, item.angle, item.mirror).into())
+                    key(
+                        sch_model::geometry::pin_endpoint(pin, item.at, item.angle, item.mirror)
+                            .into(),
+                    )
                 })
         })
         .collect();

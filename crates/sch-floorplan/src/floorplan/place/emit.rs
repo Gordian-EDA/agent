@@ -346,6 +346,15 @@ pub fn emit_strategy(
     Ok(out)
 }
 
+/// The hidden `ap_block` identity tag, so a later call can say `arrange{block}` about
+/// parts it did not place itself, and a re-typeset can redraw the block's frame.
+fn block_prop(it: &Item) -> Vec<(String, String)> {
+    if it.block.is_empty() || sch_model::result::synthesized_block(&it.block) {
+        return Vec::new();
+    }
+    vec![(sch_model::result::AP_BLOCK.to_string(), it.block.clone())]
+}
+
 /// Lay out `design` under `engine` and build its FINALIZED writer (placed, routed,
 /// text-solved, reframed) WITHOUT rendering it. Returns the prepared writer plus the
 /// readability metadata; `EmitOutput.sch` and `net_opens` are left empty because both
@@ -450,7 +459,7 @@ pub fn build_writer(
             it.at,
             it.angle,
             it.footprint.as_deref(),
-            &[],
+            &block_prop(it),
             None,
         )?;
         if it.unit != 1 {

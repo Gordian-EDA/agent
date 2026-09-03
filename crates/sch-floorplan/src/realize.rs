@@ -68,14 +68,14 @@ pub fn realize_block(
 /// Draw one dashed frame per design region that has parts on this sheet, captioned with
 /// the region's title and carrying its note.
 ///
-/// The default region on its own is not a region — it is everything the author did not
-/// divide up, i.e. the whole sheet, which the drawing frame and title block already
-/// delimit. Boxing that says nothing, so it is left alone.
+/// A region the tools synthesized ([`sch_model::result::synthesized_block`]) is not a
+/// functional block — it is everything the author did not divide up — so it gets no
+/// frame; the drawing frame and title block already delimit the sheet.
 fn draw_block_frames(writer: &mut SchematicWriter, design: &Design, items: &[Item]) {
-    if design.blocks.len() == 1 && design.blocks.contains_key(sch_check::DEFAULT_BLOCK) {
-        return;
-    }
     for (name, block) in &design.blocks {
+        if sch_model::result::synthesized_block(name) {
+            continue;
+        }
         let members: Vec<String> = items
             .iter()
             .filter(|it| &it.block == name)
@@ -109,28 +109,31 @@ pub fn graft(doc: &mut SchDoc, writer: SchematicWriter) -> sch_doc::Result<Vec<S
     Ok(adopted)
 }
 
-/// Drop the block frames `sheet` is about to redraw: any rectangle overlapping one of its
-/// frames, and any annotation text standing inside one. A block extended by a later call
-/// gets a new frame around the parts it now has, and the stale one must not survive
-/// beside it. Frames are decoration the realiser owns, so nothing else is at risk.
+/// Drop the block frames `sheet` is about to redraw: every rectangle it overlaps, and the
+/// captions and notes that went with them — matched by their TEXT, because a frame's
+/// caption sits just outside its rectangle and a geometric test orphans it. A block
+/// extended by a later call gets a new frame around the parts it now has, and the stale
+/// one must not survive beside it. Frames are decoration the realiser owns.
 fn replace_frames(doc: &mut SchDoc, sheet: &SchDoc) {
-    let frames: Vec<geom::Rect> = sheet
-        .items()
-        .iter()
-        .filter_map(|item| match item {
-            sch_doc::Item::Rectangle(r) => Some(geom::Rect::from_points(r.start, r.end)),
-            _ => None,
-        })
-        .collect();
+    let mut frames: Vec<geom::Rect> = Vec::new();
+    let mut captions: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+    for item in sheet.items() {
+        match item {
+            sch_doc::Item::Rectangle(r) => frames.push(geom::Rect::from_points(r.start, r.end)),
+            sch_doc::Item::Text(t) => {
+                captions.insert(t.text.as_str());
+            }
+            _ => {}
+        }
+    }
     if frames.is_empty() {
         return;
     }
-    let hits = |p: geom::Point2| frames.iter().any(|f| f.contains(p));
     doc.retain_drawing(|item| match item {
-        sch_doc::Item::Rectangle(r) => {
-            !frames.iter().any(|f| f.overlaps(&geom::Rect::from_points(r.start, r.end)))
-        }
-        sch_doc::Item::Text(t) => !hits(t.at.point()),
+        sch_doc::Item::Rectangle(r) => !frames
+            .iter()
+            .any(|f| f.overlaps(&geom::Rect::from_points(r.start, r.end))),
+        sch_doc::Item::Text(t) => !captions.contains(t.text.as_str()),
         _ => true,
     });
 }
@@ -139,6 +142,7 @@ fn replace_frames(doc: &mut SchDoc, sheet: &SchDoc) {
 /// re-wire of symbols the document already holds.
 pub fn graft_drawing(doc: &mut SchDoc, writer: SchematicWriter) -> sch_doc::Result<()> {
     let sheet = to_doc(writer)?;
+    replace_frames(doc, &sheet);
     doc.adopt_drawing(&sheet)?;
     doc.refit_page();
     debug_assert_unique_wire_segments(doc);

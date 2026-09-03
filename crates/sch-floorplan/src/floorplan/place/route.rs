@@ -383,10 +383,9 @@ pub(crate) fn route_signal(
     let term_label_seatable: Vec<bool> = term_pin
         .iter()
         .map(|tp| {
-            tp.as_ref()
-                .is_none_or(|(it, num)| {
-                    label_stub(w, env, scene, &items[*it].refdes, num, net, finalize).1
-                })
+            tp.as_ref().is_none_or(|(it, num)| {
+                label_stub(w, env, scene, &items[*it].refdes, num, net, finalize).1
+            })
         })
         .collect();
 
@@ -1203,7 +1202,11 @@ pub(crate) fn nudge_port_exit(
 /// A foreign pennant's TEXT BOX is not a merge hazard, only an ugly one: it is long, and
 /// treating it as untouchable pushed a GPIO bank's pennants past anywhere their nets
 /// could route to, leaving three of them dangling.
-pub(crate) fn anchor_merges(scene: &sch_model::route::RouteScene, at: ::geom::Point2, net: &str) -> bool {
+pub(crate) fn anchor_merges(
+    scene: &sch_model::route::RouteScene,
+    at: ::geom::Point2,
+    net: &str,
+) -> bool {
     scene
         .segments
         .iter()
@@ -1245,28 +1248,24 @@ pub(crate) fn dir_toward(a: impl Into<::geom::Point2>, b: impl Into<::geom::Poin
     }
 }
 
-/// Assign each drawn rail (≥3 pins) a y. Rails in a band share a base y, but
-/// overlapping x-ranges are pushed to successive rows (away from the content)
-/// via greedy interval colouring, so distinct rails never merge into one wire.
-/// Longest rail segment (mm) that still reads as a wire: above this the trunk (or one
-/// of its risers) is a cross-sheet detour, and [`emit_rail`] gives it up for distributed
-/// local power symbols instead. The rail analog of [`LABEL_LEN_MM`], and measured the
-/// same way — on the geometry actually drawn, not on a pin-span proxy.
-///
-/// 55 mm: just above the longest wire any reference/snapshot fixture draws (48.3 mm, the
-/// uart level translator), so those renders keep their tuned short trunks unchanged.
-pub(crate) const RAIL_SEGMENT_MAX: f64 = 55.0;
-
 /// A signal-net MST hop whose (direct OR routed) length exceeds this (mm) is delegated
 /// to a name-matched net-label pair instead of a drawn wire — the professional idiom for
-/// long-haul / cross-block connectivity. The signal-net analog of [`RAIL_SEGMENT_MAX`].
-/// Applied FINALIZE-ONLY (see [`LabelPolicy`]) so the per-move scorer / placement is never
-/// perturbed.
+/// long-haul / cross-block connectivity. Applied FINALIZE-ONLY (see [`LabelPolicy`]) so
+/// the per-move scorer / placement is never perturbed.
 ///
 /// 50mm, anchored directly to the human corpus (`tools/layout_metrics.py`): humans keep
 /// ~0% of wires above 50mm (`wire_frac_gt50` median 0). A literal wire longer than this is
 /// the auto-layout "spaghetti" tell.
 pub(crate) const LABEL_LEN_MM: f64 = 50.0;
+
+/// Longest rail segment (mm) that still reads as a wire: above this the trunk, one of its
+/// risers or one of its lead-outs is a cross-sheet detour, and [`emit_rail`] gives the
+/// trunk up for distributed local power symbols instead.
+///
+/// A rail wire is a wire, so it is held to the same corpus rule as a signal wire and
+/// simply IS [`LABEL_LEN_MM`] — humans keep ~0% of wires above it, whatever net they are
+/// on. Measured the same way too: on the geometry actually drawn, not on a pin-span proxy.
+pub(crate) const RAIL_SEGMENT_MAX: f64 = LABEL_LEN_MM;
 
 /// The CROSSING-driven label threshold (mm): a hop longer than this whose literal route
 /// would cross a foreign wire is named rather than drawn (see [`LabelPolicy`]). Lower than
@@ -1277,6 +1276,9 @@ pub(crate) const LABEL_LEN_MM: f64 = 50.0;
 /// genuinely-crossing hops promote.
 pub(crate) const CROSS_LABEL_LEN_MM: f64 = 19.0;
 
+/// Assign each drawn rail (≥3 pins) a y. Rails in a band share a base y, but overlapping
+/// x-ranges are pushed to successive rows (away from the content) via greedy interval
+/// colouring, so distinct rails never merge into one wire.
 pub(crate) fn assign_rail_levels(
     net_eps: &BTreeMap<String, Vec<([f64; 2], Dir)>>,
     ir: &LayoutIr,
@@ -1615,11 +1617,12 @@ pub(crate) fn emit_rail(
     // Measure what would be drawn and, when a segment is too long to read as a wire,
     // give the trunk up for distributed local power symbols. Length is the honest
     // test: it is what the reader sees, unlike the pin half-perimeter it replaces.
-    let longest = (span_hi - span_lo).max(
-        eps.iter()
-            .map(|(p, _)| (p[1] - rail_y).abs())
-            .fold(0.0, f64::max),
-    );
+    let longest = eps
+        .iter()
+        .zip(&attaches)
+        .flat_map(|((p, _), &ax)| [(p[1] - rail_y).abs(), (ax - p[0]).abs()])
+        .chain(std::iter::once(span_hi - span_lo))
+        .fold(0.0, f64::max);
     if longest > RAIL_SEGMENT_MAX && !forced {
         return emit_local_power(env, w, net, eps, flag, power_keepouts);
     }
@@ -1640,7 +1643,14 @@ pub(crate) fn emit_rail(
     // rail's symbol sits above, a bottom rail's below — both at angle 0.
     let sym_x = span_lo;
     let flag_at = [sym_x, rail_y];
-    w.add_power_symbol(env, &power_lib_id(net), &format!("#PWR_{net}"), net, flag_at, 0.0)?;
+    w.add_power_symbol(
+        env,
+        &power_lib_id(net),
+        &format!("#PWR_{net}"),
+        net,
+        flag_at,
+        0.0,
+    )?;
     // The ERC flag (only when this net needs one) sits COINCIDENT with the rail's
     // power symbol, rotated to extend the same way the symbol does (up for a top
     // V+ rail, down for a bottom GND rail) — into open space, no dangling stub.
@@ -1691,9 +1701,7 @@ fn trunk_clear(
     let overlaps_x = |a: f64, b: f64| a <= hi + EPS && b >= lo - EPS;
     !foreign_pins
         .iter()
-        .any(|(p, pin_net)| {
-            pin_net != net && (p[1] - rail_y).abs() < EPS && overlaps_x(p[0], p[0])
-        })
+        .any(|(p, pin_net)| pin_net != net && (p[1] - rail_y).abs() < EPS && overlaps_x(p[0], p[0]))
         && !foreign_runs
             .iter()
             .any(|&(y, x_lo, x_hi)| (y - rail_y).abs() < EPS && overlaps_x(x_lo, x_hi))
@@ -1705,10 +1713,7 @@ fn trunk_clear(
 fn trunk_hits_body(rail_y: f64, span: (f64, f64), bodies: &[Rect]) -> bool {
     let (lo, hi) = span;
     bodies.iter().any(|b| {
-        rail_y > b.min_y + EPS
-            && rail_y < b.max_y - EPS
-            && lo < b.max_x - EPS
-            && hi > b.min_x + EPS
+        rail_y > b.min_y + EPS && rail_y < b.max_y - EPS && lo < b.max_x - EPS && hi > b.min_x + EPS
     })
 }
 

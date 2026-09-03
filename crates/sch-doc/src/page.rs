@@ -25,7 +25,7 @@ pub const PAGE_MARGIN: f64 = 12.7;
 
 /// Bottom band a KiCAD title block occupies inside the frame, in mm. Content
 /// that reaches into it is overprinted by the sheet metadata.
-const TITLE_BLOCK_BAND: f64 = 33.0;
+pub const TITLE_BLOCK_BAND: f64 = 33.0;
 
 /// Rendered width of a text run, in mm — the same 1.1 mm/character estimate the
 /// realiser's text solver uses, scaled by the font size KiCAD defaults to.
@@ -33,10 +33,21 @@ fn text_width(s: &str, size: f64) -> f64 {
     s.chars().count() as f64 * 1.1 * (size / 1.27)
 }
 
-/// The standard landscape pages a generated sheet may use, smallest first.
-/// Humans use A4 and A3 for boards of this size and almost never a custom page.
-const STANDARD_PAGES: [(&str, [f64; 2]); 3] =
-    [("A4", [297.0, 210.0]), ("A3", [420.0, 297.0]), ("A2", [594.0, 420.0])];
+/// The standard landscape pages a generated sheet may use, smallest first. Humans use A4
+/// and A3 for boards of this size and almost never a custom page.
+pub const STANDARD_PAGES: [(&str, [f64; 2]); 3] = [
+    ("A4", [297.0, 210.0]),
+    ("A3", [420.0, 297.0]),
+    ("A2", [594.0, 420.0]),
+];
+
+/// The smallest standard page holding content of `size` mm (margins already included),
+/// or `None` when nothing standard does.
+pub fn standard_page(size: [f64; 2]) -> Option<(&'static str, [f64; 2])> {
+    STANDARD_PAGES
+        .into_iter()
+        .find(|(_, page)| page[0] >= size[0] && page[1] >= size[1])
+}
 
 /// What [`SchDoc::refit_page`] did.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -49,6 +60,44 @@ pub struct PageFit {
     /// larger than A2 and the sheet keeps a `User` page sized to fit it — visible
     /// content beats a standard name.
     pub standard: bool,
+}
+
+/// Every `(at x y …)` and `(xy x y)` under `node` — the sheet-space geometry of an item
+/// the typed model does not decode (a hierarchical sheet, a bus, a rule area). Never
+/// called on `(lib_symbols)`, whose coordinates are symbol-local, not sheet-space.
+fn raw_points(node: &kiutils_sexpr::Node, out: &mut Vec<Point2>) {
+    let v = crate::sexpr::items(node);
+    if matches!(crate::sexpr::head(node), Some("at" | "xy")) {
+        if let (Some(x), Some(y)) = (
+            v.get(1).and_then(crate::sexpr::number),
+            v.get(2).and_then(crate::sexpr::number),
+        ) {
+            out.push(Point2::new(x, y));
+        }
+        return;
+    }
+    for child in v {
+        raw_points(child, out);
+    }
+}
+
+/// Shift every point [`raw_points`] would report, in place.
+fn shift_raw_points(node: &mut kiutils_sexpr::Node, dx: f64, dy: f64) {
+    let point = matches!(crate::sexpr::head(node), Some("at" | "xy"));
+    let Some(children) = crate::sexpr::items_mut(node) else {
+        return;
+    };
+    if point {
+        for (i, d) in [(1, dx), (2, dy)] {
+            if let Some(v) = children.get(i).and_then(crate::sexpr::number) {
+                children[i] = num(v + d);
+            }
+        }
+        return;
+    }
+    for child in children {
+        shift_raw_points(child, dx, dy);
+    }
 }
 
 impl SchDoc {
@@ -94,7 +143,10 @@ impl SchDoc {
                     points.push(s.at);
                     points.push(Point2::new(s.at.x + s.size.x, s.at.y + s.size.y));
                 }
-                Item::LibSymbols(_) | Item::Other(_) => {}
+                // Buses, images, rule areas — whatever the typed model does not decode
+                // still occupies the sheet and still carries connectivity.
+                Item::Other(raw) => raw_points(&raw.node, &mut points),
+                Item::LibSymbols(_) => {}
             }
         }
         Rect::bounding(&points)
@@ -158,9 +210,21 @@ impl SchDoc {
                     for pin in &mut s.pins {
                         shift_pose(&mut pin.at);
                     }
+                    // A hierarchical sheet re-emits its parsed node verbatim — the typed
+                    // fields are read-only — so the node itself is what has to move. Its
+                    // border pins are connection points; leaving them behind while the
+                    // rest of the drawing moves would tear the netlist apart.
+                    shift_raw_points(&mut s.raw.node, dx, dy);
                     s.raw.touch();
                 }
-                Item::LibSymbols(_) | Item::Other(_) => {}
+                Item::Other(raw) => {
+                    let before = raw.node.clone();
+                    shift_raw_points(&mut raw.node, dx, dy);
+                    if raw.node != before {
+                        raw.touch();
+                    }
+                }
+                Item::LibSymbols(_) => {}
             }
         }
         self.mark_edited();
@@ -184,18 +248,19 @@ impl SchDoc {
         let dy = GRID_50_MIL.snap(PAGE_MARGIN - bbox.min_y);
         self.translate(dx, dy);
 
-        let band = self.has_title_block().then_some(TITLE_BLOCK_BAND).unwrap_or(0.0);
+        let band = if self.has_title_block() {
+            TITLE_BLOCK_BAND
+        } else {
+            0.0
+        };
         let need = [
             bbox.width() + 2.0 * PAGE_MARGIN,
             bbox.height() + 2.0 * PAGE_MARGIN + band,
         ];
-        let fit = STANDARD_PAGES
-            .iter()
-            .find(|(_, size)| size[0] >= need[0] && size[1] >= need[1]);
-        let (page, standard) = match fit {
+        let (page, standard) = match standard_page(need) {
             Some((name, size)) => {
-                self.set_paper(tagged("paper", vec![quoted(*name)]));
-                (*size, true)
+                self.set_paper(tagged("paper", vec![quoted(name)]));
+                (size, true)
             }
             None => {
                 self.set_paper(tagged(
@@ -232,5 +297,63 @@ impl SchDoc {
             self.insert_item(Item::Other(Box::new(crate::model::Retained::owned(paper))));
         }
         self.mark_edited();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A sheet whose content sits at negative coordinates — what a graft leaves behind.
+    fn off_page_sheet() -> SchDoc {
+        SchDoc::parse(
+            "(kicad_sch\n\
+             \t(version 20250114)\n\
+             \t(paper \"User\" 657.78 411.16)\n\
+             \t(wire (pts (xy -76.2 -15.24) (xy -76.2 20.32)) (uuid \"w1\"))\n\
+             \t(label \"VBUS\" (at -76.2 -15.24 0) (uuid \"l1\"))\n\
+             )\n",
+        )
+        .expect("parse")
+    }
+
+    #[test]
+    fn refit_brings_content_inside_the_frame_and_picks_a_standard_page() {
+        let mut doc = off_page_sheet();
+        let fit = doc.refit_page().expect("content to fit");
+        assert!(fit.standard, "this content belongs on a standard page");
+        assert_eq!(fit.page, [297.0, 210.0]);
+        let bbox = doc.content_bbox().expect("content");
+        assert!(
+            bbox.min_x >= PAGE_MARGIN - 1.27 && bbox.min_y >= PAGE_MARGIN - 1.27,
+            "content must start at the margin, got {bbox:?}"
+        );
+    }
+
+    #[test]
+    fn refit_keeps_the_drawing_rigid() {
+        let mut doc = off_page_sheet();
+        let before = crate::connect::extract(&doc);
+        doc.refit_page();
+        let after = crate::connect::extract(&doc);
+        assert!(
+            crate::Netlist::diff(&before, &after).is_empty(),
+            "a rigid shift cannot change connectivity"
+        );
+    }
+
+    #[test]
+    fn content_past_a2_keeps_a_fitted_user_page() {
+        let mut doc = SchDoc::parse(
+            "(kicad_sch\n\
+             \t(version 20250114)\n\
+             \t(paper \"A4\")\n\
+             \t(wire (pts (xy 0 0) (xy 900 500)) (uuid \"w1\"))\n\
+             )\n",
+        )
+        .expect("parse");
+        let fit = doc.refit_page().expect("content to fit");
+        assert!(!fit.standard, "content this large has no standard page");
+        assert!(fit.page[0] > 900.0 && fit.page[1] > 500.0);
     }
 }

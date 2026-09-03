@@ -148,7 +148,11 @@ fn ring_offsets(ring: i32) -> Vec<(i32, i32)> {
 /// Clearance is measured on [`body_rect`], the space the drawing occupies. The text pad
 /// is a claim the field solver may abandon, and pricing it here made a 5 mm phantom touch
 /// worth a sheet-width of travel.
-fn legalize(movable: &mut [Item], fixed: &[Item], obstacles: &[Rect]) {
+///
+/// Returns how many parts are still overlapping something when it is done. Both passes
+/// give up rather than fling a part across the sheet, so this is how the caller learns
+/// the sheet it is about to commit has a collision on it.
+fn legalize(movable: &mut [Item], fixed: &[Item], obstacles: &[Rect]) -> usize {
     let blockers: Vec<Rect> = fixed
         .iter()
         .map(|it| body_rect(it, it.at))
@@ -156,40 +160,76 @@ fn legalize(movable: &mut [Item], fixed: &[Item], obstacles: &[Rect]) {
         .collect();
     slide_block(movable, &blockers);
     nudge_parts(movable, fixed, obstacles);
+    movable
+        .iter()
+        .enumerate()
+        .filter(|(i, it)| {
+            let r = body_rect(it, it.at);
+            blockers.iter().any(|o| r.overlaps(o))
+                || movable
+                    .iter()
+                    .enumerate()
+                    .any(|(j, other)| j != *i && r.overlaps(&body_rect(other, other.at)))
+        })
+        .count()
 }
 
 /// Slide the whole movable set to the nearest offset where its bounding box clears every
 /// blocker. A clear bbox means every member is clear, so this is one rect test per
 /// candidate offset; a block already in free sheet does not move.
+///
+/// Among the offsets that clear, the one that leaves the SMALLEST sheet wins over the
+/// merely nearest: a block flung 700 mm sideways clears everything and costs the sheet a
+/// page size, which is the same defect measured from the other end. The search widens ring
+/// by ring and keeps the best landing of the first ring that has one, so it still stops as
+/// soon as the block has somewhere to go.
 fn slide_block(movable: &mut [Item], blockers: &[Rect]) {
-    let Some(bbox) = Rect::bounding(
-        &movable
-            .iter()
-            .flat_map(|it| {
-                let r = body_rect(it, it.at);
-                [Point2::new(r.min_x, r.min_y), Point2::new(r.max_x, r.max_y)]
-            })
-            .collect::<Vec<_>>(),
-    ) else {
+    let corners = |it: &Item| {
+        let r = body_rect(it, it.at);
+        [Point2::new(r.min_x, r.min_y), Point2::new(r.max_x, r.max_y)]
+    };
+    let Some(bbox) = Rect::bounding(&movable.iter().flat_map(corners).collect::<Vec<_>>()) else {
         return;
     };
-    let shifted = |dx: f64, dy: f64| Rect::new(bbox.min_x + dx, bbox.min_y + dy, bbox.max_x + dx, bbox.max_y + dy);
+    let shifted = |dx: f64, dy: f64| {
+        Rect::new(
+            bbox.min_x + dx,
+            bbox.min_y + dy,
+            bbox.max_x + dx,
+            bbox.max_y + dy,
+        )
+    };
     let clear = |r: &Rect| !blockers.iter().any(|o| r.overlaps(o));
     if clear(&bbox) {
         return;
     }
+    // How much sheet the landing costs: the extent of everything on it afterwards.
+    let sheet = blockers.iter().fold(bbox, |acc, o| {
+        Rect::new(
+            acc.min_x.min(o.min_x),
+            acc.min_y.min(o.min_y),
+            acc.max_x.max(o.max_x),
+            acc.max_y.max(o.max_y),
+        )
+    });
+    let cost = |r: &Rect| {
+        let w = sheet.max_x.max(r.max_x) - sheet.min_x.min(r.min_x);
+        let h = sheet.max_y.max(r.max_y) - sheet.min_y.min(r.min_y);
+        w + h
+    };
     let landed = (1..=BLOCK_RINGS).find_map(|ring| {
-        ring_offsets(ring).into_iter().find_map(|(dx, dy)| {
-            let (dx, dy) = (dx as f64 * BLOCK_WALK, dy as f64 * BLOCK_WALK);
-            clear(&shifted(dx, dy)).then_some((dx, dy))
-        })
+        ring_offsets(ring)
+            .into_iter()
+            .map(|(dx, dy)| (dx as f64 * BLOCK_WALK, dy as f64 * BLOCK_WALK))
+            .filter(|&(dx, dy)| clear(&shifted(dx, dy)))
+            .min_by(|a, b| cost(&shifted(a.0, a.1)).total_cmp(&cost(&shifted(b.0, b.1))))
     });
     let Some((dx, dy)) = landed else { return };
+    // ONE snapped delta for the whole block: snapping each part independently would move
+    // them by different amounts and break the arrangement the engine just searched for.
+    let (dx, dy) = (geom::GRID_50_MIL.snap(dx), geom::GRID_50_MIL.snap(dy));
     for it in movable.iter_mut() {
-        it.at = Point2::new(
-            geom::GRID_50_MIL.snap(it.at[0] + dx),
-            geom::GRID_50_MIL.snap(it.at[1] + dy),
-        );
+        it.at = Point2::new(it.at[0] + dx, it.at[1] + dy);
     }
 }
 
@@ -299,10 +339,12 @@ pub fn arrange(problem: RegionProblem) -> RegionOutput {
 
     // With nothing to avoid, the engine's own overlap handling is authoritative — walking
     // parts apart here would only reverse the placement it spent its whole search tuning.
-    if !obstacles.is_empty() || !fixed.is_empty() {
+    let stuck = if obstacles.is_empty() && fixed.is_empty() {
+        0
+    } else {
         let (moved, held) = place.items.split_at_mut(movable);
-        legalize(moved, held, &obstacles);
-    }
+        legalize(moved, held, &obstacles)
+    };
 
     let result = {
         let realizer = RoutedSheetRealizer::new(env, &place.inc, &out.ir);
@@ -310,7 +352,10 @@ pub fn arrange(problem: RegionProblem) -> RegionOutput {
         PlaceResult {
             engine: out.result.engine,
             truthfulness_breaks: eval.truthfulness_breaks(&place.items),
-            warnings: eval.warnings(&place.items),
+            // A part legalisation could not clear is a readability defect like any other,
+            // and the realiser cannot see it: both passes give up rather than fling a part
+            // across the sheet, so this is the only place it is counted.
+            warnings: eval.warnings(&place.items) + stuck,
             crossings: eval.crossings(&place.items),
             cost: out.result.cost,
         }

@@ -748,8 +748,9 @@ impl SchematicWriter {
         for i in &self.instances {
             let h = i.half_extents.rotated_half_extents(i.angle);
             lo(i.at[0] - h[0], i.at[1] - h[1]);
-            for p in [i.ref_pos, i.val_pos].into_iter().flatten() {
-                lo(p.at[0] - 5.0, p.at[1] - 1.6);
+            for (p, text) in [(i.ref_pos, &i.refdes), (i.val_pos, &i.value)] {
+                let Some(p) = p else { continue };
+                lo(p.at[0] - text_width(text), p.at[1] - 1.6);
             }
         }
         for w in &self.wires {
@@ -768,7 +769,7 @@ impl SchematicWriter {
             lo(nc.at[0], nc.at[1]);
         }
         for t in &self.texts {
-            lo(t.at[0], t.at[1] - 1.6);
+            lo(t.at[0], t.at[1] - t.size);
         }
         for r in &self.rects {
             lo(r.start[0].min(r.end[0]), r.start[1].min(r.end[1]));
@@ -813,8 +814,12 @@ impl SchematicWriter {
                 i.at[0] + h[0],
                 i.at[1] + h[1],
             );
-            for p in [i.ref_pos, i.val_pos].into_iter().flatten() {
-                acc(p.at[0] - 5.0, p.at[1] - 1.6, p.at[0] + 5.0, p.at[1] + 1.6);
+            // Fields are boxed by the width they actually render at, both ways: a long
+            // MPN value overhangs a fixed allowance and then falls off the page.
+            for (p, text) in [(i.ref_pos, &i.refdes), (i.val_pos, &i.value)] {
+                let Some(p) = p else { continue };
+                let tw = text_width(text);
+                acc(p.at[0] - tw, p.at[1] - 1.6, p.at[0] + tw, p.at[1] + 1.6);
             }
         }
         for w in &self.wires {
@@ -836,7 +841,8 @@ impl SchematicWriter {
             acc(nc.at[0], nc.at[1], nc.at[0], nc.at[1]);
         }
         for t in &self.texts {
-            acc(t.at[0], t.at[1] - 1.6, t.at[0], t.at[1] + 1.6);
+            let tw = text_width(&t.text) * t.size / 1.27;
+            acc(t.at[0], t.at[1] - t.size, t.at[0] + tw, t.at[1] + t.size);
         }
         for r in &self.rects {
             acc(
