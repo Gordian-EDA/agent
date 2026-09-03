@@ -76,7 +76,6 @@ fn arrange_places_new_parts_without_disturbing_the_neighbours() {
     let ir = floorplan::infer_ir(&env, &design);
     let out = arrange(RegionProblem::new(
         &env,
-        &design,
         movable.clone(),
         fixed.clone(),
         obstacles.clone(),
@@ -149,7 +148,6 @@ fn arrange_with_no_neighbours_is_the_bulk_placement_path() {
     let ir = floorplan::infer_ir(&env, &design);
     let out = arrange(RegionProblem::new(
         &env,
-        &design,
         items,
         Vec::new(),
         Vec::new(),

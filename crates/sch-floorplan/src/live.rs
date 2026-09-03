@@ -292,7 +292,6 @@ fn place_parts_inner(
     let out = live_phase("place", movable.len(), design.nets.len(), || {
         region_arrange(RegionProblem::new(
             env,
-            &design,
             movable.clone(),
             held,
             obstacles(doc, &[]),
@@ -630,7 +629,6 @@ fn rearrange_inner(
         let out = live_phase("place", movable.len(), before.nets.len(), || {
             region_arrange(RegionProblem::new(
                 env,
-                &design,
                 movable.clone(),
                 held.clone(),
                 obstacles(doc, &owned),

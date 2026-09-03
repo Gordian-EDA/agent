@@ -268,12 +268,8 @@ pub(crate) fn prepare_writer(
     let ir = problem.ir.clone();
 
     let realizer = RoutedSheetRealizer::new(env, &problem.inc, &ir);
-    let evaluator = RoutedEvaluator::new(realizer, design);
-    let mut w = realizer.realize_writer(
-        design.name.as_deref(),
-        &problem.items,
-        RouteRealization::ShippedSheet,
-    )?;
+    let evaluator = RoutedEvaluator::new(realizer);
+    let mut w = realizer.realize_writer(design.name.as_deref(), &problem.items)?;
     add_orphan_label_columns(&mut w, design, &problem.inc);
     w.set_frame(true);
     w.prepare();
@@ -304,12 +300,7 @@ pub(crate) fn prepare_writer(
 }
 
 /// Build the complete schematic writer for a placed `items`: symbols (+mirror),
-/// no-connects on unconnected pins, all wiring (rails + routed signals), and ERC
-/// flags. Shared by the final emission and the refinement scorer so both judge
-/// the same geometry — except `fan_risers`, a finalize-only correctness repair
-/// (like `prepare`'s wire-split): two rails whose risers are collinear short, so
-/// the shipped sheet fans them apart, but the per-move scorer skips it (the fan
-/// is a transient mid-search artifact that would churn the placement otherwise).
+/// no-connects on unconnected pins, all wiring (rails + routed signals), and ERC flags.
 #[allow(clippy::too_many_arguments)]
 pub fn build_writer(
     env: &KicadInstallation,
@@ -318,7 +309,6 @@ pub fn build_writer(
     inc: &Incidence,
     ir: &LayoutIr,
     needs_flag: &BTreeSet<String>,
-    fan_risers: bool,
     beside: sch_model::route::RouteScene,
 ) -> io::Result<SchematicWriter> {
     let mut w = SchematicWriter::new();
@@ -374,7 +364,6 @@ pub fn build_writer(
         ir,
         needs_flag,
         &mut flag_points,
-        fan_risers,
     )?;
     for net in needs_flag {
         if let Some((at, angle)) = flag_points.get(net) {

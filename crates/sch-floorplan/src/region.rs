@@ -18,7 +18,6 @@
 use geom::{Point2, Rect};
 
 use kicad::KicadInstallation;
-use sch_check::Design;
 use sch_model::ir::LayoutIr;
 use sch_model::item::{Incidence, Item};
 use sch_model::place::PlaceResult;
@@ -43,10 +42,9 @@ const WALK_RINGS: i32 = 12;
 /// in the way.
 pub struct RegionProblem<'a> {
     pub env: &'a KicadInstallation,
-    pub design: &'a Design,
     /// The movable set — the parts to place.
     pub items: Vec<Item>,
-    /// Neighbours at their LIVE positions. Forced `frozen` + `preseeded`; they are never
+    /// Neighbours at their LIVE positions. Forced `preseeded`; they are never
     /// moved nor re-seeded.
     pub fixed: Vec<Item>,
     /// Everything else on the sheet the placement must avoid: label boxes, wires'
@@ -81,7 +79,6 @@ impl<'a> RegionProblem<'a> {
     /// Build a region problem, deriving the incidence from the parts themselves.
     pub fn new(
         env: &'a KicadInstallation,
-        design: &'a Design,
         items: Vec<Item>,
         fixed: Vec<Item>,
         obstacles: Vec<Rect>,
@@ -92,7 +89,6 @@ impl<'a> RegionProblem<'a> {
         let incidence = incidence(&all);
         Self {
             env,
-            design,
             items,
             fixed,
             obstacles,
@@ -268,7 +264,6 @@ fn nudge_parts(movable: &mut [Item], fixed: &[Item], obstacles: &[Rect]) {
 pub fn arrange(problem: RegionProblem) -> RegionOutput {
     let RegionProblem {
         env,
-        design,
         items,
         fixed,
         obstacles,
@@ -303,7 +298,7 @@ pub fn arrange(problem: RegionProblem) -> RegionOutput {
 
     let result = {
         let realizer = RoutedSheetRealizer::new(env, &incidence, &ir);
-        let eval = RoutedEvaluator::new(realizer, design);
+        let eval = RoutedEvaluator::new(realizer);
         PlaceResult {
             truthfulness_breaks: eval.truthfulness_breaks(&all),
             // A part legalisation could not clear is a readability defect like any other,

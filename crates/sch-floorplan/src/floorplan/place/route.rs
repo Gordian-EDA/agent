@@ -30,9 +30,8 @@ pub(crate) fn wire(
     ir: &LayoutIr,
     needs_flag: &BTreeSet<String>,
     flag_points: &mut BTreeMap<String, ([f64; 2], f64)>,
-    fan_risers: bool,
 ) -> io::Result<()> {
-    w.set_weld_guard(fan_risers);
+    w.set_weld_guard(true);
     let refdes_of = |i: usize| items[i].refdes.clone();
     // Endpoints of every net first, so all rails can share common bands.
     let mut net_eps: BTreeMap<String, Vec<([f64; 2], Dir)>> = BTreeMap::new();
@@ -55,65 +54,50 @@ pub(crate) fn wire(
     let rail_y_map = assign_rail_levels(&net_eps, ir);
 
     // Fan colliding rail risers off shared columns so two rails never merge into
-    // one net (the stacked-BGA-balls GND/1V2 short). Finalize-only: the per-move
-    // scorer passes `fan_risers = false` so transient mid-search collisions never
-    // perturb the placement.
-    let riser_offsets = if fan_risers {
-        plan_riser_offsets(&net_eps, ir, &rail_y_map)
-    } else {
-        BTreeMap::new()
-    };
+    // one net (the stacked-BGA-balls GND/1V2 short).
+    let riser_offsets = plan_riser_offsets(&net_eps, ir, &rail_y_map);
 
     // Solid symbol bodies for local power-glyph orientation. Unlike the padded
     // placement rectangles, these put pin tips on the boundary, so an outward power
     // marker merely touches its served body while an inward marker overlaps it.
     let power_keepouts: Vec<Rect> = items.iter().map(item_solid_rect).collect();
 
-    // 2-pin body segments (finalize-only, so the per-move scorer is untouched) so a
-    // rail riser can JOG around a part body it would otherwise be drawn straight
-    // through — the stacked same-rail cap column the SA can't always pull apart.
-    let bodies: Vec<([f64; 2], [f64; 2])> = if fan_risers {
-        items
-            .iter()
-            .filter(|it| it.geom.pins.len() == 2)
-            .filter_map(|it| {
-                let (n0, n1) = (&it.geom.pins[0].number, &it.geom.pins[1].number);
-                match (
-                    w.pin_dirs(env, &it.refdes, n0),
-                    w.pin_dirs(env, &it.refdes, n1),
-                ) {
-                    (Ok(d0), Ok(d1)) => match (d0.first(), d1.first()) {
-                        (Some((a, _)), Some((b, _))) => Some((*a, *b)),
-                        _ => None,
-                    },
+    // 2-pin body segments, so a rail riser can JOG around a part body it would
+    // otherwise be drawn straight through — the stacked same-rail cap column a
+    // greedy assignment can't always pull apart.
+    let bodies: Vec<([f64; 2], [f64; 2])> = items
+        .iter()
+        .filter(|it| it.geom.pins.len() == 2)
+        .filter_map(|it| {
+            let (n0, n1) = (&it.geom.pins[0].number, &it.geom.pins[1].number);
+            match (
+                w.pin_dirs(env, &it.refdes, n0),
+                w.pin_dirs(env, &it.refdes, n1),
+            ) {
+                (Ok(d0), Ok(d1)) => match (d0.first(), d1.first()) {
+                    (Some((a, _)), Some((b, _))) => Some((*a, *b)),
                     _ => None,
-                }
-            })
-            .collect()
-    } else {
-        Vec::new()
-    };
+                },
+                _ => None,
+            }
+        })
+        .collect();
 
     // Every pin on the sheet, tagged with its net, so a rail's lead-out/riser can never
     // be drawn onto a FOREIGN pin — KiCAD welds a wire that ends on or passes over one,
     // silently shorting the two nets. Phase B gives signal nets this guard through the
     // routing scene; rails are drawn before that scene exists, so they carry their own.
-    // Finalize-only (`fan_risers`), like the body jog, so the per-move scorer is untouched.
     // The sheet this block is being added beside is foreign in exactly the same way, and
     // its terminals are the ones the block cannot see at all.
-    let foreign_pins: Vec<([f64; 2], String)> = if fan_risers {
-        net_eps
-            .iter()
-            .flat_map(|(net, eps)| eps.iter().map(move |(p, _)| (*p, net.clone())))
-            .chain(
-                w.beside_terminals()
-                    .into_iter()
-                    .map(|(p, net)| ([p.x, p.y], net)),
-            )
-            .collect()
-    } else {
-        Vec::new()
-    };
+    let foreign_pins: Vec<([f64; 2], String)> = net_eps
+        .iter()
+        .flat_map(|(net, eps)| eps.iter().map(move |(p, _)| (*p, net.clone())))
+        .chain(
+            w.beside_terminals()
+                .into_iter()
+                .map(|(p, net)| ([p.x, p.y], net)),
+        )
+        .collect();
 
     // Phase A — rails (shared wires + stubs + power symbols), so their wires are
     // in the writer before we build the routing scene. `used_lanes` records every
@@ -143,7 +127,6 @@ pub(crate) fn wire(
                 &bodies,
                 &foreign_pins,
                 &power_keepouts,
-                fan_risers,
                 &mut used_lanes,
             )?;
         }
@@ -169,13 +152,12 @@ pub(crate) fn wire(
     // direction and detour around bodies (never through them).
     //
     // Long/crossing hops are delegated to net-label pairs (the human idiom) instead of
-    // dragging a literal wire across the sheet. FINALIZE-ONLY (`fan_risers`), so the
-    // per-move scorer's cost landscape — and thus the placement — is never perturbed.
-    // The policy is corpus-anchored (humans keep ~0% of wires >50mm and ~0 crossings),
-    // and applies to EVERY board, not just dense ones: the wire-dense small references
-    // (555/uart/grid) are exactly where literal long crossing wires read worst. Mirrors
-    // the spread-rail → local-power-symbol distribution above.
-    let label_policy = fan_risers.then(LabelPolicy::default);
+    // dragging a literal wire across the sheet. The policy is corpus-anchored (humans
+    // keep ~0% of wires >50mm and ~0 crossings), and applies to EVERY board, not just
+    // dense ones: the wire-dense small references (555/uart/grid) are exactly where
+    // literal long crossing wires read worst. Mirrors the spread-rail →
+    // local-power-symbol distribution above.
+    let label_policy = Some(LabelPolicy::default());
     for (net, eps) in &net_eps {
         if ir.rails.contains_key(net) {
             continue;
@@ -1567,7 +1549,6 @@ pub(crate) fn emit_rail(
     bodies: &[([f64; 2], [f64; 2])],
     foreign_pins: &[([f64; 2], String)],
     power_keepouts: &[Rect],
-    fan_risers: bool,
     used_lanes: &mut Vec<(f64, f64, f64, String)>,
 ) -> io::Result<()> {
     let Some(rail_y) = rail_y.filter(|_| eps.len() >= 3) else {
@@ -1577,11 +1558,7 @@ pub(crate) fn emit_rail(
     // the row it sits on, so the row is what is searched: the assigned row first, then
     // rows stepping OUTWARD from the parts. A trunk is drawn with no obstacle router of
     // its own, so a row it cannot own alone is rejected whole rather than patched.
-    let foreign_wires: Vec<(f64, f64, f64)> = if fan_risers {
-        foreign_rows(w, net)
-    } else {
-        Vec::new()
-    };
+    let foreign_wires: Vec<(f64, f64, f64)> = foreign_rows(w, net);
     let plan = |y: f64| {
         let attaches =
             plan_rail_attaches(net, eps, y, riser_offsets, bodies, foreign_pins, used_lanes);
@@ -1626,10 +1603,8 @@ pub(crate) fn emit_rail(
     if longest > RAIL_SEGMENT_MAX && !forced {
         return emit_local_power(env, w, net, eps, flag, power_keepouts);
     }
-    if fan_risers {
-        for (ep, &ax) in eps.iter().map(|(p, _)| p).zip(&attaches) {
-            used_lanes.push((ax, ep[1].min(rail_y), ep[1].max(rail_y), net.to_string()));
-        }
+    for (ep, &ax) in eps.iter().map(|(p, _)| p).zip(&attaches) {
+        used_lanes.push((ax, ep[1].min(rail_y), ep[1].max(rail_y), net.to_string()));
     }
     w.add_wire_on_net([span_lo, rail_y], [span_hi, rail_y], net);
     for ((ep, _dir), &ax) in eps.iter().zip(&attaches) {
@@ -2145,7 +2120,6 @@ mod tests {
             &[],
             &foreign,
             &[],
-            true,
             &mut Vec::new(),
         )
         .unwrap();

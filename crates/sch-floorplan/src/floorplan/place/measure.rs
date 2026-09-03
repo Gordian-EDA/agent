@@ -13,7 +13,6 @@
 
 use geom::{Point2, Rect};
 use kicad::KicadInstallation;
-use sch_check::model::Design;
 
 use crate::write::SchematicWriter;
 use sch_model::ir::LayoutIr;
@@ -25,21 +24,6 @@ use super::score::{
     count_body_crossings, count_collinear_body_crossings, count_crossings, count_foreign_taps, count_ic_body_crossings, count_merges,
     count_parallel_body_crossings, count_shorts,
 };
-
-/// Which routed realization to build.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RouteRealization {
-    /// Fast objective build used while scoring candidate moves.
-    CandidateScore,
-    /// Final shipped-sheet build, including riser fanning repairs.
-    ShippedSheet,
-}
-
-impl RouteRealization {
-    fn fan_risers(self) -> bool {
-        matches!(self, Self::ShippedSheet)
-    }
-}
 
 /// Builds/routes a candidate placement into a [`SchematicWriter`].
 #[derive(Clone, Copy)]
@@ -82,7 +66,6 @@ impl<'a> RoutedSheetRealizer<'a> {
         &self,
         title: Option<&str>,
         items: &[Item],
-        mode: RouteRealization,
     ) -> std::io::Result<SchematicWriter> {
         let mut needs_flag = compute_needs_flag(self.env, items, self.ir);
         needs_flag.retain(|net| !self.driven.iter().any(|d| d == net));
@@ -93,32 +76,26 @@ impl<'a> RoutedSheetRealizer<'a> {
             self.inc,
             self.ir,
             &needs_flag,
-            mode.fan_risers(),
             self.beside.cloned().unwrap_or_default(),
         )
     }
 }
 
-/// The routed [`CandidateEvaluator`]: every engine question answered off a real routed
-/// realization of the candidate. Bound to the design whose orphan label columns and title
-/// the shipped measures include, so the trait itself stays design-free.
+/// What a placed `items` measures once routed: its truthfulness breaks, its readability
+/// warnings and its crossings.
 pub struct RoutedEvaluator<'a> {
     realizer: RoutedSheetRealizer<'a>,
-    design: &'a Design,
 }
 
 impl<'a> RoutedEvaluator<'a> {
-    pub fn new(realizer: RoutedSheetRealizer<'a>, design: &'a Design) -> Self {
-        Self { realizer, design }
+    pub fn new(realizer: RoutedSheetRealizer<'a>) -> Self {
+        Self { realizer }
     }
 }
 
 impl RoutedEvaluator<'_> {
     pub fn warnings(&self, items: &[Item]) -> usize {
-        match self
-            .realizer
-            .realize_writer(None, items, RouteRealization::ShippedSheet)
-        {
+        match self.realizer.realize_writer(None, items) {
             Ok(mut w) => {
                 w.set_frame(true);
                 w.prepare();
@@ -128,64 +105,15 @@ impl RoutedEvaluator<'_> {
         }
     }
 
-    /// The `(warning count, content extent)` of `items` AS THE EMIT SHIPS IT — realized with
-    /// the emit's orphan label-columns added (edge labels for cross-ref nets), then text-solved
-    /// and reframed. The only faithful measure of a placement's final sprawl AND warnings: a
-    /// gate reading the raw pre-emit geometry misses the orphan columns, which both balloon a
-    /// dense board's bbox and collide into warnings. One realize pass serves both. `None` if
-    /// the route can't be built or the sheet is empty.
-    pub fn rendered(&self, items: &[Item]) -> Option<(usize, Rect)> {
-        let mut w = self
-            .realizer
-            .realize_writer(
-                self.design.name.as_deref(),
-                items,
-                RouteRealization::ShippedSheet,
-            )
-            .ok()?;
-        super::emit::add_orphan_label_columns(&mut w, self.design, self.realizer.inc);
-        w.set_frame(true);
-        w.prepare();
-        let warnings = w.layout_warnings().len();
-        w.content_bbox().map(|r| (warnings, r))
-    }
-
-    /// `(crossings, warnings, content extent)` of the shipped sheet in ONE realize pass — the
-    /// whole-placement gate (`lib.rs`) needs all three, and crossings are wire-based (invariant
-    /// to the orphan label-columns + text-solve that `rendered` adds), so they share a writer.
-    /// Halves the gate's realize cost vs calling `crossings` and `rendered` separately.
-    pub fn shipped(&self, items: &[Item]) -> Option<(Crossings, usize, Rect)> {
-        let mut w = self
-            .realizer
-            .realize_writer(
-                self.design.name.as_deref(),
-                items,
-                RouteRealization::ShippedSheet,
-            )
-            .ok()?;
-        let cr = shipped_crossings(self.realizer.env, &w, items);
-        super::emit::add_orphan_label_columns(&mut w, self.design, self.realizer.inc);
-        w.set_frame(true);
-        w.prepare();
-        let warnings = w.layout_warnings().len();
-        w.content_bbox().map(|r| (cr, warnings, r))
-    }
-
     pub fn crossings(&self, items: &[Item]) -> Crossings {
-        match self
-            .realizer
-            .realize_writer(None, items, RouteRealization::ShippedSheet)
-        {
+        match self.realizer.realize_writer(None, items) {
             Ok(w) => shipped_crossings(self.realizer.env, &w, items),
             Err(_) => Crossings::default(),
         }
     }
 
     pub fn truthfulness_breaks(&self, items: &[Item]) -> usize {
-        match self
-            .realizer
-            .realize_writer(None, items, RouteRealization::ShippedSheet)
-        {
+        match self.realizer.realize_writer(None, items) {
             Ok(w) => {
                 let wires = w.wires_with_nets();
                 count_merges(&wires, &w.junction_positions())
@@ -195,24 +123,9 @@ impl RoutedEvaluator<'_> {
             Err(_) => usize::MAX,
         }
     }
-
-    pub fn warning_messages(&self, items: &[Item]) -> Vec<String> {
-        match self
-            .realizer
-            .realize_writer(None, items, RouteRealization::ShippedSheet)
-        {
-            Ok(mut w) => {
-                w.set_frame(true);
-                w.prepare();
-                w.layout_warnings()
-            }
-            Err(_) => Vec::new(),
-        }
-    }
-
 }
 
-/// Body / IC / wire crossing triple read from a shipped (`fan_risers=true`) writer.
+/// Body / IC / wire crossing triple read from a routed writer.
 pub(crate) fn shipped_crossings(
     env: &KicadInstallation,
     w: &SchematicWriter,
