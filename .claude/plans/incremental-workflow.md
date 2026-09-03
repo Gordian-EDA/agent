@@ -268,3 +268,7 @@ re-place." Quality first; time later via parallel subagents; schematic too.
   `live_e2e::incremental_place_is_additive` (a graft moved an existing symbol via the whole-sheet
   page-fit) → lane/graft-additive on the merged tree; push held. sch-refusals-4 finished its 5 items
   (codex API 404 at the end → continuation running); pcb-seed-shorts running.
+- Codex backend outage (404s) killed sch-refusals-4 (5 commits done), pcb-seed-shorts (4 commits:
+  seed/intent placement shorts, nets refreshed before routing, staging state on synthetic
+  placements, delete_copper selectors) and graft-additive (no commits) → gating the first two myself
+  in background; graft-additive re-run as an Opus agent. Push of train 3 + these waits on the graft fix.
