@@ -4,8 +4,13 @@
 
 use std::time::Duration;
 
-use sch_model::engine::{PlacementEngine, SchematicPlaceProblem};
-use sch_model::place::Deadline;
+use geom::Rect;
+use sch_model::engine::{
+    CandidateEvaluator, CohesionPlan, PlacementEngine, RawMetrics, SchematicPlaceProblem,
+};
+use sch_model::ir::LayoutIr;
+use sch_model::item::{Incidence, Item};
+use sch_model::place::{Crossings, Deadline};
 use sch_model::stub::StubEvaluator;
 
 /// Poses are compared as plain numbers so a failure prints something readable.
@@ -37,6 +42,138 @@ fn small_problems() -> Vec<(String, SchematicPlaceProblem)> {
         .into_iter()
         .filter(|(_, p)| p.items.len() <= 15)
         .collect()
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PoseBits {
+    x: u64,
+    y: u64,
+    angle: u64,
+    mirror: bool,
+}
+
+impl From<&Item> for PoseBits {
+    fn from(item: &Item) -> Self {
+        Self {
+            x: item.at.x.to_bits(),
+            y: item.at.y.to_bits(),
+            angle: item.angle.to_bits(),
+            mirror: item.mirror,
+        }
+    }
+}
+
+struct FrozenPoseGuard<'a> {
+    inc: &'a Incidence,
+    ir: &'a LayoutIr,
+    frozen: Vec<(usize, PoseBits)>,
+}
+
+impl FrozenPoseGuard<'_> {
+    fn check(&self, items: &[Item]) {
+        for &(index, expected) in &self.frozen {
+            assert_eq!(
+                PoseBits::from(&items[index]),
+                expected,
+                "frozen region neighbor {} was selected as an anchor or move member",
+                items[index].refdes
+            );
+        }
+    }
+
+    fn stub(&self) -> StubEvaluator<'_> {
+        StubEvaluator::new(self.inc, self.ir)
+    }
+}
+
+impl CandidateEvaluator for FrozenPoseGuard<'_> {
+    fn measure(&self, items: &[Item]) -> RawMetrics {
+        self.check(items);
+        self.stub().measure(items)
+    }
+
+    fn warnings(&self, items: &[Item]) -> usize {
+        self.check(items);
+        self.stub().warnings(items)
+    }
+
+    fn crossings(&self, items: &[Item]) -> Crossings {
+        self.check(items);
+        self.stub().crossings(items)
+    }
+
+    fn truthfulness_breaks(&self, items: &[Item]) -> usize {
+        self.check(items);
+        self.stub().truthfulness_breaks(items)
+    }
+
+    fn rendered(&self, items: &[Item]) -> Option<(usize, Rect)> {
+        self.check(items);
+        self.stub().rendered(items)
+    }
+
+    fn shipped(&self, items: &[Item]) -> Option<(Crossings, usize, Rect)> {
+        self.check(items);
+        self.stub().shipped(items)
+    }
+
+    fn warning_messages(&self, items: &[Item]) -> Vec<String> {
+        self.check(items);
+        self.stub().warning_messages(items)
+    }
+
+    fn cohesion_plans(&self, items: &[Item]) -> Vec<CohesionPlan> {
+        self.check(items);
+        self.stub().cohesion_plans(items)
+    }
+
+    fn with_ir<'a>(&'a self, ir: &'a LayoutIr) -> Box<dyn CandidateEvaluator + 'a> {
+        Box::new(FrozenPoseGuard {
+            inc: self.inc,
+            ir,
+            frozen: self.frozen.clone(),
+        })
+    }
+}
+
+#[test]
+fn region_anneal_never_selects_frozen_neighbors_as_anchors() {
+    let (_, mut problem) = sch_model::golden_problems()
+        .into_iter()
+        .find(|(name, _)| name == "uart-level-translator")
+        .expect("UART fixture exists");
+    problem.ir.mirror.clear();
+    let anchors: Vec<usize> = problem
+        .items
+        .iter()
+        .enumerate()
+        .filter_map(|(i, item)| (item.geom.pins.len() >= 3).then_some(i))
+        .collect();
+    assert_eq!(anchors.len(), 2, "fixture must exercise two frozen anchors");
+    for (n, &index) in anchors.iter().enumerate() {
+        let item = &mut problem.items[index];
+        item.at = [101.6 + n as f64 * 50.8, 50.8 + n as f64 * 25.4].into();
+        item.angle = if n == 0 { 90.0 } else { 270.0 };
+        item.mirror = n == 1;
+        item.frozen = true;
+        item.preseeded = true;
+    }
+    let frozen: Vec<_> = anchors
+        .iter()
+        .map(|&index| (index, PoseBits::from(&problem.items[index])))
+        .collect();
+    let (inc, ir) = (problem.inc.clone(), problem.ir.clone());
+    let eval = FrozenPoseGuard {
+        inc: &inc,
+        ir: &ir,
+        frozen: frozen.clone(),
+    };
+
+    anneal_place::Anneal.place(&mut problem, &eval);
+
+    for (index, expected) in frozen {
+        assert_eq!(PoseBits::from(&problem.items[index]), expected);
+    }
 }
 
 #[test]

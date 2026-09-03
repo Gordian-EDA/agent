@@ -50,7 +50,9 @@ impl PlacementEngine for Anneal {
     ) -> PlacementOutput {
         let ir = problem.ir.clone();
         for it in &mut problem.items {
-            it.mirror = ir.mirror.contains(&it.refdes);
+            if !it.frozen {
+                it.mirror = ir.mirror.contains(&it.refdes);
+            }
         }
         let cells = assign_cells(&problem.items, &ir);
         // Every item is seeded from its cell; only a PRESEEDED item (the region adapter's
@@ -65,7 +67,9 @@ impl PlacementEngine for Anneal {
         if repair_relations(&mut problem.items, &ir) {
             decongest(&mut problem.items);
         }
-        normalize(&mut problem.items);
+        if !problem.items.iter().any(|it| it.frozen && it.preseeded) {
+            normalize(&mut problem.items);
+        }
 
         let _ = anneal_place(problem, &ir, eval, self.name());
 
@@ -237,13 +241,37 @@ fn greedy_score(eval: &dyn CandidateEvaluator, items: &[Item]) -> f64 {
     base_cost(&eval.measure(items))
 }
 
+fn movable_satellites(items: &[Item]) -> Vec<usize> {
+    (0..items.len())
+        .filter(|&i| items[i].geom.pins.len() < 3 && !items[i].frozen)
+        .collect()
+}
+
+fn movable_anchors(items: &[Item]) -> Vec<usize> {
+    (0..items.len())
+        .filter(|&i| items[i].geom.pins.len() >= 3 && !items[i].frozen)
+        .collect()
+}
+
+fn movable_anchor_blocks(
+    items: &[Item],
+    inc: &Incidence,
+    anchors: &[usize],
+    sats: &[usize],
+    ir: &LayoutIr,
+) -> BTreeMap<usize, Vec<usize>> {
+    let mut blocks = build_anchor_blocks(items, inc, anchors, sats, ir);
+    for members in blocks.values_mut() {
+        members.retain(|&i| !items[i].frozen);
+    }
+    blocks
+}
+
 /// Greedy hill-climb over the satellites' mm positions/orientation (the SA's seeded
 /// descent candidate). Local moves kept only on strict improvement of the base routed
 /// cost. Anchors hold.
 fn refine_items(problem: &SchematicPlaceProblem, eval: &dyn CandidateEvaluator, items: &mut [Item]) {
-    let satellites: Vec<usize> = (0..items.len())
-        .filter(|&i| items[i].geom.pins.len() < 3 && !items[i].frozen)
-        .collect();
+    let satellites = movable_satellites(items);
     if satellites.is_empty() {
         return;
     }
@@ -351,9 +379,7 @@ fn anchor_x(items: &[Item], inc: &Incidence, i: usize) -> Option<f64> {
 /// Sub-grid compaction: slide each satellite one grid step toward the centroid where it
 /// does not raise the base routed cost and creates no overlap.
 fn compact(eval: &dyn CandidateEvaluator, items: &mut [Item]) {
-    let sats: Vec<usize> = (0..items.len())
-        .filter(|&i| items[i].geom.pins.len() < 3 && !items[i].frozen)
-        .collect();
+    let sats = movable_satellites(items);
     if sats.is_empty() {
         return;
     }
@@ -418,9 +444,7 @@ fn polish(problem: &SchematicPlaceProblem, eval: &dyn CandidateEvaluator, items:
 /// Free per-axis nudge: slide each satellite ±1 grid in x and y, keeping any move that
 /// lowers the base routed cost without creating a clearance-padded overlap.
 fn free_nudge(eval: &dyn CandidateEvaluator, items: &mut [Item]) {
-    let sats: Vec<usize> = (0..items.len())
-        .filter(|&i| items[i].geom.pins.len() < 3 && !items[i].frozen)
-        .collect();
+    let sats = movable_satellites(items);
     if sats.is_empty() {
         return;
     }
@@ -471,6 +495,9 @@ fn align_to_pins(_problem: &SchematicPlaceProblem, eval: &dyn CandidateEvaluator
         target,
     } in plans
     {
+        if items[si].frozen {
+            continue;
+        }
         let axis = if vertical { 0 } else { 1 };
         let orig = items[si].at;
         let goal = geom::GRID_50_MIL.snap(target[axis]);
@@ -1041,12 +1068,8 @@ fn anneal_items(
             base_cost(&eval.measure(items))
         }
     };
-    let sats: Vec<usize> = (0..items.len())
-        .filter(|&i| items[i].geom.pins.len() < 3 && !items[i].frozen)
-        .collect();
-    let anchors: Vec<usize> = (0..items.len())
-        .filter(|&i| items[i].geom.pins.len() >= 3)
-        .collect();
+    let sats = movable_satellites(items);
+    let anchors = movable_anchors(items);
     if sats.is_empty() {
         return;
     }
@@ -1054,7 +1077,7 @@ fn anneal_items(
     // idiom members it anchors. The block move (below) slides a whole functional unit
     // (an IC and its decoupling/crystal/tap parts) as one rigid group — the GLOBAL
     // structural move a per-part LOCAL search can't reach.
-    let blocks = build_anchor_blocks(items, inc, &anchors, &sats, ir);
+    let blocks = movable_anchor_blocks(items, inc, &anchors, &sats, ir);
     let siblings = multi_unit_siblings(items, &anchors);
     let orients = [Orient::Up, Orient::Down, Orient::Left, Orient::Right];
     let mut rng = Rng(seed);
@@ -1281,16 +1304,12 @@ fn anneal_locality(
     ir: &LayoutIr,
     seed: u64,
 ) {
-    let sats: Vec<usize> = (0..items.len())
-        .filter(|&i| items[i].geom.pins.len() < 3 && !items[i].frozen)
-        .collect();
-    let anchors: Vec<usize> = (0..items.len())
-        .filter(|&i| items[i].geom.pins.len() >= 3)
-        .collect();
+    let sats = movable_satellites(items);
+    let anchors = movable_anchors(items);
     if sats.is_empty() {
         return;
     }
-    let blocks = build_anchor_blocks(items, inc, &anchors, &sats, ir);
+    let blocks = movable_anchor_blocks(items, inc, &anchors, &sats, ir);
     let siblings = multi_unit_siblings(items, &anchors);
     let cohesion = cohesion_targets(items, inc, ir);
     let orients = [Orient::Up, Orient::Down, Orient::Left, Orient::Right];
@@ -1437,9 +1456,7 @@ fn anneal_locality(
 /// two parts into a readability-lint touch. The SHIPPED warnings are still measured
 /// by the one real route emit runs afterwards; this only positions.
 fn polish_proxy(items: &mut [Item], inc: &Incidence, ir: &LayoutIr, magnet: bool, gravity: bool) {
-    let sats: Vec<usize> = (0..items.len())
-        .filter(|&i| items[i].geom.pins.len() < 3 && !items[i].frozen)
-        .collect();
+    let sats = movable_satellites(items);
     if sats.is_empty() {
         return;
     }
@@ -1506,6 +1523,9 @@ fn magnet_proxy(
     let mut best = proxy_cost(items, inc, ir, cohesion);
     for (si, tgts) in cohesion {
         let si = *si;
+        if items[si].frozen {
+            continue;
+        }
         // Live centroid of the target pins.
         let (mut tx, mut ty) = (0.0f64, 0.0f64);
         for &(j, pgi) in tgts {
@@ -1562,16 +1582,12 @@ fn block_gravity_proxy(
     ir: &LayoutIr,
     cohesion: &[(usize, Vec<(usize, usize)>)],
 ) {
-    let anchors: Vec<usize> = (0..items.len())
-        .filter(|&i| items[i].geom.pins.len() >= 3)
-        .collect();
-    let sats: Vec<usize> = (0..items.len())
-        .filter(|&i| items[i].geom.pins.len() < 3 && !items[i].frozen)
-        .collect();
+    let anchors = movable_anchors(items);
+    let sats = movable_satellites(items);
     if anchors.is_empty() {
         return;
     }
-    let blocks = build_anchor_blocks(items, inc, &anchors, &sats, ir);
+    let blocks = movable_anchor_blocks(items, inc, &anchors, &sats, ir);
     let mut best = proxy_cost(items, inc, ir, cohesion);
     for _ in 0..12 {
         // Layout centroid (recomputed each sweep as modules pack inward).
@@ -1642,13 +1658,9 @@ fn block_gravity_proxy(
 /// parts), unlike the global authored grid which over-constrains and hurts. Finalize-only;
 /// positions only — connectivity untouched (router redraws; long inter-cell nets → labels).
 fn align_repeated_motifs(items: &mut [Item], inc: &Incidence, ir: &LayoutIr) -> bool {
-    let anchors: Vec<usize> = (0..items.len())
-        .filter(|&i| items[i].geom.pins.len() >= 3)
-        .collect();
-    let sats: Vec<usize> = (0..items.len())
-        .filter(|&i| items[i].geom.pins.len() < 3 && !items[i].frozen)
-        .collect();
-    let blocks = build_anchor_blocks(items, inc, &anchors, &sats, ir);
+    let anchors = movable_anchors(items);
+    let sats = movable_satellites(items);
+    let blocks = movable_anchor_blocks(items, inc, &anchors, &sats, ir);
     let blk_bbox = |items: &[Item], ai: usize| -> Rect {
         let mut corners = Vec::new();
         let mut extend = |k: usize| {
