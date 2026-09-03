@@ -651,7 +651,8 @@ fn invalid_payload_response(audit: sch_check::PayloadAudit, warnings: &[String])
             "note": "this lists EVERY fault in the payload — fix them all before retrying. \
                      `place_parts` appends to the sheet, so resubmit only the parts named \
                      here, not the whole payload. `input_errors` are unresolvable lib_ids \
-                     and pin conflicts; `duplicate_refs` give the next free refdes; \
+                     and pin conflicts; occupied references are repaired in `renamed`, while \
+                     `duplicate_refs` identify one ref used for incompatible declarations; \
                      `unknown_pins` name a key the symbol does not have; `footprint_mismatch` \
                      includes the closest same-library pad-set repair. `unplaced` parts could \
                      not be resolved at all and were left out. `dangling` pins are NOT fatal \
