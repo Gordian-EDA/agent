@@ -195,7 +195,7 @@ impl App {
     /// Tear a turn down and post its end indicator. The sole teardown point:
     /// clears `running`/`turn_started` and pushes one labelled,
     /// tinted system line saying *why* the turn stopped — a clean finish, the
-    /// iteration-cap cutoff, a user interruption, or an error — with the elapsed
+    /// user's request cap, a user interruption, or an error — with the elapsed
     /// time and tool-call count. `Compacted` posts no line (the shrink note from
     /// the `Compacted` event already covers it). Idempotent: a second call (the
     /// `TurnDone`/`TurnEnded` pair can't both reach here, but a stray repeat) is
@@ -215,22 +215,10 @@ impl App {
                 NoticeLevel::Plain,
                 format!("Worked for {elapsed}"),
             )),
-            TurnEndReason::ProviderRequestLimit { requests } => Some(Entry::notice(
+            TurnEndReason::MaxRequestsReached { requests } => Some(Entry::notice(
                 NoticeLevel::Plain,
                 format!(
-                    "Worked for {elapsed} — partial state handed back after {requests} model requests; continue when ready"
-                ),
-            )),
-            TurnEndReason::TimeLimit { elapsed_secs } => Some(Entry::notice(
-                NoticeLevel::Plain,
-                format!(
-                    "Worked for {elapsed} — partial state handed back after {elapsed_secs}s; continue when ready"
-                ),
-            )),
-            TurnEndReason::MutationTimedOut => Some(Entry::notice(
-                NoticeLevel::Error,
-                format!(
-                    "Worked for {elapsed} — stopped after a project mutation timed out (it may still be finishing)"
+                    "Worked for {elapsed} — stopped at your {requests}-request cap (agent.maxRequests)"
                 ),
             )),
             TurnEndReason::QualityGateFailed { failures } => Some(Entry::notice(

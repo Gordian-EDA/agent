@@ -119,11 +119,9 @@ pub async fn run(project_dir: PathBuf, config: GordianConfig, config_path: PathB
                 config.clone(),
             )
             .context("building the tool context for the project")?;
-            Some(Rc::new(Mutex::new(Agent::new(
-                client,
-                ctx,
-                system_prompt(),
-            ))))
+            let mut agent = Agent::new(client, ctx, system_prompt());
+            agent.set_max_requests(config.agent.max_requests);
+            Some(Rc::new(Mutex::new(agent)))
         }
         _ => None,
     };
@@ -266,13 +264,9 @@ impl Shell {
                 match result {
                     Ok(o) => match o.stop_reason {
                         StopReason::Completed => TurnEndReason::Completed,
-                        StopReason::ProviderRequestLimit { requests } => {
-                            TurnEndReason::ProviderRequestLimit { requests }
+                        StopReason::MaxRequestsReached { requests } => {
+                            TurnEndReason::MaxRequestsReached { requests }
                         }
-                        StopReason::TimeLimit { elapsed } => TurnEndReason::TimeLimit {
-                            elapsed_secs: elapsed.as_secs(),
-                        },
-                        StopReason::MutationTimedOut => TurnEndReason::MutationTimedOut,
                         StopReason::QualityGateFailed { failures } => {
                             TurnEndReason::QualityGateFailed { failures }
                         }

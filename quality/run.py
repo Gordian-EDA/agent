@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Run Gordian quality cases: deterministic facts first, one VLM judge second.
 
-A case has `rubric.txt`, `input/`, and either `prompt.txt` or `prompts.txt`.
-The prompt session goes to the real agent; the artifacts it leaves behind are
-measured, not guessed at. Every
+A case has `rubric.txt`, `input/`, and `prompt.txt`. One prompt is one agent run,
+carried to completion: the harness never asks the agent to continue. The
+artifacts it leaves behind are measured, not guessed at. Every
 schematic case records what actually happened to the file — which symbols moved,
 which fields were dropped, how the net partition changed, what KiCAD's own ERC
 says — and a rubric may assert on any of it:
@@ -1264,14 +1264,13 @@ def render_project(project, artifacts, prefix):
     return rendered
 
 
-def agent_command(project, prompt, multiple=False):
+def agent_command(project, prompt):
     configured = os.environ.get("GORDIAN_BIN")
-    tail = ["--input", "-"] if multiple else [prompt]
     if configured:
-        return [configured, "agent", "--project", str(project), "--no-review", *tail]
+        return [configured, "agent", "--project", str(project), "--no-review", prompt]
     return [
         "cargo", "run", "--release", "--quiet", "-p", "gordian", "--",
-        "agent", "--project", str(project), "--no-review", *tail,
+        "agent", "--project", str(project), "--no-review", prompt,
     ]
 
 
@@ -1291,16 +1290,11 @@ USAGE_REQUEST = re.compile(
     r"latency=(?P<latency>[0-9.]+)s$"
 )
 TOTAL_REQUESTS = re.compile(r"\bprovider requests:\s*(\d+)\b")
-REQUEST_CAP = re.compile(r"ProviderRequestLimit\s*\{\s*requests:\s*(\d+)\s*\}")
+USER_CAP = re.compile(r"MaxRequestsReached\s*\{\s*requests:\s*(\d+)\s*\}")
 REFUSAL = re.compile(r"\brefus(?:e|ed|al|ing)\b", re.IGNORECASE)
 TURN_STARTED = re.compile(r"^turn (?P<turn>\d+): (?P<prompt>.*)$")
 TURN_DONE = re.compile(r"^turn (?P<turn>\d+) done:")
 ASSISTANT_TEXT = re.compile(r"^assistant:\s*(.+)$", re.M)
-BUDGET_STOP = re.compile(
-    r"^(?:Stopped after (?:the turn spent its \d+s wall-clock budget|"
-    r"the model exhausted the per-turn request safety limit)\b"
-    r"|## Partial state\b)"
-)
 
 
 def parse_agent_stderr(stderr):
@@ -1311,22 +1305,18 @@ def parse_agent_stderr(stderr):
     usage_counts = []
     total_counts = []
     requests = []
-    turns = []
-    active_turn = None
+    transcript = []
+    recording = False
     for line in text.splitlines():
         stripped = line.strip()
-        if match := TURN_STARTED.match(stripped):
-            active_turn = {
-                "turn": int(match.group("turn")),
-                "prompt": match.group("prompt"),
-                "transcript": [stripped],
-            }
-            turns.append(active_turn)
+        if TURN_STARTED.match(stripped):
+            recording = True
+            transcript.append(stripped)
             continue
-        if active_turn is not None:
-            active_turn["transcript"].append(stripped)
+        if recording:
+            transcript.append(stripped)
             if TURN_DONE.match(stripped):
-                active_turn = None
+                recording = False
         if match := TOOL_STARTED.match(stripped):
             name = match.group("tool")
             attempted.append(name)
@@ -1404,7 +1394,7 @@ def parse_agent_stderr(stderr):
             repeated.append({"tool": attempted[index], "count": end - index})
         index = end
 
-    cap = REQUEST_CAP.search(text)
+    cap = USER_CAP.search(text)
     assistant_messages = ASSISTANT_TEXT.findall(text)
     final_assistant = assistant_messages[-1].strip() if assistant_messages else ""
     return {
@@ -1415,13 +1405,12 @@ def parse_agent_stderr(stderr):
             else len(requests) if requests
             else sum(usage_counts)
         ),
-        "turns": turns,
+        "transcript": transcript,
         "refusals": refusals,
         "errors": errors,
         "repeated_calls": repeated,
-        "request_cap_hit": int(cap.group(1)) if cap else None,
+        "user_cap_hit": int(cap.group(1)) if cap else None,
         "final_assistant": final_assistant,
-        "budget_stop": bool(BUDGET_STOP.match(final_assistant)),
     }
 
 
@@ -1441,41 +1430,11 @@ def phase_health(project, artifacts, number):
     return health
 
 
-def requested_outputs(prompt):
-    lowered = prompt.lower()
-    return {
-        "pcb": bool(re.search(r"\bpcb\b|\bboard\b", lowered)),
-        "fab": "fabrication" in lowered or "gerber" in lowered,
-    }
-
-
-def missing_deliverable(project, prompt, health):
-    requested = requested_outputs(prompt)
-    missing = []
-    if not health.get("schematic_created"):
-        missing.append("the schematic is missing")
-    elif health.get("erc_check_error") or health.get("erc_errors") != 0:
-        missing.append("a clean ERC check is missing")
-    if requested["pcb"]:
-        if not health.get("pcb_created"):
-            missing.append("the PCB is missing")
-        else:
-            if health.get("drc_check_error") or health.get("drc_errors") != 0:
-                missing.append("a clean DRC check is missing")
-            if health.get("unconnected_items") != 0:
-                missing.append("the PCB still has unconnected items")
-    if requested["fab"]:
-        fab = project / "fab"
-        if not fab.is_dir() or len(list(fab.glob("*"))) < 3:
-            missing.append("fabrication files are missing")
-    return missing
-
-
 def write_gallery(artifacts, phases):
     cards = []
     for phase in phases:
         caption = (
-            f"Turn {phase['turn']} · {phase['tool_call_count']} tool calls · "
+            f"{phase['label']} · {phase['tool_call_count']} tool calls · "
             f"ERC {phase['health'].get('erc_errors', '?')} errors · "
             f"DRC {phase['health'].get('drc_errors', '?')} errors"
         )
@@ -1491,7 +1450,7 @@ def write_gallery(artifacts, phases):
                     relative = Path(item["path"]).relative_to(artifacts)
                     pair.append(
                         f'<figure><img src="{html.escape(str(relative))}" '
-                        f'alt="Turn {phase["turn"]} {kind} {html.escape(label)}">'
+                        f'alt="{html.escape(phase["label"])} {kind} {html.escape(label)}">'
                         f'<figcaption>{html.escape(label)}</figcaption></figure>'
                     )
                 else:
@@ -1521,63 +1480,13 @@ figcaption{text-align:center;padding-top:6px}@media(max-width:800px){.pair{grid-
     (artifacts / "gallery.html").write_text(document, encoding="utf-8")
 
 
-def turn_record(number, prompt, result, seconds, parsed, phase):
-    transcript = parsed.get("turns", [])
-    transcript = transcript[-1].get("transcript", []) if transcript else []
-    return {
-        "turn": number,
-        "prompt": prompt,
-        "exit": result.returncode,
-        "seconds": seconds,
-        "requests": parsed["request_count"],
-        "request_details": parsed["requests"],
-        "tool_calls": parsed["tool_calls"],
-        "refusals": parsed["refusals"],
-        "errors": parsed["errors"],
-        "repeated_calls": parsed["repeated_calls"],
-        "request_cap_hit": parsed["request_cap_hit"],
-        "final_assistant": parsed["final_assistant"],
-        "budget_stop": parsed["budget_stop"],
-        "health": phase["health"],
-        "renders": phase["renders"],
-        "transcript": transcript,
-    }
-
-
-def aggregate_turn_facts(turns):
-    requests = []
-    calls = []
-    refusals = []
-    errors = []
-    repeated = []
-    for turn in turns:
-        requests.extend({"turn": turn["turn"], **item} for item in turn["request_details"])
-        calls.extend({"turn": turn["turn"], **item} for item in turn["tool_calls"])
-        refusals.extend({"turn": turn["turn"], **item} for item in turn["refusals"])
-        errors.extend({"turn": turn["turn"], **item} for item in turn["errors"])
-        repeated.extend({"turn": turn["turn"], **item} for item in turn["repeated_calls"])
-    return {
-        "turns": turns,
-        "request_count": sum(turn["requests"] for turn in turns),
-        "requests": requests,
-        "tool_call_details": calls,
-        "refusals": refusals,
-        "errors": errors,
-        "repeated_calls": repeated,
-        "request_cap_hit": next(
-            (turn["request_cap_hit"] for turn in reversed(turns) if turn["request_cap_hit"]),
-            None,
-        ),
-    }
-
-
-def run_agent(project, prompt, timeout, env, multiple=False):
-    args = agent_command(project, prompt, multiple)
+def run_agent(project, prompt, timeout, env):
+    """Run one agent case to completion. `timeout` is None unless the operator
+    set `QUALITY_TIMEOUT`: the loop has no budget of its own and the harness
+    imposes none either."""
+    args = agent_command(project, prompt)
     try:
-        return command(
-            args, timeout=timeout, check=False, env=env,
-            input_text=prompt if multiple else None,
-        )
+        return command(args, timeout=timeout, check=False, env=env)
     except subprocess.TimeoutExpired as error:
         stdout = error.stdout or ""
         stderr = error.stderr or ""
@@ -1589,23 +1498,9 @@ def run_agent(project, prompt, timeout, env, multiple=False):
         return subprocess.CompletedProcess(args, 124, stdout, stderr)
 
 
-def prompt_lines(path):
-    return [
-        line.strip()
-        for line in path.read_text(encoding="utf-8").splitlines()
-        if line.strip() and line.strip() != "---" and not line.lstrip().startswith("#")
-    ]
-
-
-def run_case(case, output_root, max_turns):
+def run_case(case, output_root):
     started = time.time()
-    prompts_path = case / "prompts.txt"
-    queued_prompts = (
-        prompt_lines(prompts_path)
-        if prompts_path.is_file()
-        else [(case / "prompt.txt").read_text(encoding="utf-8").strip()]
-    )
-    prompt = "\n".join(queued_prompts)
+    prompt = (case / "prompt.txt").read_text(encoding="utf-8").strip()
     rubric, checks = parse_rubric((case / "rubric.txt").read_text(encoding="utf-8"))
     run_dir = output_root / case.name
     if run_dir.exists():
@@ -1630,72 +1525,51 @@ def run_case(case, output_root, max_turns):
     shutil.copytree(project, before_project)
     renders = {"before": render_project(project, artifacts, "before")}
 
-    turns = []
-    phases = []
-    stdout_parts = []
-    stderr_parts = []
-    result = None
-    thread_id = f"quality-{case.name}-{int(started)}"
-    current_prompt = queued_prompts.pop(0)
-    while current_prompt and len(turns) < max_turns:
-        number = len(turns) + 1
-        agent_started = time.time()
-        result = run_agent(
-            project,
-            current_prompt,
-            int(os.environ.get("QUALITY_TIMEOUT", "900")),
-            {**os.environ, "GORDIAN_THREAD_ID": thread_id},
-            multiple=number > 1 or prompts_path.is_file(),
-        )
-        seconds = round(time.time() - agent_started, 1)
-        (artifacts / f"agent.turn-{number}.stdout.txt").write_text(
-            result.stdout, encoding="utf-8"
-        )
-        (artifacts / f"agent.turn-{number}.stderr.txt").write_text(
-            result.stderr, encoding="utf-8"
-        )
-        stdout_parts.append(result.stdout)
-        stderr_parts.append(result.stderr)
-        parsed = parse_agent_stderr(result.stderr)
-        phase = {
-            "turn": number,
-            "tool_call_count": len(parsed["tool_calls"]),
-            "health": phase_health(project, artifacts, number),
-            "renders": render_project(project, artifacts, f"phase-{number}"),
-        }
-        phases.append(phase)
-        turns.append(turn_record(number, current_prompt, result, seconds, parsed, phase))
-        write_gallery(artifacts, phases)
-        partial = {
-            "case": case.name,
-            "started_utc": started_utc,
-            "_started_epoch": started,
-            "agent_exit": result.returncode,
-            "agent_seconds": round(sum(turn["seconds"] for turn in turns), 1),
-            "elapsed_seconds": round(time.time() - started, 1),
-            **aggregate_turn_facts(turns),
-        }
-        result_path.write_text(json.dumps(partial, indent=2) + "\n", encoding="utf-8")
-
-        if queued_prompts:
-            current_prompt = queued_prompts.pop(0)
-            continue
-        missing = missing_deliverable(project, prompt, phase["health"])
-        if parsed["budget_stop"] and missing and len(turns) < max_turns:
-            current_prompt = "continue from the current state: " + "; ".join(missing)
-            continue
-        current_prompt = None
-
-    if result is None:
-        raise RuntimeError("case supplied no agent prompts")
-    agent_seconds = round(sum(turn["seconds"] for turn in turns), 1)
-    (artifacts / "agent.stdout.txt").write_text(
-        "\n".join(stdout_parts), encoding="utf-8"
+    agent_started = time.time()
+    result = run_agent(
+        project,
+        prompt,
+        int(os.environ["QUALITY_TIMEOUT"]) if os.environ.get("QUALITY_TIMEOUT") else None,
+        {**os.environ, "GORDIAN_THREAD_ID": f"quality-{case.name}-{int(started)}"},
     )
-    (artifacts / "agent.stderr.txt").write_text(
-        "\n".join(stderr_parts), encoding="utf-8"
+    agent_seconds = round(time.time() - agent_started, 1)
+    (artifacts / "agent.stdout.txt").write_text(result.stdout, encoding="utf-8")
+    (artifacts / "agent.stderr.txt").write_text(result.stderr, encoding="utf-8")
+    parsed = parse_agent_stderr(result.stderr)
+    phases = [{
+        "label": "After the run",
+        "tool_call_count": len(parsed["tool_calls"]),
+        "health": phase_health(project, artifacts, 1),
+        "renders": render_project(project, artifacts, "phase-1"),
+    }]
+    turn_facts = {
+        "agent_exit": result.returncode,
+        "request_count": parsed["request_count"],
+        "requests": parsed["requests"],
+        "tool_call_details": parsed["tool_calls"],
+        "refusals": parsed["refusals"],
+        "errors": parsed["errors"],
+        "repeated_calls": parsed["repeated_calls"],
+        "user_cap_hit": parsed["user_cap_hit"],
+        "final_assistant": parsed["final_assistant"],
+        "transcript": parsed["transcript"],
+    }
+    # failure costs the verdicts and not the whole run.
+    result_path.write_text(
+        json.dumps(
+            {
+                "case": case.name,
+                "started_utc": started_utc,
+                "_started_epoch": started,
+                "agent_seconds": agent_seconds,
+                "elapsed_seconds": round(time.time() - started, 1),
+                **turn_facts,
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
     )
-    turn_facts = aggregate_turn_facts(turns)
 
     facts, detail = deterministic_facts(project, before_project, artifacts, result)
     renders["after"] = phases[-1]["renders"]
@@ -1785,27 +1659,19 @@ def run_case(case, output_root, max_turns):
         except Exception as error:
             report["judge"] = {"score": None, "issues": [], "error": str(error)}
 
-    aggregate_diagnosis = {"struggles": [], "wishes": []}
-    for turn in turns:
-        if llm is None:
-            diagnosis = {"error": "judge credentials unavailable"}
-        else:
-            try:
-                transcript = (
-                    artifacts / f"agent.turn-{turn['turn']}.stderr.txt"
-                ).read_text(encoding="utf-8", errors="replace")
-                diagnosis = self_diagnose(turn["prompt"], transcript, llm)
-            except Exception as error:
-                diagnosis = {"error": str(error)}
-        turn["self_diagnosis"] = diagnosis
-        aggregate_diagnosis["struggles"].extend(
-            f"turn {turn['turn']}: {item}" for item in diagnosis.get("struggles", [])
-        )
-        aggregate_diagnosis["wishes"].extend(
-            f"turn {turn['turn']}: {item}" for item in diagnosis.get("wishes", [])
-        )
-    report["turns"] = turns
-    report["self_diagnosis"] = aggregate_diagnosis
+    if llm is None:
+        report["self_diagnosis"] = {"error": "judge credentials unavailable"}
+    else:
+        try:
+            report["self_diagnosis"] = self_diagnose(
+                prompt,
+                (artifacts / "agent.stderr.txt").read_text(
+                    encoding="utf-8", errors="replace"
+                ),
+                llm,
+            )
+        except Exception as error:
+            report["self_diagnosis"] = {"error": str(error)}
 
     report["judge_score"] = report["judge"]["score"]
     if report["judge_score"] is not None:
@@ -1903,23 +1769,21 @@ def findings_for(report):
 
     for signal_name, label in (("errors", "error"), ("refusals", "refusal")):
         for signal in report.get(signal_name, []):
-            turn = f"turn {signal['turn']} " if signal.get("turn") else ""
             findings.append(
                 (
                     "tool-contract",
-                    f"{turn}tool `{signal['tool']}` {label}: {signal['message']}",
+                    f"tool `{signal['tool']}` {label}: {signal['message']}",
                 )
             )
     for smell in report.get("repeated_calls", []):
-        turn = f"turn {smell['turn']} " if smell.get("turn") else ""
         findings.append(
             (
                 "prompt",
-                f"{turn}loop smell: tool `{smell['tool']}` called {smell['count']} times in a row",
+                f"loop smell: tool `{smell['tool']}` called {smell['count']} times in a row",
             )
         )
 
-    cap = report.get("request_cap_hit")
+    cap = report.get("user_cap_hit")
     cost_tag = "prompt" if cap or report.get("repeated_calls") else "variance"
     cost = (
         f"cost: {report.get('elapsed_seconds', 0):.1f}s elapsed, "
@@ -1927,7 +1791,7 @@ def findings_for(report):
         f"{report.get('request_count', 0)} provider requests"
     )
     if cap:
-        cost += f"; request cap hit at {cap}"
+        cost += f"; stopped at the user-set cap of {cap} requests"
     findings.append((cost_tag, cost))
     if report.get("requests"):
         latencies = ", ".join(
@@ -1966,15 +1830,9 @@ def write_case_findings(run_dir, report):
             lines.append(f"- Human change: {change}")
         if verdict.get("error"):
             lines.append(f"- Unavailable: {verdict['error']}")
-    for turn in report.get("turns", []):
-        lines.extend([
-            "",
-            f"## Turn {turn['turn']}: {turn['prompt']}",
-            "",
-            "````text",
-            *turn["transcript"],
-            "````",
-        ])
+    transcript = report.get("transcript")
+    if transcript:
+        lines.extend(["", "## Agent transcript", "", "````text", *transcript, "````"])
     (run_dir / "findings.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
@@ -2039,7 +1897,7 @@ def aggregate_findings(reports, output_root, suite, questions):
 
 COLUMNS = [
     "case", "score", "sch critic", "pcb critic", "human look", "checks", "erc e/w",
-    "moved", "lost", "added", "pcb moved", "turns", "agent s", "elapsed s",
+    "moved", "lost", "added", "pcb moved", "agent s", "elapsed s",
 ]
 
 
@@ -2079,7 +1937,6 @@ def row(report):
         count(report, "fields_lost"),
         count(report, "symbols_added"),
         count(report, "board_parts_moved"),
-        str(len(report.get("turns", []))),
         f"{report.get('agent_seconds', 0):.0f}s",
         f"{report['elapsed_seconds']:.0f}s",
     ]
@@ -2119,12 +1976,6 @@ def main():
     )
     parser.add_argument("--scoreboard", type=Path, help="write the scoreboard here too")
     parser.add_argument(
-        "--max-turns",
-        type=int,
-        default=4,
-        help="maximum agent turns per case, including budget continuations (default: 4)",
-    )
-    parser.add_argument(
         "--question",
         action="append",
         default=[],
@@ -2132,9 +1983,6 @@ def main():
     )
     parser.add_argument("--list", action="store_true")
     args = parser.parse_args()
-    if args.max_turns < 1:
-        parser.error("--max-turns must be at least 1")
-
     available = {path.name: path for path in CASES.iterdir() if path.is_dir()}
     if args.list:
         print("\n".join(select(available, args)))
@@ -2153,7 +2001,7 @@ def main():
     reports = []
     for name in selected:
         try:
-            report = run_case(available[name], output, args.max_turns)
+            report = run_case(available[name], output)
         except Exception as error:
             report = recover_failed_report(output, name, error)
             print(f"{name}: {error}", file=sys.stderr)

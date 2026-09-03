@@ -188,6 +188,10 @@ pub struct AgentConfig {
     pub post_commit_review: bool,
     /// Maximum number of review-driven follow-up fix turns after a commit.
     pub review_fix_rounds: u8,
+    /// Optional user-set ceiling on model requests per turn. `None` (the
+    /// default) lets a turn run until the model stops calling tools; the agent
+    /// loop imposes no time or request limit of its own.
+    pub max_requests: Option<usize>,
 }
 
 impl Default for AgentConfig {
@@ -195,12 +199,19 @@ impl Default for AgentConfig {
         Self {
             post_commit_review: true,
             review_fix_rounds: 1,
+            max_requests: None,
         }
     }
 }
 
 impl AgentConfig {
-    fn validate(&self, _path: &'static str) -> Result<(), ConfigError> {
+    fn validate(&self, path: &'static str) -> Result<(), ConfigError> {
+        if self.max_requests == Some(0) {
+            return Err(ConfigError::new(
+                format!("{path}.maxRequests"),
+                "must be at least 1, or absent for no cap",
+            ));
+        }
         Ok(())
     }
 }
@@ -326,6 +337,28 @@ fn validate_optional_path(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The request cap is opt-in and must be a usable number when present.
+    #[test]
+    fn agent_max_requests_is_absent_by_default_and_validated_when_set() {
+        let mut config = GordianConfig::default();
+        assert_eq!(config.agent.max_requests, None);
+        config.validate().unwrap();
+
+        config.agent.max_requests = Some(0);
+        assert_eq!(
+            config.validate().unwrap_err().path,
+            "agent.maxRequests",
+            "a zero cap is rejected"
+        );
+
+        config.agent.max_requests = Some(200);
+        config.validate().unwrap();
+
+        let parsed: GordianConfig =
+            toml::from_str("[agent]\nmaxRequests = 120\n").expect("camelCase key");
+        assert_eq!(parsed.agent.max_requests, Some(120));
+    }
 
     #[test]
     fn default_config_is_valid() {
