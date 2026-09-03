@@ -459,7 +459,7 @@ pub(crate) fn route_signal(
                 }
             }
             for seg in p.windows(2) {
-                emit_routed_segment(w, scene, net, seg[0], seg[1]);
+                emit_routed_segment(w, scene, net, seg[0], seg[1], finalize);
             }
             paths.push(p);
             uf.union_to(i, j);
@@ -480,7 +480,7 @@ pub(crate) fn route_signal(
         && uf.find(0) != uf.find(pi)
         && safe_forced_single_port_stub(pts[0], pts[pi], net, scene)
     {
-        emit_routed_segment(w, scene, net, pts[0], pts[pi]);
+        emit_routed_segment(w, scene, net, pts[0], pts[pi], finalize);
         uf.union_to(0, pi);
     }
 
@@ -564,7 +564,7 @@ pub(crate) fn route_signal(
                         if (seg[0][0] - seg[1][0]).abs() > EPS
                             || (seg[0][1] - seg[1][1]).abs() > EPS
                         {
-                            emit_routed_segment(w, scene, net, seg[0], seg[1]);
+                            emit_routed_segment(w, scene, net, seg[0], seg[1], finalize);
                         }
                     }
                     uf.union_to(0, k);
@@ -669,15 +669,38 @@ pub(crate) fn route_signal(
 }
 
 /// Emit only the portions of one routed segment not already covered by same-net geometry.
-/// Covered request endpoints in an existing segment's interior receive junctions so the
-/// geometric reuse is also an electrical attachment.
+/// Partial-overlap trimming is finalize-only so correctness repair does not perturb the
+/// placement scorer; fully covered spans are always reused. Covered request endpoints in
+/// an existing segment's interior receive junctions so the reuse is electrically attached.
 fn emit_routed_segment(
     w: &mut SchematicWriter,
     scene: &mut sch_model::route::RouteScene,
     net: &str,
     a: ::geom::Point2,
     b: ::geom::Point2,
+    trim_partial: bool,
 ) {
+    if let Some(covering) = scene.segments.iter().find(|existing| {
+        existing.net == net
+            && existing.segment.contains_point(a)
+            && existing.segment.contains_point(b)
+    }) {
+        for at in [a, b] {
+            let is_endpoint =
+                at.near_eq(covering.segment.a, EPS) || at.near_eq(covering.segment.b, EPS);
+            if !is_endpoint {
+                w.add_junction_on_net(at, net);
+            }
+        }
+        return;
+    }
+    if !trim_partial {
+        w.add_wire_on_net(a, b, net);
+        scene
+            .segments
+            .push(sch_model::route::NetSegment::new(a, b, net));
+        return;
+    }
     let existing: Vec<_> = scene
         .segments
         .iter()
@@ -1939,6 +1962,7 @@ mod tests {
             "+3V3",
             [105.41, 2.54].into(),
             [105.41, 24.13].into(),
+            false,
         );
         emit_routed_segment(
             &mut writer,
@@ -1946,6 +1970,7 @@ mod tests {
             "+3V3",
             [105.41, 24.13].into(),
             [105.41, 21.59].into(),
+            false,
         );
 
         assert_eq!(writer.wires_with_nets().len(), 1);
@@ -1966,6 +1991,7 @@ mod tests {
             "5V_FUSED",
             [105.41, 21.59].into(),
             [105.41, 24.13].into(),
+            true,
         );
         emit_routed_segment(
             &mut writer,
@@ -1973,6 +1999,7 @@ mod tests {
             "5V_FUSED",
             [105.41, 24.13].into(),
             [105.41, 2.54].into(),
+            true,
         );
 
         assert_eq!(writer.wires_with_nets().len(), 2);
@@ -2007,6 +2034,7 @@ mod tests {
             "SIG",
             [12.7, 10.16].into(),
             [17.78, 10.16].into(),
+            false,
         );
 
         assert!(writer.wires_with_nets().is_empty());
