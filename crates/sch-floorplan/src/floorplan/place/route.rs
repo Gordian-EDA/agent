@@ -459,10 +459,7 @@ pub(crate) fn route_signal(
                 }
             }
             for seg in p.windows(2) {
-                w.add_wire_on_net(seg[0], seg[1], net);
-                scene
-                    .segments
-                    .push(sch_model::route::NetSegment::new(seg[0], seg[1], net));
+                emit_routed_segment(w, scene, net, seg[0], seg[1]);
             }
             paths.push(p);
             uf.union_to(i, j);
@@ -483,10 +480,7 @@ pub(crate) fn route_signal(
         && uf.find(0) != uf.find(pi)
         && safe_forced_single_port_stub(pts[0], pts[pi], net, scene)
     {
-        w.add_wire_on_net(pts[0], pts[pi], net);
-        scene
-            .segments
-            .push(sch_model::route::NetSegment::new(pts[0], pts[pi], net));
+        emit_routed_segment(w, scene, net, pts[0], pts[pi]);
         uf.union_to(0, pi);
     }
 
@@ -570,10 +564,7 @@ pub(crate) fn route_signal(
                         if (seg[0][0] - seg[1][0]).abs() > EPS
                             || (seg[0][1] - seg[1][1]).abs() > EPS
                         {
-                            w.add_wire_on_net(seg[0], seg[1], net);
-                            scene
-                                .segments
-                                .push(sch_model::route::NetSegment::new(seg[0], seg[1], net));
+                            emit_routed_segment(w, scene, net, seg[0], seg[1]);
                         }
                     }
                     uf.union_to(0, k);
@@ -675,6 +666,28 @@ pub(crate) fn route_signal(
         w.add_cluster_label(net, terms[pi].0, side_dir(side), true);
     }
     Ok(())
+}
+
+/// Emit one routed segment unless same-net geometry already covers its whole span.
+fn emit_routed_segment(
+    w: &mut SchematicWriter,
+    scene: &mut sch_model::route::RouteScene,
+    net: &str,
+    a: ::geom::Point2,
+    b: ::geom::Point2,
+) {
+    let covered = scene.segments.iter().any(|existing| {
+        existing.net == net
+            && existing.segment.contains_point(a)
+            && existing.segment.contains_point(b)
+    });
+    if covered {
+        return;
+    }
+    w.add_wire_on_net(a, b, net);
+    scene
+        .segments
+        .push(sch_model::route::NetSegment::new(a, b, net));
 }
 
 /// Where the label bridge seats `net`'s label on `refdes`.`num` — the stub length outward
@@ -1874,6 +1887,29 @@ pub(crate) fn flag_angle(dir: Dir) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn routed_segment_already_covered_in_reverse_is_not_emitted() {
+        let mut writer = SchematicWriter::new();
+        let mut scene = sch_model::route::RouteScene::default();
+        emit_routed_segment(
+            &mut writer,
+            &mut scene,
+            "+3V3",
+            [105.41, 2.54].into(),
+            [105.41, 24.13].into(),
+        );
+        emit_routed_segment(
+            &mut writer,
+            &mut scene,
+            "+3V3",
+            [105.41, 24.13].into(),
+            [105.41, 21.59].into(),
+        );
+
+        assert_eq!(writer.wires_with_nets().len(), 1);
+        assert_eq!(scene.segments.len(), 1);
+    }
 
     /// The `rf-lna-frontend` short, constructed directly: a ground riser drawn straight
     /// up the column it shares with J1 passes over J1's `In` pin, welding `RF_IN` onto

@@ -354,7 +354,8 @@ impl SchematicWriter {
                 let pair = if a <= b { (a, b) } else { (b, a) };
                 debug_assert!(
                     seen.insert(pair),
-                    "wire segments must have unique unordered endpoint pairs; repeated {pair:?}"
+                    "wire segments must have unique unordered endpoint pairs; repeated {pair:?} on `{}`",
+                    wire.net
                 );
             }
         }
