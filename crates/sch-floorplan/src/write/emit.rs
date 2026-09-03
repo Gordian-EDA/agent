@@ -75,6 +75,7 @@ impl SchematicWriter {
     /// upgraded, together with a full canonical schema rewrite.
     pub fn finish(mut self) -> String {
         self.prepare();
+        self.debug_assert_unique_wire_segments();
 
         let root_uuid = stable_uuid("sheet", ROOT_SHEET_KEY);
 
@@ -459,6 +460,17 @@ mod tests {
                 None
             }
         }
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "wire segments must have unique unordered endpoint pairs")]
+    fn finish_rejects_reversed_wire_duplicate() {
+        let mut w = SchematicWriter::new();
+        w.add_wire_on_net([10.16, 10.16], [11.43, 10.16], "SIG");
+        w.add_wire_on_net([11.43, 10.16], [10.16, 10.16], "SIG");
+
+        let _ = w.finish();
     }
 
     #[test]

@@ -343,6 +343,23 @@ impl SchematicWriter {
         });
     }
 
+    /// Assert in debug builds that every wire has a unique unordered endpoint pair.
+    pub(super) fn debug_assert_unique_wire_segments(&self) {
+        #[cfg(debug_assertions)]
+        {
+            let mut seen = std::collections::BTreeSet::new();
+            for wire in &self.wires {
+                let a = point_key(wire.a);
+                let b = point_key(wire.b);
+                let pair = if a <= b { (a, b) } else { (b, a) };
+                debug_assert!(
+                    seen.insert(pair),
+                    "wire segments must have unique unordered endpoint pairs; repeated {pair:?}"
+                );
+            }
+        }
+    }
+
     /// Place a cluster net label at `at`, oriented `dir`.
     ///
     /// Thin entry point for cluster decoration: a cluster emits exactly one
