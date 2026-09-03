@@ -31,7 +31,7 @@ struct CopperDeleteRequest {
     near_point: bool,
     radius: f64,
     kinds: BTreeSet<CopperKind>,
-    net: Option<String>,
+    nets: Option<BTreeSet<String>>,
     layer: Option<u32>,
     all: bool,
 }
@@ -965,25 +965,32 @@ fn delete_copper_file(
     if request.kinds.contains(&CopperKind::Track) {
         for (index, trace) in snapshot.copper.traces.iter().enumerate() {
             if request
-                .net
-                .as_deref()
-                .is_some_and(|net| net != trace.connection)
+                .nets
+                .as_ref()
+                .is_some_and(|nets| !nets.contains(&trace.connection))
                 || request
                     .layer
                     .is_some_and(|layer| trace.layer.index(layer_count) != Some(layer))
             {
                 continue;
             }
-            for pair in trace.path.windows(2) {
-                if selection
-                    .bbox
-                    .is_some_and(|bbox| !trace_segment_hits_bbox(trace, pair, &bbox))
-                {
-                    continue;
-                }
-                let distance = (geom::Segment::new(pair[0], pair[1]).dist_to_point(request.at)
-                    - trace.width / 2.0)
-                    .max(0.0);
+            let hit = trace
+                .path
+                .windows(2)
+                .filter_map(|pair| {
+                    if selection
+                        .bbox
+                        .is_some_and(|bbox| !trace_segment_hits_bbox(trace, pair, &bbox))
+                    {
+                        return None;
+                    }
+                    let distance = (geom::Segment::new(pair[0], pair[1]).dist_to_point(request.at)
+                        - trace.width / 2.0)
+                        .max(0.0);
+                    Some((distance, pair))
+                })
+                .min_by(|a, b| a.0.total_cmp(&b.0));
+            if let Some((distance, pair)) = hit {
                 matches.push((
                     Selected::Trace(index),
                     CopperHit {
@@ -1006,9 +1013,9 @@ fn delete_copper_file(
     if request.kinds.contains(&CopperKind::Via) {
         for (index, via) in snapshot.copper.vias.iter().enumerate() {
             if request
-                .net
-                .as_deref()
-                .is_some_and(|net| net != via.connection)
+                .nets
+                .as_ref()
+                .is_some_and(|nets| !nets.contains(&via.connection))
             {
                 continue;
             }
@@ -1646,6 +1653,11 @@ fn parse_delete_copper_request(
     layer_count: u32,
 ) -> std::result::Result<DeleteCopperSelection, String> {
     let ctx = "delete_copper";
+    if input.get("net").is_some() {
+        return Err(
+            "delete_copper uses `nets` as an array; singular `net` is not accepted".to_owned(),
+        );
+    }
     let at = input
         .get("at")
         .map(|_| parse_point(input, "at", ctx))
@@ -1659,13 +1671,19 @@ fn parse_delete_copper_request(
         return Err("delete_copper `radius` must be non-negative".to_owned());
     }
     let kinds = parse_copper_kinds(input)?;
-    let net = input
-        .get("net")
-        .and_then(Value::as_str)
-        .filter(|s| !s.is_empty())
-        .map(str::to_owned);
-    if at.is_none() && net.is_none() {
-        return Err("delete_copper needs `at`, or a `net` with optional `bbox`".to_owned());
+    let nets = parse_delete_nets(input)?;
+    let all = match input.get("all") {
+        None => false,
+        Some(Value::Bool(all)) => *all,
+        Some(_) => return Err("delete_copper `all` must be a boolean".to_owned()),
+    };
+    if all && (at.is_some() || bbox.is_some() || nets.is_some()) {
+        return Err(
+            "delete_copper `all:true` cannot be combined with `at`, `bbox`, or `nets`".to_owned(),
+        );
+    }
+    if at.is_none() && bbox.is_none() && nets.is_none() && !all {
+        return Err("delete_copper needs `at`, `all:true`, `nets`, or `bbox`".to_owned());
     }
     let layer = input
         .get("layer")
@@ -1678,7 +1696,6 @@ fn parse_delete_copper_request(
             })
         })
         .transpose()?;
-    let all = at.is_none() || input.get("all").and_then(Value::as_bool).unwrap_or(false);
     Ok(DeleteCopperSelection {
         request: CopperDeleteRequest {
             at: at
@@ -1687,12 +1704,35 @@ fn parse_delete_copper_request(
             near_point: at.is_some(),
             radius,
             kinds,
-            net,
+            nets,
             layer,
-            all,
+            all: all || at.is_none(),
         },
         bbox,
     })
+}
+
+fn parse_delete_nets(input: &Value) -> std::result::Result<Option<BTreeSet<String>>, String> {
+    let Some(value) = input.get("nets") else {
+        return Ok(None);
+    };
+    let values = value
+        .as_array()
+        .ok_or_else(|| "delete_copper `nets` must be a non-empty array".to_owned())?;
+    if values.is_empty() {
+        return Err("delete_copper `nets` must not be empty".to_owned());
+    }
+    values
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .filter(|net| !net.is_empty())
+                .map(str::to_owned)
+                .ok_or_else(|| "delete_copper `nets` entries must be non-empty strings".to_owned())
+        })
+        .collect::<std::result::Result<BTreeSet<_>, _>>()
+        .map(Some)
 }
 
 fn parse_copper_kinds(input: &Value) -> std::result::Result<BTreeSet<CopperKind>, String> {
@@ -1732,11 +1772,20 @@ fn delete_copper_output(
 ) -> Value {
     let request = &selection.request;
     let matches: Vec<Value> = hits.iter().map(copper_hit_json).collect();
+    let tracks = hits
+        .iter()
+        .filter(|hit| hit.kind == CopperKind::Track)
+        .count();
+    let vias = hits
+        .iter()
+        .filter(|hit| hit.kind == CopperKind::Via)
+        .count();
     json!({
         "ok": true,
         "deleted": hits.len(),
+        "deleted_by_kind": { "track": tracks, "via": vias },
         "all": request.all,
-        "net": request.net,
+        "nets": request.nets,
         "bbox": selection.bbox,
         "matches": matches,
         "now_open": now_open,
@@ -2633,16 +2682,26 @@ mod tests {
     }
 
     #[test]
-    fn delete_copper_accepts_net_wide_and_bounded_selection() {
-        let whole = parse_delete_copper_request(&json!({ "net": "GND" }), 2).unwrap();
-        assert_eq!(whole.request.net.as_deref(), Some("GND"));
+    fn delete_copper_accepts_global_net_and_bounded_selections() {
+        let global =
+            parse_delete_copper_request(&json!({ "all": true, "kinds": ["track", "via"] }), 2)
+                .unwrap();
+        assert!(global.request.nets.is_none());
+        assert!(global.request.all);
+        assert!(!global.request.near_point);
+        assert!(global.bbox.is_none());
+
+        let whole = parse_delete_copper_request(&json!({ "nets": ["GND", "VCC"] }), 2).unwrap();
+        assert_eq!(
+            whole.request.nets,
+            Some(BTreeSet::from(["GND".to_owned(), "VCC".to_owned()]))
+        );
         assert!(whole.request.all);
         assert!(!whole.request.near_point);
         assert!(whole.bbox.is_none());
 
         let bounded = parse_delete_copper_request(
             &json!({
-                "net": "GND",
                 "bbox": { "min_x": 4.0, "min_y": 4.0, "max_x": 6.0, "max_y": 6.0 }
             }),
             2,
@@ -2650,6 +2709,7 @@ mod tests {
         .unwrap();
         assert_eq!(bounded.bbox, Some(Rect::new(4.0, 4.0, 6.0, 6.0)));
         assert!(parse_delete_copper_request(&json!({}), 2).is_err());
+        assert!(parse_delete_copper_request(&json!({ "net": "GND" }), 2).is_err());
         assert!(
             parse_delete_copper_request(
                 &json!({

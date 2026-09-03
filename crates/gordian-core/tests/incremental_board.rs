@@ -354,8 +354,18 @@ fn the_board_is_built_incrementally_through_legal_partial_states() {
         .and_then(|track| track["net"].as_str())
         .expect("a routed track to delete")
         .to_owned();
-    let deleted = tool(&ctx, "delete_copper", json!({ "net": routed_net.clone() }));
+    let deleted = tool(
+        &ctx,
+        "delete_copper",
+        json!({ "all": true, "kinds": ["track", "via"] }),
+    );
     assert!(deleted["deleted"].as_u64().is_some_and(|count| count > 0));
+    assert!(
+        deleted["deleted_by_kind"]["track"]
+            .as_u64()
+            .is_some_and(|count| count > 0),
+        "track deletion is counted by kind: {deleted:#}"
+    );
     assert!(
         deleted["now_open"]
             .as_array()
