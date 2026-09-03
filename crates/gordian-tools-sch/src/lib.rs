@@ -214,7 +214,9 @@ pub fn tool_defs() -> Vec<Tool> {
             "Drag one or many parts to a full position/rotation/mirror pose in one atomic edit. \
              Attached wire runs retract and return as clean obstacle-aware orthogonal routes; welded \
              power flags follow. A taken spot slides to final `nudged_to`. Refused with a nudge \
-             suggestion if no nearby spot fits, a pin loses its drawing, or any net would change.",
+             suggestion if no nearby spot fits, a pin loses its drawing, or any net would change. \
+             After adding and connecting parts, use one batch drag to compact or align them when a \
+             render reports visual findings; do not delete and redraw their connections.",
             json!({
                 "type": "object",
                 "properties": {

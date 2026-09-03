@@ -1019,13 +1019,18 @@ pub fn move_symbols(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             return Ok(json!({ "error": format!("refused: {detail}; nothing was moved") }));
         }
     };
+    let placement = if drag.labels_added == 0 && drag.crossings_added == 0 {
+        "connections preserved as clean wire routes; any nudged_to coordinate is final"
+    } else {
+        "connections preserved; review labels_added/crossings_added and batch-nudge the moved parts if either is nonzero"
+    };
     edit.commit(
         json!({
             "moved": placed,
             "redrawn_segments": drag.redrawn_segments,
             "labels_added": drag.labels_added,
             "crossings_added": drag.crossings_added,
-            "placement": "final and clean; any nudged_to coordinate is the collision-free final position, so do not move it again",
+            "placement": placement,
         }),
         Allow::nothing(),
     )
