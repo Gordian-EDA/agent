@@ -26,6 +26,8 @@ Unknown or pad-incompatible footprints are cleared, reported in `footprints_unre
 
 For an existing schematic: `read_schematic()` once, perform only the requested mutators, use their returned `changed`, `connectivity`, and `unconnected` reports to verify the exact edit, then `check_schematic()`. `set_fields`, `set_flags`, `swap_symbol`, `add_symbols`, `remove_symbols`, `label`, `no_connect`, `add_power`, `delete_wires` edit; `arrange({refs|bbox|block, intent})` re-places and redraws the selection's wires from the netlist, leaving a matching label where it cannot draw one. Do not move unrelated parts.
 
+To replace a sub-circuit, use `remove_region` (or `remove_symbols` for parts and `delete_labels` for stray labels), then place the new one; never leave remnants.
+
 Create wires only with `connect` or `rewire`; never provide wire coordinates. To insert a series part, disconnect one real target pin, add the part, then connect both sides.
 
 Every fitted non-power part needs a footprint before PCB work. `check_schematic` reports every live finding. Fix the findings in what you touched; leave unrelated existing ones alone and mention them. A final passing schematic render and check starts the board.
