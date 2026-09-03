@@ -446,6 +446,40 @@ impl Text {
     }
 }
 
+/// A free-standing graphic rectangle — the dashed frame a block is drawn in.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Rectangle {
+    pub uuid: String,
+    pub start: Point2,
+    pub end: Point2,
+    pub(crate) raw: Retained,
+}
+
+impl Rectangle {
+    fn decode(node: &Node) -> Rectangle {
+        let corner = |tag: &str| {
+            child(node, tag)
+                .map(decode_pose)
+                .map_or(Point2::new(0.0, 0.0), |p| p.point())
+        };
+        Rectangle {
+            uuid: child_text(node, "uuid").unwrap_or_default().to_string(),
+            start: corner("start"),
+            end: corner("end"),
+            raw: Retained::parsed(node.clone()),
+        }
+    }
+
+    pub(crate) fn encode(&self) -> Node {
+        let mut node = self.raw.node.clone();
+        for (tag, p) in [("start", self.start), ("end", self.end)] {
+            sexpr::set_child(&mut node, tagged(tag, vec![num(p.x), num(p.y)]));
+        }
+        sexpr::set_child(&mut node, tagged("uuid", vec![quoted(self.uuid.clone())]));
+        node
+    }
+}
+
 /// A hierarchical sheet symbol and the pins on its border.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Sheet {
@@ -604,6 +638,7 @@ pub enum Item {
     NoConnect(NoConnect),
     Label(Label),
     Text(Text),
+    Rectangle(Rectangle),
     Sheet(Sheet),
     LibSymbols(LibSymbols),
     Other(Box<Retained>),
@@ -617,6 +652,7 @@ impl Item {
             Some("junction") => Item::Junction(Junction::decode(node)),
             Some("no_connect") => Item::NoConnect(NoConnect::decode(node)),
             Some("text") => Item::Text(Text::decode(node)),
+            Some("rectangle") => Item::Rectangle(Rectangle::decode(node)),
             Some("sheet") => Item::Sheet(Sheet::decode(node)),
             Some("lib_symbols") => Item::LibSymbols(LibSymbols::decode(node)),
             Some(head) => match LabelKind::from_head(head) {
@@ -636,6 +672,7 @@ impl Item {
             Item::NoConnect(_) => "no_connect",
             Item::Label(l) => l.kind.head(),
             Item::Text(_) => "text",
+            Item::Rectangle(_) => "rectangle",
             Item::Sheet(_) => "sheet",
             Item::LibSymbols(_) => "lib_symbols",
             Item::Other(raw) => sexpr::head(&raw.node).unwrap_or(""),
@@ -652,6 +689,7 @@ impl Item {
             Item::NoConnect(n) => n.raw.span,
             Item::Label(l) => l.raw.span,
             Item::Text(t) => t.raw.span,
+            Item::Rectangle(r) => r.raw.span,
             Item::Sheet(s) => s.raw.span,
             Item::LibSymbols(l) => l.raw.as_ref().and_then(|r| r.span),
             Item::Other(raw) => raw.span,
@@ -666,6 +704,7 @@ impl Item {
             Item::NoConnect(n) => n.encode(),
             Item::Label(l) => l.encode(),
             Item::Text(t) => t.encode(),
+            Item::Rectangle(r) => r.encode(),
             Item::Sheet(s) => s.encode(),
             Item::LibSymbols(l) => l.encode(),
             Item::Other(raw) => raw.node.clone(),

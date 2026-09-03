@@ -67,29 +67,25 @@ pub fn to_doc(writer: SchematicWriter) -> sch_doc::Result<SchDoc> {
 }
 
 /// Graft a finished writer's content into `doc`, returning the new symbols' UUIDs.
+///
+/// The grafted block carries whatever coordinates the region search chose — it is placed
+/// BESIDE what is already there, so it may reach outside the frame — and adoption changes
+/// what the sheet as a whole spans. [`sch_doc::SchDoc::refit_page`] settles both: it shifts
+/// the merged drawing back to the page margin and re-picks the smallest standard page.
 pub fn graft(doc: &mut SchDoc, writer: SchematicWriter) -> sch_doc::Result<Vec<String>> {
     let sheet = to_doc(writer)?;
-    fit_page(doc, &sheet);
     let adopted = doc.adopt(&sheet)?;
+    doc.refit_page();
     debug_assert_unique_wire_segments(doc);
     Ok(adopted)
-}
-
-/// Grow `doc`'s page to hold what `sheet` draws. The realiser sizes its own page to its
-/// content; a graft carries the content across, so the page has to follow or the drawing
-/// lands off the sheet and renders blank.
-fn fit_page(doc: &mut SchDoc, sheet: &SchDoc) {
-    if let Some(size) = sheet.page() {
-        doc.grow_page(size);
-    }
 }
 
 /// Graft only a writer's wiring — wires, junctions, labels, markers, text — for a
 /// re-wire of symbols the document already holds.
 pub fn graft_drawing(doc: &mut SchDoc, writer: SchematicWriter) -> sch_doc::Result<()> {
     let sheet = to_doc(writer)?;
-    fit_page(doc, &sheet);
     doc.adopt_drawing(&sheet)?;
+    doc.refit_page();
     debug_assert_unique_wire_segments(doc);
     Ok(())
 }

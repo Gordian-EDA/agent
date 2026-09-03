@@ -51,9 +51,12 @@ fn iso_page(name: &str) -> Option<[f64; 2]> {
 /// and the parts themselves are untouched.
 pub fn is_drawing(item: &Item) -> bool {
     match item {
-        Item::Wire(_) | Item::Junction(_) | Item::NoConnect(_) | Item::Label(_) | Item::Text(_) => {
-            true
-        }
+        Item::Wire(_)
+        | Item::Junction(_)
+        | Item::NoConnect(_)
+        | Item::Label(_)
+        | Item::Text(_)
+        | Item::Rectangle(_) => true,
         Item::Symbol(symbol) => generated(symbol),
         _ => false,
     }
@@ -126,6 +129,7 @@ impl SchDoc {
             Item::NoConnect(n) => n.uuid == uuid,
             Item::Label(l) => l.uuid == uuid,
             Item::Text(t) => t.uuid == uuid,
+            Item::Rectangle(r) => r.uuid == uuid,
             Item::Sheet(s) => s.uuid == uuid || s.pins.iter().any(|p| p.uuid == uuid),
             Item::LibSymbols(_) => false,
             Item::Other(raw) => crate::sexpr::child_text(&raw.node, "uuid") == Some(uuid),
@@ -134,7 +138,7 @@ impl SchDoc {
 
     /// Insert after the last item of the same kind, else before the trailing
     /// blocks, so the file keeps KiCAD's grouping.
-    fn insert_item(&mut self, item: Item) {
+    pub(crate) fn insert_item(&mut self, item: Item) {
         let head = item.head().to_string();
         let items = self.items_mut();
         let at = items
@@ -745,32 +749,6 @@ impl SchDoc {
         iso_page(name)
     }
 
-    /// Grow the page so `size` fits, leaving it alone when it already does.
-    ///
-    /// Content drawn beyond the page is invisible in every renderer, so a placement
-    /// that outgrew the sheet takes the sheet with it. Growing only: a hand-chosen
-    /// page is never shrunk under its author.
-    pub fn grow_page(&mut self, size: [f64; 2]) -> bool {
-        let now = self.page().unwrap_or([0.0, 0.0]);
-        let want = [now[0].max(size[0]), now[1].max(size[1])];
-        if want == now {
-            return false;
-        }
-        let paper = tagged("paper", vec![quoted("User"), num(want[0]), num(want[1])]);
-        let replaced = self.items_mut().iter_mut().any(|item| match item {
-            Item::Other(raw) if crate::sexpr::head(&raw.node) == Some("paper") => {
-                raw.node = paper.clone();
-                raw.touch();
-                true
-            }
-            _ => false,
-        });
-        if !replaced {
-            self.insert_item(Item::Other(Box::new(Retained::owned(paper))));
-        }
-        true
-    }
-
     /// Merge only `source`'s DRAWING — see [`is_drawing`]. What a re-wire of parts
     /// this document already holds needs: the wires and labels come across, the
     /// parts themselves do not.
@@ -814,9 +792,19 @@ impl SchDoc {
                 | Item::Junction(_)
                 | Item::NoConnect(_)
                 | Item::Label(_)
-                | Item::Text(_) => {
+                | Item::Text(_)
+                | Item::Rectangle(_) => {
                     let item = self.regraft(item);
                     self.insert_item(item);
+                }
+                // The block the realiser drew carries the design's title. A sheet
+                // has one title block, so it is adopted only onto a sheet with none —
+                // the first block to land names the sheet, later ones leave it alone.
+                Item::Other(raw)
+                    if crate::sexpr::head(&raw.node) == Some("title_block")
+                        && !self.has_title_block() =>
+                {
+                    self.insert_item(Item::Other(raw));
                 }
                 Item::Symbol(_) | Item::Sheet(_) | Item::LibSymbols(_) | Item::Other(_) => {}
             }
@@ -888,6 +876,7 @@ impl SchDoc {
             Item::NoConnect(n) => Item::NoConnect(reuuid!(n, &head)),
             Item::Label(l) => Item::Label(reuuid!(l, &head)),
             Item::Text(t) => Item::Text(reuuid!(t, &head)),
+            Item::Rectangle(r) => Item::Rectangle(reuuid!(r, &head)),
             other => other,
         }
     }
