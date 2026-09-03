@@ -58,7 +58,35 @@ pub fn realize_block(
     add_orphan_label_columns(&mut writer, design, inc);
     writer.set_frame(draw.frame);
     writer.prepare();
+    draw_block_frames(&mut writer, design, items);
+    // Re-run the (idempotent) finalize so the reframe sees the frames it must keep on
+    // the page; the text solve and wire splitting are unchanged by decoration.
+    writer.prepare();
     Ok(writer)
+}
+
+/// Draw one dashed frame per design region that has parts on this sheet, captioned with
+/// the region's title and carrying its note.
+///
+/// A region the tools synthesized ([`sch_model::result::synthesized_block`]) is not a
+/// functional block — it is everything the author did not divide up — so it gets no
+/// frame; the drawing frame and title block already delimit the sheet.
+fn draw_block_frames(writer: &mut SchematicWriter, design: &Design, items: &[Item]) {
+    for (name, block) in &design.blocks {
+        if sch_model::result::synthesized_block(name) {
+            continue;
+        }
+        let members: Vec<String> = items
+            .iter()
+            .filter(|it| &it.block == name)
+            .map(|it| it.refdes.clone())
+            .collect();
+        if members.is_empty() {
+            continue;
+        }
+        let title = block.title.as_deref().unwrap_or(name);
+        writer.add_block_frame(title, block.note.as_deref(), &members);
+    }
 }
 
 /// Render a finished writer as a standalone document.
@@ -67,29 +95,56 @@ pub fn to_doc(writer: SchematicWriter) -> sch_doc::Result<SchDoc> {
 }
 
 /// Graft a finished writer's content into `doc`, returning the new symbols' UUIDs.
+///
+/// The grafted block carries whatever coordinates the region search chose — it is placed
+/// BESIDE what is already there, so it may reach outside the frame — and adoption changes
+/// what the sheet as a whole spans. [`sch_doc::SchDoc::refit_page`] settles both: it shifts
+/// the merged drawing back to the page margin and re-picks the smallest standard page.
 pub fn graft(doc: &mut SchDoc, writer: SchematicWriter) -> sch_doc::Result<Vec<String>> {
     let sheet = to_doc(writer)?;
-    fit_page(doc, &sheet);
+    replace_frames(doc, &sheet);
     let adopted = doc.adopt(&sheet)?;
+    doc.refit_page();
     debug_assert_unique_wire_segments(doc);
     Ok(adopted)
 }
 
-/// Grow `doc`'s page to hold what `sheet` draws. The realiser sizes its own page to its
-/// content; a graft carries the content across, so the page has to follow or the drawing
-/// lands off the sheet and renders blank.
-fn fit_page(doc: &mut SchDoc, sheet: &SchDoc) {
-    if let Some(size) = sheet.page() {
-        doc.grow_page(size);
+/// Drop the block frames `sheet` is about to redraw: every rectangle it overlaps, and the
+/// captions and notes that went with them — matched by their TEXT, because a frame's
+/// caption sits just outside its rectangle and a geometric test orphans it. A block
+/// extended by a later call gets a new frame around the parts it now has, and the stale
+/// one must not survive beside it. Frames are decoration the realiser owns.
+fn replace_frames(doc: &mut SchDoc, sheet: &SchDoc) {
+    let mut frames: Vec<geom::Rect> = Vec::new();
+    let mut captions: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+    for item in sheet.items() {
+        match item {
+            sch_doc::Item::Rectangle(r) => frames.push(geom::Rect::from_points(r.start, r.end)),
+            sch_doc::Item::Text(t) => {
+                captions.insert(t.text.as_str());
+            }
+            _ => {}
+        }
     }
+    if frames.is_empty() {
+        return;
+    }
+    doc.retain_drawing(|item| match item {
+        sch_doc::Item::Rectangle(r) => !frames
+            .iter()
+            .any(|f| f.overlaps(&geom::Rect::from_points(r.start, r.end))),
+        sch_doc::Item::Text(t) => !captions.contains(t.text.as_str()),
+        _ => true,
+    });
 }
 
 /// Graft only a writer's wiring — wires, junctions, labels, markers, text — for a
 /// re-wire of symbols the document already holds.
 pub fn graft_drawing(doc: &mut SchDoc, writer: SchematicWriter) -> sch_doc::Result<()> {
     let sheet = to_doc(writer)?;
-    fit_page(doc, &sheet);
+    replace_frames(doc, &sheet);
     doc.adopt_drawing(&sheet)?;
+    doc.refit_page();
     debug_assert_unique_wire_segments(doc);
     Ok(())
 }

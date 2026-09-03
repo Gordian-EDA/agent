@@ -58,7 +58,7 @@ pub fn labeled_nets(
     out
 }
 
-/// An item's full obstacle rect: placed body+text rect, extended by the strips
+/// An item's full obstacle rect: the placed BODY, extended by the strips
 /// the realizer draws at its pins (net labels on E/W pins, power glyphs and
 /// short risers on N/S pins). Over-reserving only limits how tightly the pack
 /// closes — never correctness.
@@ -67,7 +67,7 @@ fn obstacle(
     classes: &BTreeMap<String, NetClass>,
     labeled: &std::collections::BTreeSet<String>,
 ) -> Rect {
-    let mut r = sch_model::geometry::item_rect(item, item.at);
+    let mut r = sch_model::geometry::body_rect(item, item.at);
     for (num, _name, net) in &item.pins {
         let Some(net) = net else { continue };
         let Some(pg) = item.geom.pins.iter().find(|p| &p.number == num) else {

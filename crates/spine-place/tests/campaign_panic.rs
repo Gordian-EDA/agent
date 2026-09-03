@@ -22,6 +22,7 @@ fn item(refdes: &str, part: &str, nets: &[&str], geometry_pins: usize) -> Item {
         .collect();
     Item {
         refdes: refdes.into(),
+        block: String::new(),
         part: part.into(),
         value: String::new(),
         footprint: None,

@@ -35,12 +35,30 @@ pub struct PlacePartsInput {
     /// arranged from connectivity.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub layout: BTreeMap<BlockName, LayoutGrid>,
+    /// Region → how it is documented on the sheet: the caption drawn on its frame
+    /// and a note explaining a decision. Regions left out are captioned with their
+    /// own name and carry no note.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub blocks: BTreeMap<BlockName, BlockDoc>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub intent: Option<Intent>,
     /// Placement engine override. The refusal a placement-engine failure returns
     /// names this as the way out, so it has to exist.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub engine: Option<String>,
+}
+
+/// What a region says about itself on the drawn sheet.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct BlockDoc {
+    /// Frame caption. Defaults to the region's own name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// One line under the frame, for the decision a reader cannot infer from the
+    /// netlist — "150 kHz, sized for 500 mA", "pull-ups on the host side only".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 /// One part and its pin connections.
@@ -268,7 +286,7 @@ impl Intent {
 }
 
 /// The sheet a payload without an explicit `block` fills.
-pub const DEFAULT_BLOCK: &str = "main";
+pub use sch_model::result::DEFAULT_BLOCK;
 
 /// Lower the input to a [`Design`]: pin keys resolved to physical pin numbers
 /// against the symbol table, `decouple` expanded into [`Origin::Synthesized`]
@@ -325,6 +343,18 @@ pub fn into_design(
         design
             .blocks
             .insert(default_block.to_string(), Block::default());
+    }
+    for (name, doc) in &input.blocks {
+        match design.blocks.get_mut(name) {
+            Some(block) => {
+                block.title = doc.title.clone();
+                block.note = doc.note.clone();
+            }
+            None => diags.push(Diagnostic::warning(
+                "unknown-block",
+                format!("`blocks` names region `{name}`, which no part joins — ignored"),
+            )),
+        }
     }
     for (name, grid) in &input.layout {
         match design.blocks.get_mut(name) {
@@ -484,7 +514,9 @@ fn is_no_connect_name(net: &str) -> bool {
     let upper = net.to_ascii_uppercase();
     upper == "NC"
         || upper == "N/C"
-        || upper.strip_prefix("NC_").is_some_and(|rest| !rest.is_empty())
+        || upper
+            .strip_prefix("NC_")
+            .is_some_and(|rest| !rest.is_empty())
         || upper
             .strip_prefix("NC")
             .is_some_and(|rest| !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit()))
@@ -779,47 +811,47 @@ fn expand_decouple(
 /// macro's recursion limit is real; it also keeps the grammar in one readable place.
 fn relations_schema() -> Value {
     json!({
-                        "type": "array",
-                        "description":
-                            "Relative placement. `b` and `anchor` may name a part already \
-                             on the sheet. Example: \
-                             {\"kind\":\"group\",\"name\":\"leds\",\"members\":[\"R3\",\"D1\"],\
-                             \"side\":\"right\",\"anchor\":\"U1\"}",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "kind": {
-                                    "type": "string",
-                                    "enum": ["left_of", "right_of", "above", "below",
-                                             "group", "align"]
-                                },
-                                "a": {"type": "string"},
-                                "b": {"type": "string"},
-                                "name": {"type": "string"},
-                                "members": {
-                                    "type": "array",
-                                    "items": {"type": "string"},
-                                    "minItems": 1
-                                },
-                                "side": {
-                                    "description":
-                                        "An edge, or an [edge, anchor] pair, or \
-                                         {side, anchor}.",
-                                    "anyOf": [
-                                        {"type": "string",
-                                         "enum": ["left", "right", "top", "bottom"]},
-                                        {"type": "array", "minItems": 2, "maxItems": 2},
-                                        {"type": "object"}
-                                    ]
-                                },
-                                "anchor": {"type": "string"},
-                                "axis": {
-                                    "type": "string",
-                                    "enum": ["horizontal", "vertical"]
-                                }
-                            },
-                            "required": ["kind"]
-                        }})
+    "type": "array",
+    "description":
+        "Relative placement. `b` and `anchor` may name a part already \
+         on the sheet. Example: \
+         {\"kind\":\"group\",\"name\":\"leds\",\"members\":[\"R3\",\"D1\"],\
+         \"side\":\"right\",\"anchor\":\"U1\"}",
+    "items": {
+        "type": "object",
+        "properties": {
+            "kind": {
+                "type": "string",
+                "enum": ["left_of", "right_of", "above", "below",
+                         "group", "align"]
+            },
+            "a": {"type": "string"},
+            "b": {"type": "string"},
+            "name": {"type": "string"},
+            "members": {
+                "type": "array",
+                "items": {"type": "string"},
+                "minItems": 1
+            },
+            "side": {
+                "description":
+                    "An edge, or an [edge, anchor] pair, or \
+                     {side, anchor}.",
+                "anyOf": [
+                    {"type": "string",
+                     "enum": ["left", "right", "top", "bottom"]},
+                    {"type": "array", "minItems": 2, "maxItems": 2},
+                    {"type": "object"}
+                ]
+            },
+            "anchor": {"type": "string"},
+            "axis": {
+                "type": "string",
+                "enum": ["horizontal", "vertical"]
+            }
+        },
+        "required": ["kind"]
+    }})
 }
 
 pub fn place_parts_input_schema() -> Value {
@@ -895,6 +927,22 @@ pub fn place_parts_input_schema() -> Value {
                         "type": "array",
                         "items": {"type": ["string", "null"]}
                     }
+                }
+            },
+            "blocks": {
+                "type": "object",
+                "description":
+                    "Region -> {title?, note?}: the caption drawn on that region's frame \
+                     and one line of explanation under it. Write a `note` wherever a human \
+                     would say why — a switching frequency, a sizing choice, which side a \
+                     pull-up belongs on.",
+                "additionalProperties": {
+                    "type": "object",
+                    "properties": {
+                        "title": {"type": "string"},
+                        "note": {"type": "string"}
+                    },
+                    "additionalProperties": false
                 }
             },
             "engine": {

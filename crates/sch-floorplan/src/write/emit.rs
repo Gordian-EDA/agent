@@ -5,6 +5,7 @@
 use std::fmt::Write as _;
 
 use geom::stable_uuid;
+use sch_doc::{PAGE_MARGIN, TITLE_BLOCK_BAND, standard_page};
 
 use super::{
     Dir, Instance, NoConnect, PinLabel, ROOT_SHEET_KEY, SchematicWriter, field_anchors,
@@ -12,57 +13,30 @@ use super::{
 };
 
 impl SchematicWriter {
-    /// The page size for a content-fit `User` page: the maximum x/y extent of
-    /// all drawn geometry (symbol bodies, wires, labels, junctions, no-connects)
-    /// plus a margin. `None` when there is nothing to draw.
+    /// The page the drawn content needs: the smallest of A5/A4/A3/A2 landscape whose
+    /// usable area (the content bbox plus a margin on every side, and the bottom band
+    /// a title block prints in) holds it. `None` when there is nothing to draw.
     ///
-    /// Geometry is laid out near the origin by the floorplan engine, so the
-    /// content fills a page of `max + margin`. The minimum corner is not
-    /// subtracted (KiCAD's page origin is the top-left); the floorplan
-    /// normalizes content to a small positive margin already.
-    fn content_extent(&self) -> Option<[f64; 2]> {
-        use sch_model::text::text_width;
-        const PAGE_MARGIN: f64 = 12.7;
-        let mut max_x = f64::MIN;
-        let mut max_y = f64::MIN;
-        let mut acc = |x: f64, y: f64| {
-            max_x = max_x.max(x);
-            max_y = max_y.max(y);
+    /// Humans draw on standard paper — a `User` page is 3% of the reference corpus —
+    /// and a named size is what makes a rendered sheet look like a schematic rather
+    /// than a strip of arbitrary geometry. Content larger than A2 falls back to a
+    /// `User` page sized to fit: an unconventional page beats an invisible drawing.
+    fn page(&self) -> Option<(&'static str, [f64; 2])> {
+        let bbox = self.content_bbox()?;
+        let band = if self.title.is_some() {
+            TITLE_BLOCK_BAND
+        } else {
+            0.0
         };
-        for i in &self.instances {
-            let h = i.half_extents.rotated_half_extents(i.angle);
-            acc(i.at[0] + h[0], i.at[1] + h[1]);
-            for p in [i.ref_pos, i.val_pos].into_iter().flatten() {
-                acc(p.at[0] + 5.0, p.at[1]);
-            }
-        }
-        for w in &self.wires {
-            acc(w.a[0], w.a[1]);
-            acc(w.b[0], w.b[1]);
-        }
-        for l in &self.labels {
-            acc(l.at[0] + text_width(&l.net), l.at[1]);
-        }
-        for j in self.junctions.iter().filter(|j| j.dot) {
-            acc(j.at[0], j.at[1]);
-        }
-        for nc in &self.no_connects {
-            acc(nc.at[0], nc.at[1]);
-        }
-        if max_x == f64::MIN {
-            return None;
-        }
-        Some([max_x + PAGE_MARGIN, max_y + PAGE_MARGIN])
+        let need = [bbox.max_x + PAGE_MARGIN, bbox.max_y + PAGE_MARGIN + band];
+        Some(standard_page(need).unwrap_or(("User", need)))
     }
 
     /// Size `[w, h]` of the laid-out content, for the multi-block composer's tile
-    /// packing. After `prepare`/`reframe` the content's min corner sits at the page
-    /// margin `M`, so its extent above the margin is `content_extent - 2·M`. Returns
-    /// `None` for an empty writer.
+    /// packing. `None` for an empty writer.
     pub fn content_size(&self) -> Option<[f64; 2]> {
-        const M: f64 = 12.7; // `content_extent`'s PAGE_MARGIN / `reframe`'s M
-        self.content_extent()
-            .map(|[w, h]| [(w - 2.0 * M).max(1.0), (h - 2.0 * M).max(1.0)])
+        self.content_bbox()
+            .map(|r| [r.width().max(1.0), r.height().max(1.0)])
     }
 
     /// Assemble the complete `.kicad_sch` document as a deterministic string.
@@ -85,24 +59,26 @@ impl SchematicWriter {
         out.push_str("\t(generator \"gordian\")\n");
         out.push_str("\t(generator_version \"0.1\")\n");
         let _ = writeln!(out, "\t(uuid \"{root_uuid}\")");
-        // Content-fit page: a custom `User` page just larger than the drawn
-        // content so the schematic fills the view (no tiny-in-an-A4-corner).
-        // Falls back to A4 when there is no content to measure.
-        match self.content_extent() {
-            Some([w, h]) => {
-                // KiCAD draws the title block inside the page at bottom-right; a tight
-                // content-fit page leaves no room, so metadata overprints the lowest parts.
-                // Reserve a bottom band whenever we emit a title block.
-                const TITLE_BLOCK_RESERVE: f64 = 33.0;
-                let reserve = self.title.is_some();
-                let h = if reserve { h + TITLE_BLOCK_RESERVE } else { h };
-                let _ = writeln!(out, "\t(paper \"User\" {} {})", fmt_coord(w), fmt_coord(h));
+        match self.page() {
+            Some(("User", size)) => {
+                let _ = writeln!(
+                    out,
+                    "\t(paper \"User\" {} {})",
+                    fmt_coord(size[0]),
+                    fmt_coord(size[1])
+                );
+            }
+            Some((name, _)) => {
+                let _ = writeln!(out, "\t(paper \"{name}\")");
             }
             None => out.push_str("\t(paper \"A4\")\n"),
         }
         if let Some(title) = &self.title {
             let t = escape_sexpr_string(title);
-            let _ = writeln!(out, "\t(title_block\n\t\t(title \"{t}\")\n\t)");
+            let _ = writeln!(
+                out,
+                "\t(title_block\n\t\t(title \"{t}\")\n\t\t(rev \"1.0\")\n\t)"
+            );
         }
 
         // lib_symbols set, sorted by lib_id (BTreeMap order).
@@ -557,29 +533,46 @@ mod tests {
     }
 
     #[test]
-    fn titled_user_page_reserves_bottom_title_block() {
+    fn small_sheet_takes_the_smallest_standard_page() {
         let mut w = SchematicWriter::new();
         w.set_title("my_board");
         w.add_junction_on_net([25.4, 25.4], "N1");
 
         let text = w.finish();
+        assert!(
+            text.contains("(paper \"A5\")"),
+            "a sheet this small belongs on A5, got {:?}",
+            text.lines().find(|l| l.contains("(paper")),
+        );
+        assert!(
+            text.contains("(title_block"),
+            "the title must reach the sheet"
+        );
+    }
+
+    #[test]
+    fn oversize_content_falls_back_to_a_fitted_user_page() {
+        let mut w = SchematicWriter::new();
+        w.add_junction_on_net([25.4, 25.4], "N1");
+        w.add_junction_on_net([900.0, 500.0], "N1");
+
+        let text = w.finish();
         let paper = text
             .lines()
             .find(|line| line.contains("(paper \"User\""))
-            .expect("titled content should emit a custom User page");
+            .expect("content past A2 keeps a fitted User page");
         let nums: Vec<f64> = paper
             .split_whitespace()
             .filter_map(|token| token.trim_end_matches(')').parse::<f64>().ok())
             .collect();
-
         assert_eq!(
             nums.len(),
             2,
             "paper dimensions should parse from {paper:?}"
         );
         assert!(
-            nums[1] >= 70.0,
-            "title block reserve must extend page height, got line {paper:?}"
+            nums[0] > 900.0 && nums[1] > 500.0,
+            "the page must hold the content, got {paper:?}"
         );
     }
 

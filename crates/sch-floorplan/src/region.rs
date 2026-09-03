@@ -30,12 +30,20 @@ use sch_model::place::{Deadline, PlaceOptions, PlaceResult};
 use sch_model::engine::{PlacementEngine, SchematicPlaceProblem};
 
 use crate::floorplan::place::{RoutedEvaluator, RoutedSheetRealizer, incidence, resolve_pin_flow};
-use sch_model::geometry::item_rect;
+use sch_model::geometry::body_rect;
 
 /// Step of the legalisation walk (100 mil — two schematic grid steps).
 const WALK: f64 = 2.0 * geom::GRID_50_MIL.pitch();
-/// How far the legalisation walk may push a part before giving up.
-const WALK_RINGS: i32 = 120;
+/// How far a whole BLOCK may be slid to find free sheet. A block legitimately travels the
+/// width of the sheet: it is being added beside content that is already there.
+const BLOCK_RINGS: i32 = 60;
+/// Step of the block slide. Coarser than [`WALK`] because a block is looking for a free
+/// REGION, not for a grid cell, and 60 rings of it reach 762 mm — past any page.
+const BLOCK_WALK: f64 = 10.0 * geom::GRID_50_MIL.pitch();
+/// How far a single part may be nudged once its block has landed. A local repair: a part
+/// walked further than this is no longer part of the block the engine arranged, and the
+/// islands that produced were the sheet's worst defect.
+const WALK_RINGS: i32 = 12;
 
 /// A region placement request: which parts to move, which to respect, and what else is
 /// in the way.
@@ -127,20 +135,130 @@ fn ring_offsets(ring: i32) -> Vec<(i32, i32)> {
     out
 }
 
-/// Walk each movable part off any obstacle, fixed neighbour, or already-legalised
-/// neighbour, to the nearest clear grid position. Deterministic; parts that are already
-/// clear never move. A part with nowhere to go within [`WALK_RINGS`] keeps its position
-/// (the caller sees the overlap rather than a part flung across the sheet).
-fn legalize(movable: &mut [Item], fixed: &[Item], obstacles: &[Rect]) {
-    let mut taken: Vec<Rect> = fixed.iter().map(|it| item_rect(it, it.at)).collect();
+/// Move the movable set off every obstacle and fixed neighbour — as a BLOCK first.
+///
+/// The engine arranged these parts together; walking each one out on its own is what
+/// shreds a block into islands hundreds of millimetres apart, which is exactly how a
+/// grafted sheet ends up 1168 mm wide with 90% of its area empty. So the block slides
+/// rigidly, keeping its internal geometry bit-for-bit, until its bounding box clears
+/// everything already on the sheet. Only what still overlaps AFTER that — movable parts
+/// colliding with each other, the engine's own business — gets the local per-part nudge,
+/// bounded to [`WALK_RINGS`].
+///
+/// Clearance is measured on [`body_rect`], the space the drawing occupies. The text pad
+/// is a claim the field solver may abandon, and pricing it here made a 5 mm phantom touch
+/// worth a sheet-width of travel.
+///
+/// Returns how many parts are still overlapping something when it is done. Both passes
+/// give up rather than fling a part across the sheet, so this is how the caller learns
+/// the sheet it is about to commit has a collision on it.
+fn legalize(movable: &mut [Item], fixed: &[Item], obstacles: &[Rect]) -> usize {
+    let blockers: Vec<Rect> = fixed
+        .iter()
+        .map(|it| body_rect(it, it.at))
+        .chain(obstacles.iter().copied())
+        .collect();
+    slide_block(movable, &blockers);
+    nudge_parts(movable, fixed, obstacles);
+    movable
+        .iter()
+        .enumerate()
+        .filter(|(i, it)| {
+            let r = body_rect(it, it.at);
+            blockers.iter().any(|o| r.overlaps(o))
+                || movable
+                    .iter()
+                    .enumerate()
+                    .any(|(j, other)| j != *i && r.overlaps(&body_rect(other, other.at)))
+        })
+        .count()
+}
+
+/// Slide the whole movable set to the nearest offset where its bounding box clears every
+/// blocker. A clear bbox means every member is clear, so this is one rect test per
+/// candidate offset; a block already in free sheet does not move.
+///
+/// Among the offsets that clear, the one that leaves the SMALLEST sheet wins over the
+/// merely nearest: a block flung 700 mm sideways clears everything and costs the sheet a
+/// page size, which is the same defect measured from the other end. The search widens ring
+/// by ring and keeps the best landing of the first ring that has one, so it still stops as
+/// soon as the block has somewhere to go.
+fn slide_block(movable: &mut [Item], blockers: &[Rect]) {
+    let corners = |it: &Item| {
+        let r = body_rect(it, it.at);
+        [Point2::new(r.min_x, r.min_y), Point2::new(r.max_x, r.max_y)]
+    };
+    let Some(bbox) = Rect::bounding(&movable.iter().flat_map(corners).collect::<Vec<_>>()) else {
+        return;
+    };
+    let shifted = |dx: f64, dy: f64| {
+        Rect::new(
+            bbox.min_x + dx,
+            bbox.min_y + dy,
+            bbox.max_x + dx,
+            bbox.max_y + dy,
+        )
+    };
+    let clear = |r: &Rect| !blockers.iter().any(|o| r.overlaps(o));
+    if clear(&bbox) {
+        return;
+    }
+    // How much sheet the landing costs: the extent of everything on it afterwards.
+    let sheet = blockers.iter().fold(bbox, |acc, o| {
+        Rect::new(
+            acc.min_x.min(o.min_x),
+            acc.min_y.min(o.min_y),
+            acc.max_x.max(o.max_x),
+            acc.max_y.max(o.max_y),
+        )
+    });
+    let cost = |r: &Rect| {
+        let w = sheet.max_x.max(r.max_x) - sheet.min_x.min(r.min_x);
+        let h = sheet.max_y.max(r.max_y) - sheet.min_y.min(r.min_y);
+        w + h
+    };
+    // There is no sheet to the left of the origin: a block slid to a negative coordinate
+    // is drawn outside the frame, and the page fitter then has to shove the WHOLE sheet
+    // over to rescue it — moving parts the caller was promised would not move. So the
+    // landing must be on the page; only if nothing on the page is free does an off-page
+    // landing beat leaving the block on top of something.
+    let on_page = |r: &Rect| r.min_x >= sch_doc::PAGE_MARGIN && r.min_y >= sch_doc::PAGE_MARGIN;
+    let search = |page_only: bool| {
+        (1..=BLOCK_RINGS).find_map(|ring| {
+            ring_offsets(ring)
+                .into_iter()
+                .map(|(dx, dy)| (dx as f64 * BLOCK_WALK, dy as f64 * BLOCK_WALK))
+                .filter(|&(dx, dy)| {
+                    let r = shifted(dx, dy);
+                    clear(&r) && (!page_only || on_page(&r))
+                })
+                .min_by(|a, b| cost(&shifted(a.0, a.1)).total_cmp(&cost(&shifted(b.0, b.1))))
+        })
+    };
+    let landed = search(true).or_else(|| search(false));
+    let Some((dx, dy)) = landed else { return };
+    // ONE snapped delta for the whole block: snapping each part independently would move
+    // them by different amounts and break the arrangement the engine just searched for.
+    let (dx, dy) = (geom::GRID_50_MIL.snap(dx), geom::GRID_50_MIL.snap(dy));
+    for it in movable.iter_mut() {
+        it.at = Point2::new(it.at[0] + dx, it.at[1] + dy);
+    }
+}
+
+/// Nudge each still-overlapping movable part to the nearest clear grid position.
+/// Deterministic; parts that are already clear never move, and a part with nowhere to go
+/// within [`WALK_RINGS`] keeps its position (the caller sees the overlap rather than a
+/// part flung across the sheet).
+fn nudge_parts(movable: &mut [Item], fixed: &[Item], obstacles: &[Rect]) {
+    let mut taken: Vec<Rect> = fixed.iter().map(|it| body_rect(it, it.at)).collect();
     let mut rest = movable;
     while let Some((item, tail)) = rest.split_first_mut() {
         let others: Vec<Rect> = taken
             .iter()
             .copied()
-            .chain(tail.iter().map(|it| item_rect(it, it.at)))
+            .chain(tail.iter().map(|it| body_rect(it, it.at)))
             .collect();
-        if !clear_of(&item_rect(item, item.at), obstacles, &others) {
+        if !clear_of(&body_rect(item, item.at), obstacles, &others) {
             let from: [f64; 2] = item.at.into();
             let landed = (1..=WALK_RINGS).find_map(|ring| {
                 ring_offsets(ring).into_iter().find_map(|(dx, dy)| {
@@ -148,14 +266,14 @@ fn legalize(movable: &mut [Item], fixed: &[Item], obstacles: &[Rect]) {
                         geom::GRID_50_MIL.snap(from[0] + dx as f64 * WALK),
                         geom::GRID_50_MIL.snap(from[1] + dy as f64 * WALK),
                     );
-                    clear_of(&item_rect(item, at), obstacles, &others).then_some(at)
+                    clear_of(&body_rect(item, at), obstacles, &others).then_some(at)
                 })
             });
             if let Some(at) = landed {
                 item.at = at;
             }
         }
-        taken.push(item_rect(item, item.at));
+        taken.push(body_rect(item, item.at));
         rest = tail;
     }
 }
@@ -233,10 +351,12 @@ pub fn arrange(problem: RegionProblem) -> RegionOutput {
 
     // With nothing to avoid, the engine's own overlap handling is authoritative — walking
     // parts apart here would only reverse the placement it spent its whole search tuning.
-    if !obstacles.is_empty() || !fixed.is_empty() {
+    let stuck = if obstacles.is_empty() && fixed.is_empty() {
+        0
+    } else {
         let (moved, held) = place.items.split_at_mut(movable);
-        legalize(moved, held, &obstacles);
-    }
+        legalize(moved, held, &obstacles)
+    };
 
     let result = {
         let realizer = RoutedSheetRealizer::new(env, &place.inc, &out.ir);
@@ -244,7 +364,10 @@ pub fn arrange(problem: RegionProblem) -> RegionOutput {
         PlaceResult {
             engine: out.result.engine,
             truthfulness_breaks: eval.truthfulness_breaks(&place.items),
-            warnings: eval.warnings(&place.items),
+            // A part legalisation could not clear is a readability defect like any other,
+            // and the realiser cannot see it: both passes give up rather than fling a part
+            // across the sheet, so this is the only place it is counted.
+            warnings: eval.warnings(&place.items) + stuck,
             crossings: eval.crossings(&place.items),
             cost: out.result.cost,
         }

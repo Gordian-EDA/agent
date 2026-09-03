@@ -8,6 +8,19 @@
 /// can say `arrange{block}` about parts it did not place itself.
 pub const AP_BLOCK: &str = "ap_block";
 
+/// The region every part joins when its payload names none.
+pub const DEFAULT_BLOCK: &str = "main";
+
+/// The region a whole-sheet re-arrange lifts the existing drawing into.
+pub const SHEET_BLOCK: &str = "$sheet";
+
+/// Whether a region name was synthesized by the tools rather than chosen by the author.
+/// Neither synthesized name is a functional block, so neither is tagged onto a symbol
+/// ([`AP_BLOCK`]) nor drawn as a frame.
+pub fn synthesized_block(name: &str) -> bool {
+    name == DEFAULT_BLOCK || name == SHEET_BLOCK
+}
+
 /// Property key marking a symbol as benched — on the sheet and on its nets, but
 /// not laid out. `"1"` when set, cleared when the symbol is arranged.
 pub const AP_BENCH: &str = "ap_bench";

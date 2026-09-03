@@ -16,7 +16,7 @@ use sch_floorplan::region::{RegionProblem, arrange};
 use sch_model::engine::{
     CandidateEvaluator, PlacementEngine, PlacementOutput, SchematicPlaceProblem,
 };
-use sch_model::geometry::item_rect;
+use sch_model::geometry::body_rect;
 use sch_model::item::Item;
 use sch_model::place::PlaceOptions;
 
@@ -111,9 +111,9 @@ fn arrange_places_new_parts_without_disturbing_the_neighbours() {
             it
         })
         .collect();
-    let neighbours: Vec<Rect> = fixed.iter().map(|it| item_rect(it, it.at)).collect();
+    let neighbours: Vec<Rect> = fixed.iter().map(|it| body_rect(it, it.at)).collect();
     for (i, a) in placed.iter().enumerate() {
-        let ra = item_rect(a, a.at);
+        let ra = body_rect(a, a.at);
         for o in &obstacles {
             assert!(!ra.overlaps(o), "{} sits on obstacle {o:?}", a.refdes);
         }
@@ -127,7 +127,7 @@ fn arrange_places_new_parts_without_disturbing_the_neighbours() {
         }
         for b in placed.iter().skip(i + 1) {
             assert!(
-                !ra.overlaps(&item_rect(b, b.at)),
+                !ra.overlaps(&body_rect(b, b.at)),
                 "{} sits on {}",
                 a.refdes,
                 b.refdes

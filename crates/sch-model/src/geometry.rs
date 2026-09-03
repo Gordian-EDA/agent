@@ -20,19 +20,16 @@ pub const MARGIN: f64 = 12.7;
 /// Quantization for comparing coordinates by grid cell.
 pub const GRID_KEY: f64 = GRID_50_MIL.pitch();
 
-/// An item's body rect at position `at`. Uses the FULL `approx_size` (which
-/// already pads 2.54 mm/side) so the placement overlap check reserves room for
-/// the symbol body *and* its value/refdes text — matching what the
-/// readability lint flags as an overlap, so a layout the climb accepts is one
-/// the lint passes. (The router uses its own, tighter solid extent in
-/// `emit::route_scene`; this looser one is only for symbol-vs-symbol spacing.)
+/// An item's SYMBOL BODY at position `at`, rotation-aware — the space the drawing
+/// physically occupies, with no allowance for text.
 ///
-/// The text reservation follows the ACTUAL emitted `Reference`/`Value` strings and
-/// the spot the writer's field solver will choose for them, for EVERY part kind —
-/// an IC's long MPN value (`emit::gather` gives a ≥3-pin part its part name when the
-/// author wrote none) needs the widest reservation of all, and reserving nothing for
-/// it is what let a neighbour land on top of the `MCP1703` label.
-pub fn item_rect(it: &Item, at: impl Into<::geom::Point2>) -> ::geom::Rect {
+/// This is the clearance geometry: what a legaliser, a packer or an ownership test means
+/// by "something else is already here". It is exactly the box the writer's text solver
+/// treats as solid (`write/build.rs` seeds `half_extents` from the same
+/// [`SymbolGeometry::approx_size`]), so what the placer packs to and what the typesetter
+/// routes text around are one rectangle. `sch_doc::body_rect` is the same idea read off a
+/// placed document's embedded graphics.
+pub fn body_rect(it: &Item, at: impl Into<::geom::Point2>) -> ::geom::Rect {
     let at = at.into();
     let s = it.geom.approx_size();
     let quarter = ((it.angle / 90.0).round() as i64).rem_euclid(2) == 1;
@@ -41,8 +38,20 @@ pub fn item_rect(it: &Item, at: impl Into<::geom::Point2>) -> ::geom::Rect {
         (w / 2.0).max(geom::GRID_50_MIL.pitch()),
         (h / 2.0).max(geom::GRID_50_MIL.pitch()),
     );
-    let mut r = ::geom::Rect::new(at[0] - hw, at[1] - hh, at[0] + hw, at[1] + hh);
-    let [l, rt, t, b] = field_pad(it, hw * 2.0, hh * 2.0);
+    ::geom::Rect::new(at[0] - hw, at[1] - hh, at[0] + hw, at[1] + hh)
+}
+
+/// An item's body PLUS the room its emitted `Reference`/`Value` text needs
+/// ([`field_pad`]) — the placement-search geometry, so a layout the climb accepts is one
+/// the readability lint passes.
+///
+/// Distinct from [`body_rect`] on purpose: text is a real claim on the sheet when the
+/// search is choosing a layout, and no claim at all when something else is only asking
+/// whether it may stand here.
+pub fn item_rect(it: &Item, at: impl Into<::geom::Point2>) -> ::geom::Rect {
+    let at = at.into();
+    let mut r = body_rect(it, at);
+    let [l, rt, t, b] = field_pad(it, r.width(), r.height());
     r.min_x -= l;
     r.max_x += rt;
     r.min_y -= t;
@@ -54,23 +63,24 @@ pub fn item_rect(it: &Item, at: impl Into<::geom::Point2>) -> ::geom::Rect {
 /// `Reference`/`Value` text, as a pad per side of its body: `[left, right, top, bottom]`
 /// in the PLACED frame, given the body's rotated size.
 ///
-/// The text solver bands an IC's (≥3-pin) or a wide body's field pair
-/// ABOVE/BELOW the body, centred, and stacks a tall 2-pin part's to the RIGHT. The band's
-/// two 1.6 mm lines reach ~4.8 mm past the SOLID body, of which `approx_size` already
-/// pads 2.54 mm.
+/// Only the band an IC or a wide body stacks its field pair in is reserved. That band IS
+/// where the solver puts them: for a ≥3-pin part every candidate it offers is a band
+/// above/below or a corner (`write/textsolve.rs`), so reserving it is the search agreeing
+/// with the typesetter rather than double-booking the sheet.
 ///
-/// [`item_rect`] grows an item's rect by this so the placement search keeps neighbours
-/// out of the text's spot, and [`crate::cells::apply_cells`] sizes its grid tracks by it
-/// so an IC's long MPN gets a column wide enough to hold it in the first place.
+/// A tall 2-pin passive gets NOTHING. Its fields have ten candidate spots, of which the
+/// right-hand one this used to reserve is one; paying `text_width + a grid step` of
+/// column width for a claim the solver abandons the moment it is inconvenient made every
+/// passive column 4.6-6.8 mm wider than the drawing in it — a third of the gap between
+/// our part spacing and a human's.
 pub fn field_pad(it: &Item, w: f64, h: f64) -> [f64; 4] {
     const BAND: f64 = 2.24;
-    let text = text_width(&it.value).max(text_width(&it.refdes));
-    if it.geom.pins.len() >= 3 || w > h {
-        let spill = (text / 2.0 - w / 2.0).max(0.0);
-        [spill, spill, BAND, BAND]
-    } else {
-        [0.0, text + geom::GRID_50_MIL.pitch(), 0.0, 0.0]
+    if it.geom.pins.len() < 3 && w <= h {
+        return [0.0; 4];
     }
+    let text = text_width(&it.value).max(text_width(&it.refdes));
+    let spill = (text / 2.0 - w / 2.0).max(0.0);
+    [spill, spill, BAND, BAND]
 }
 
 /// Count pairs of items whose bodies overlap — the hard "never let two symbols
@@ -168,3 +178,51 @@ pub fn pin_endpoint(
         .into()
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use kicad_symbol::geometry::{PinGeom, SymbolGeometry};
+
+    fn part(refdes: &str, value: &str, pins: usize) -> Item {
+        let pin = |n: usize| PinGeom {
+            number: (n + 1).to_string(),
+            name: "~".into(),
+            at: geom::Point2::new(0.0, if n == 0 { 3.81 } else { -3.81 }),
+            angle: 0.0,
+            length: 2.54,
+            unit: 1,
+        };
+        Item {
+            refdes: refdes.into(),
+            block: String::new(),
+            part: "Device:R".into(),
+            value: value.into(),
+            footprint: None,
+            geom: SymbolGeometry {
+                lib_id: "Device:R".into(),
+                pins: (0..pins).map(pin).collect(),
+                raw_definition: String::new(),
+            },
+            pins: Vec::new(),
+            at: [0.0, 0.0].into(),
+            angle: 0.0,
+            unit: 1,
+            mirror: false,
+            frozen: false,
+            preseeded: false,
+        }
+    }
+
+    #[test]
+    fn a_tall_passive_claims_no_text_column() {
+        let r = part("R1", "100nF", 2);
+        assert_eq!(item_rect(&r, r.at), body_rect(&r, r.at));
+    }
+
+    #[test]
+    fn an_ic_keeps_the_band_its_fields_land_in() {
+        let u = part("U1", "MCP1703", 3);
+        let (body, full) = (body_rect(&u, u.at), item_rect(&u, u.at));
+        assert!(full.min_y < body.min_y && full.max_y > body.max_y);
+    }
+}
