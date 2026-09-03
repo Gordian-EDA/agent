@@ -142,7 +142,39 @@ VLM-judged suite under `quality/` runs natural-language create/edit/replace case
 ```sh
 python3 quality/run.py --list
 python3 quality/run.py --question "is the board production-ready?" --max-turns 4 create-hard-pcb
-python3 quality/run.py --suite schematic --output quality/runs/schematic
+python3 quality/run.py --suite schematic --jobs 2 --output quality/runs/schematic
+```
+
+Suites: `schematic` (`dataset-*` + `prompt-*`, the schematic benchmark below),
+`campaign` (end-to-end schematic+PCB), `live-edit` (`sch-*` tool cases), `pcb`,
+`all`. `--jobs N` runs N cases at a time.
+
+### The schematic benchmark (`--suite schematic`)
+
+Fourteen schematic-only cases, scored on the drawing the agent delivers.
+
+* `dataset-*` (8): a human-drawn sheet from `~/kicad-scraper/dataset` — single
+  sheet, stock-library symbols only, 20-60 parts, two per size band — reduced to
+  its netlist by `tools/sch_netlist.py`. The agent gets `netlist.json` (every part
+  with its lib id and value, every pin's net) and the sheet title, nothing else.
+  `netlist_matches_reference` compares KiCAD's netlist of the delivered sheet with
+  KiCAD's netlist of the human original, pin set for pin set; the human sheet and
+  its render stay out of the agent's project.
+* `prompt-*` (6): generic circuit prompts (Sallen-Key filter + gain, 555 blinker +
+  LDO, BJT preamp, H-bridge, Arduino-style board, Blue Pill) with a part-count floor.
+
+Every schematic critic score is calibrated against a human sheet rated 9 — equal
+to it is a 9, better a 10 — read three times with the modal score kept
+(`tools/schematic_critic.py --anchor ... --samples 3`). A `dataset-*` case anchors
+on its own human original (recorded as `critic_vs_reference`); everything else on
+`quality/anchor/schematic-9.png`. The anchor used is recorded as `critic_anchor`
+in `result.json`.
+
+Regenerate the dataset cases (deterministic) with:
+
+```sh
+python3 tools/sch_netlist.py cases
+python3 tools/sch_netlist.py extract SHEET.kicad_sch -o netlist.json
 ```
 
 The runner uses the same `llm.endpoint`, `llm.apiKey`, and `llm.model` from the

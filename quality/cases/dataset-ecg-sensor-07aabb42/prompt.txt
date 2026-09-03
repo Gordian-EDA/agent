@@ -1,0 +1,1 @@
+Draw this circuit as a schematic from the netlist in netlist.json: every part with its lib id and value, every pin on exactly the net given. Do not add or remove parts. The sheet is titled "07aabb42a235". Render the schematic when it is done.

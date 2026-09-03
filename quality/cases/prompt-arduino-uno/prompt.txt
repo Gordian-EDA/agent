@@ -1,0 +1,1 @@
+Design an ATmega328P Arduino-style board: 16 MHz crystal with load capacitors, reset button with pull-up, ICSP header, USB-C to CH340C USB-serial bridge with the auto-reset capacitor, AMS1117-5.0 and AMS1117-3.3 regulators with their capacitors, a power LED and a pin-13 LED, and all digital and analog pins on headers. Render the schematic.

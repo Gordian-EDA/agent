@@ -1,0 +1,233 @@
+{
+ "title": "Minuet Light Accessory",
+ "parts": [
+  {
+   "ref": "C1",
+   "lib_id": "Device:C",
+   "value": "1u",
+   "pins": {
+    "1": "N$1",
+    "2": "GND"
+   }
+  },
+  {
+   "ref": "C2",
+   "lib_id": "Device:C",
+   "value": "10n",
+   "pins": {
+    "1": "GND",
+    "2": "N$3"
+   }
+  },
+  {
+   "ref": "C3",
+   "lib_id": "Device:C",
+   "value": "2.2u",
+   "pins": {
+    "1": "GND",
+    "2": "+5V"
+   }
+  },
+  {
+   "ref": "C4",
+   "lib_id": "Device:C",
+   "value": "100n",
+   "pins": {
+    "1": "+5V",
+    "2": "GND"
+   }
+  },
+  {
+   "ref": "C5",
+   "lib_id": "Device:C",
+   "value": "10u",
+   "pins": {
+    "1": "+12V",
+    "2": "GND"
+   }
+  },
+  {
+   "ref": "C6",
+   "lib_id": "Device:C",
+   "value": "100n",
+   "pins": {
+    "1": "+12V",
+    "2": "GND"
+   }
+  },
+  {
+   "ref": "C7",
+   "lib_id": "Device:C",
+   "value": "10n",
+   "pins": {
+    "1": "GND",
+    "2": "N$4"
+   }
+  },
+  {
+   "ref": "J1",
+   "lib_id": "Connector_Generic:Conn_02x08_Odd_Even",
+   "value": "PH2-16-UA",
+   "pins": {
+    "1": "BOOT",
+    "2": "RESET",
+    "3": "GPIO1",
+    "4": "GPIO0",
+    "5": "GPIO15",
+    "6": "GPIO14",
+    "7": "I2C_SCL",
+    "8": "I2C_SDA",
+    "9": "UART_RXD",
+    "10": "UART_TXD",
+    "11": "ACC_ID",
+    "12": "LOCK",
+    "13": "GND",
+    "14": "+3.3V",
+    "15": "GND",
+    "16": "+12V"
+   }
+  },
+  {
+   "ref": "J2",
+   "lib_id": "Connector_Generic:Conn_01x03",
+   "value": "B3B-XH-A",
+   "pins": {
+    "1": "GND",
+    "2": "DATA",
+    "3": "LOAD"
+   }
+  },
+  {
+   "ref": "J3",
+   "lib_id": "Connector_Generic:Conn_01x09",
+   "value": "Conn_01x09",
+   "pins": {
+    "1": "BOOT",
+    "2": "GPIO1",
+    "3": "GPIO15",
+    "4": "I2C_SCL",
+    "5": "UART_RXD",
+    "6": "ACC_ID",
+    "7": "GND",
+    "8": "GND",
+    "9": "GND"
+   }
+  },
+  {
+   "ref": "J4",
+   "lib_id": "Connector_Generic:Conn_01x09",
+   "value": "Conn_01x09",
+   "pins": {
+    "1": "RESET",
+    "2": "GPIO0",
+    "3": "GPIO14",
+    "4": "I2C_SDA",
+    "5": "UART_TXD",
+    "6": "LOCK",
+    "7": "+3.3V",
+    "8": "+12V",
+    "9": "+5V"
+   }
+  },
+  {
+   "ref": "JP1",
+   "lib_id": ":SolderJumper_2_Bridged_1",
+   "value": "SolderJumper_2_Open",
+   "pins": {
+    "1": "N$1",
+    "2": "+12V"
+   }
+  },
+  {
+   "ref": "JP2",
+   "lib_id": "Jumper:SolderJumper_2_Open",
+   "value": "SolderJumper_2_Open",
+   "pins": {
+    "1": "ACC_ID",
+    "2": "GND"
+   }
+  },
+  {
+   "ref": "R1",
+   "lib_id": "Device:R",
+   "value": "33",
+   "pins": {
+    "1": "DATA",
+    "2": "N$2"
+   }
+  },
+  {
+   "ref": "R2",
+   "lib_id": "Device:R",
+   "value": "100K",
+   "pins": {
+    "1": "GND",
+    "2": "GPIO14"
+   }
+  },
+  {
+   "ref": "R3",
+   "lib_id": "Device:R",
+   "value": "1K",
+   "pins": {
+    "1": "LOAD",
+    "2": "N$5"
+   }
+  },
+  {
+   "ref": "R4",
+   "lib_id": "Device:R",
+   "value": "100K",
+   "pins": {
+    "1": "GND",
+    "2": "GPIO15"
+   }
+  },
+  {
+   "ref": "R5",
+   "lib_id": "Device:R",
+   "value": "100K",
+   "pins": {
+    "1": "GND",
+    "2": "ACC_ID"
+   }
+  },
+  {
+   "ref": "U1",
+   "lib_id": "Regulator_Linear:LP2985-5.0",
+   "value": "LP2985-50DBVR",
+   "pins": {
+    "1": "N$1",
+    "2": "GND",
+    "3": "N$1",
+    "4": "N$3",
+    "5": "+5V"
+   }
+  },
+  {
+   "ref": "U2",
+   "lib_id": "74xGxx:74LVC1G17",
+   "value": "SN74LVC1G17DBVR",
+   "pins": {
+    "1": "nc",
+    "2": "GPIO14",
+    "3": "GND",
+    "4": "N$2",
+    "5": "+5V"
+   }
+  },
+  {
+   "ref": "U3",
+   "lib_id": "Power_Management:TPS22810DBV",
+   "value": "TPS22810(-Q1)",
+   "pins": {
+    "1": "+12V",
+    "2": "GND",
+    "3": "GPIO15",
+    "4": "N$4",
+    "5": "N$5",
+    "6": "LOAD"
+   }
+  }
+ ]
+}
