@@ -855,6 +855,8 @@ dependencies = [
  "indexmap 2.14.0",
  "kicad",
  "kicad-board",
+ "pcb-engine",
+ "pcb-model",
  "pcb-workflow",
  "sch-check",
  "sch-doc",

@@ -38,3 +38,5 @@ toml.workspace = true
 directories.workspace = true
 geom = { path = "../geom" }
 kicad-board = { path = "../kicad-board" }
+pcb-engine = { path = "../pcb-engine" }
+pcb-model = { path = "../pcb-model" }

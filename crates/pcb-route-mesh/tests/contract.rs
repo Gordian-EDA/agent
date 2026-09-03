@@ -41,7 +41,7 @@ fn boards() -> Vec<(&'static str, RoutingView)> {
         .collect()
 }
 
-/// The prepared routing problems for the seven `--required` corpus boards.
+/// The prepared routing problems for the corpus and large-board stress cases.
 fn corpus_boards() -> Vec<(&'static str, RoutingView)> {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/corpus");
     let mut names: Vec<String> = std::fs::read_dir(&dir)

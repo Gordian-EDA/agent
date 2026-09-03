@@ -179,6 +179,7 @@ fn the_board_is_built_incrementally_through_legal_partial_states() {
     // ── route a few nets on a board that is only half placed ────────────────
     // Only VIN joins two placed parts; every other net reaches the staging row.
     let routed = tool(&ctx, "route_board", json!({ "nets": ["VIN"] }));
+    let mut routed_so_far = routed["routed_connection_count"].as_u64().unwrap();
     let entries = routed["ratsnest"].as_array().unwrap();
     assert_eq!(
         entries.len() as u64,
@@ -198,6 +199,16 @@ fn the_board_is_built_incrementally_through_legal_partial_states() {
             );
         }
     }
+    let deleted = tool(&ctx, "delete_copper", json!({ "net": "VIN" }));
+    assert!(deleted["deleted"].as_u64().is_some_and(|count| count > 0));
+    assert!(
+        deleted["now_open"]
+            .as_array()
+            .is_some_and(|nets| nets.iter().any(|net| net == "VIN")),
+        "deleting copper reports the net it intentionally opened: {deleted:#}"
+    );
+    let rerouted = tool(&ctx, "route_board", json!({ "nets": ["VIN"] }));
+    routed_so_far = rerouted["routed_connection_count"].as_u64().unwrap();
     // A net that reaches a part nobody has placed is open, and its way out is
     // to place that part — not to move copper that does not exist yet.
     let staged_now: Vec<String> =
@@ -277,10 +288,26 @@ fn the_board_is_built_incrementally_through_legal_partial_states() {
     assert_eq!(again["placed"].as_array().unwrap().len(), 27, "{again:#}");
 
     // ── route the rest, then read the progress ──────────────────────────────
-    let routed = tool(&ctx, "route_board", json!({}));
+    let routable = tool(&ctx, "get_board", json!({}))["summary"]["nets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|net| net["pins"].as_u64().unwrap_or_default() >= 2)
+        .filter_map(|net| net["name"].as_str().map(str::to_owned))
+        .collect::<Vec<_>>();
+    let mut routed = Value::Null;
+    for batch in routable.chunks(6) {
+        routed = tool(&ctx, "route_board", json!({ "nets": batch }));
+        let progress = routed["routed_connection_count"].as_u64().unwrap();
+        assert!(
+            progress >= routed_so_far,
+            "routed progress must be monotone: {routed_so_far} -> {progress}: {routed:#}"
+        );
+        routed_so_far = progress;
+    }
     assert!(
-        routed["routed_connection_count"].as_u64().unwrap() > 1,
-        "routing a placed board makes progress: {routed:#}"
+        routed_so_far > 1,
+        "routing in batches makes progress: {routed:#}"
     );
     for entry in routed["ratsnest"].as_array().unwrap() {
         let status = entry["status"].as_str().unwrap();
@@ -317,6 +344,171 @@ fn the_board_is_built_incrementally_through_legal_partial_states() {
     assert!(
         checked["routed_connection_count"].as_u64().unwrap() > 1,
         "the second route made progress on top of the first: {checked:#}"
+    );
+    let open = checked["total_connection_count"].as_u64().unwrap()
+        - checked["routed_connection_count"].as_u64().unwrap();
+    let blocked = checked["blocked"].as_array().unwrap();
+    assert!(
+        checked["drc_clean"] == json!(true)
+            || (blocked.len() as u64 == open
+                && blocked
+                    .iter()
+                    .all(|entry| entry.get("blocker").is_some_and(Value::is_object))),
+        "the incremental route must end at DRC 0 or with every open net carrying a blocker: {checked:#}"
+    );
+}
+
+/// Sixty LED-array passives plus their connector are placed once, then routed
+/// in local batches whose saved-board progress can only increase.
+#[test]
+fn the_sixty_part_led_array_routes_in_monotone_batches() {
+    let Some(ctx) = AgentRuntime::detect_for_test() else {
+        eprintln!("SKIP: no KiCAD detected");
+        return;
+    };
+    let catalog = ctx.footprint_catalog().expect("footprint catalog");
+    let source = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../pcb-workflow/examples/pcb_circuits/led-array-60.json");
+    let board = pcb_workflow::corpus::load_corpus_board(&source, catalog).expect("LED corpus");
+    assert_eq!(
+        board.problem.parts.len(),
+        61,
+        "60 passives plus one connector"
+    );
+    let placed = pcb_engine::place_tuned(&board.problem, &board.hints);
+    assert!(placed.legal, "the array placement must be legal");
+    let text = pcb_workflow::corpus::routed_board_text(
+        &board,
+        &placed.placements,
+        &pcb_model::RouteSolution::default(),
+        catalog,
+    )
+    .expect("saved board");
+    std::fs::write(ctx.pcb_path(), text).expect("write saved board");
+
+    let nets = tool(&ctx, "get_board", json!({}))["summary"]["nets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|net| net["pins"].as_u64().unwrap_or_default() >= 2)
+        .filter_map(|net| net["name"].as_str().map(str::to_owned))
+        .collect::<Vec<_>>();
+    assert_eq!(nets.len(), 32);
+    let mut routed = 0_u64;
+    let mut last = Value::Null;
+    for batch in nets.chunks(8) {
+        last = tool(&ctx, "route_board", json!({ "nets": batch }));
+        let progress = last["routed_connection_count"].as_u64().unwrap();
+        assert!(
+            progress >= routed,
+            "routed progress decreased from {routed} to {progress}: {last:#}"
+        );
+        routed = progress;
+    }
+    assert!(routed > 0, "the array route made no progress: {last:#}");
+
+    let checked = tool(&ctx, "check_board", json!({}));
+    let drc_clean = checked["blocking_findings"] == json!(0);
+    let blocked_are_actionable = checked["blocked"].as_array().is_some_and(|blocked| {
+        !blocked.is_empty()
+            && blocked
+                .iter()
+                .all(|entry| entry.get("blocker").is_some_and(Value::is_object))
+    });
+    assert!(
+        drc_clean || blocked_are_actionable,
+        "the final partial state needs DRC 0 or geometric blockers: {checked:#}"
+    );
+}
+
+/// A live schematic edit makes the board net table stale until sync imports the
+/// new nets; ERC findings and placement intent remain reportable parallel work.
+#[test]
+fn stale_nets_request_sync_and_existing_board_intent_runs_both_halves() {
+    let Some(ctx) = AgentRuntime::detect_for_test() else {
+        eprintln!("SKIP: no KiCAD detected");
+        return;
+    };
+    tool(
+        &ctx,
+        "place_parts",
+        json!({ "parts": [
+            {"ref":"R1", "part":"Device:R", "footprint":R0805,
+             "pins":{"1":"VIN", "2":"MID"}},
+            {"ref":"R2", "part":"Device:R", "footprint":R0805,
+             "pins":{"1":"MID", "2":"GND"}}
+        ]}),
+    );
+    tool(&ctx, "sync_board", json!({}));
+    run_tool(
+        "add_symbols",
+        json!({ "parts": [{ "ref": "R99", "lib_id": "Device:R" }] }),
+        &ctx,
+    )
+    .expect("add an intentionally incomplete symbol");
+
+    let stale_get = run_tool("get_board", json!({ "net": "UNSYNCED" }), &ctx).unwrap();
+    let imported_net = stale_get["schematic_changed"]["nets"]
+        .as_array()
+        .and_then(|nets| {
+            nets.iter()
+                .filter_map(Value::as_str)
+                .find(|net| net.contains("R99"))
+        })
+        .expect("a new R99 net")
+        .to_owned();
+    for stale in [
+        stale_get,
+        run_tool("route_board", json!({ "nets": ["UNSYNCED"] }), &ctx).unwrap(),
+    ] {
+        assert_eq!(stale["code"], "board_net_table_stale", "{stale:#}");
+        assert!(
+            stale["error"]
+                .as_str()
+                .is_some_and(|error| error.contains("run sync_board first")),
+            "{stale:#}"
+        );
+        assert!(
+            !stale["schematic_changed"]["nets"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    let synced = run_tool(
+        "sync_board",
+        json!({ "intent": {
+            "keep_near": [["R1", "R2"]],
+            "edge": { "J404": "left" }
+        } }),
+        &ctx,
+    )
+    .unwrap();
+    assert!(synced.get("error").is_none(), "{synced:#}");
+    assert!(synced["sync"].is_object(), "{synced:#}");
+    assert!(synced["placement"].is_object(), "{synced:#}");
+    assert!(
+        synced["placement"]["reference_status"]
+            .as_array()
+            .is_some_and(|statuses| statuses.iter().any(|status| {
+                status["reference"] == "J404" && status["status"] == "absent_from_schematic"
+            })),
+        "an absent intent ref is classified while sync proceeds: {synced:#}"
+    );
+    assert!(
+        synced["schematic_erc"]["errors"]
+            .as_u64()
+            .is_some_and(|errors| errors > 0),
+        "ERC errors are reported without blocking sync: {synced:#}"
+    );
+    let fresh = tool(&ctx, "get_board", json!({}));
+    assert_ne!(fresh["sync_required"], json!(true), "{fresh:#}");
+    assert!(
+        std::fs::read_to_string(ctx.pcb_path())
+            .unwrap()
+            .contains(&imported_net),
+        "sync must import the new net into the KiCad board table"
     );
 }
 
