@@ -861,12 +861,7 @@ fn rearrange_inner(
             let redrawn = doc.retain_drawing(|item| !erase.contains(&drawing_key(item)));
             // The held half of a nameless boundary net needs the minted name too:
             // one label each side is what makes the two halves one net again.
-            for net in &boundary {
-                let Some(minted) = &net.mint else { continue };
-                for held in &net.held {
-                    doc.add_label(sch_doc::LabelKind::Local, minted, Pose::new(held.x, held.y, 0.0));
-                }
-            }
+            name_held_halves(doc, &boundary);
             let inc = incidence(&placed);
             let writer = crate::realize::realize_block(
                 env,
@@ -1317,6 +1312,40 @@ fn boundary_nets(doc: &SchDoc, before: &Netlist, chosen: &BTreeSet<String>) -> V
             })
         })
         .collect()
+}
+
+/// Give each surviving piece of a minted net's held side its name — one label per
+/// piece, read off the sheet as it stands after the erase.
+///
+/// Labelling every held pin would work and would also litter a twenty-pin net with
+/// twenty labels; labelling one pin per PARTITION is the same guarantee at the
+/// smallest cost, and it is exact because erasing the selection's drawing is what
+/// decides how many pieces there are.
+fn name_held_halves(doc: &mut SchDoc, boundary: &[BoundaryNet]) {
+    if !boundary.iter().any(|net| net.mint.is_some()) {
+        return;
+    }
+    let piece_at: HashMap<(i64, i64), String> = connect::scene(doc)
+        .points
+        .into_iter()
+        .map(|(at, piece)| (coord(at), piece))
+        .collect();
+    let mut named: BTreeSet<(&str, &str)> = BTreeSet::new();
+    let mut labels = Vec::new();
+    for net in boundary {
+        let Some(minted) = net.mint.as_deref() else {
+            continue;
+        };
+        for held in &net.held {
+            let piece = piece_at.get(&coord(*held)).map_or("", String::as_str);
+            if named.insert((piece, minted)) {
+                labels.push((minted.to_string(), *held));
+            }
+        }
+    }
+    for (name, at) in labels {
+        doc.add_label(sch_doc::LabelKind::Local, &name, Pose::new(at.x, at.y, 0.0));
+    }
 }
 
 /// Nets touching `chosen` that the sheet names with a label of its own.

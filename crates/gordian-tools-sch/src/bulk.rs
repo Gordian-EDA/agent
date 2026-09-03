@@ -482,6 +482,14 @@ fn guarded_place_parts(
     }
 }
 
+/// Re-lay out a selection, or — when the search runs out of clock — do the half of
+/// the work that has no search in it.
+///
+/// The engines stop themselves at the search deadline, so an overrun means an
+/// engine ignored it and the whole call was abandoned. Coming back empty is the
+/// one outcome worth avoiding: a re-wire in place redraws the same selection's
+/// wiring from the same netlist with no search at all, which is the honest
+/// best-so-far — the layout is what it was, and the drawing is current.
 pub(crate) fn arrange(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let input: SelectionInput = typed(input, "arrange")?;
     let selection = selection(&input)?;
@@ -499,7 +507,7 @@ pub(crate) fn arrange(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         Ok(report) => report,
         Err(error @ sch_floorplan::live::Error::Budget { .. }) => {
             timing.done("overran");
-            return Ok(budget_refusal(&error));
+            return arrange_in_place(ctx, &selection, budget_refusal(&error));
         }
         Err(error) => return Err(error.into()),
     };
@@ -509,6 +517,27 @@ pub(crate) fn arrange(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         "refused"
     });
     finish_arrangement(edit, report, ctx)
+}
+
+/// The searchless half of `arrange`, run after its budget was spent.
+fn arrange_in_place(ctx: &AgentRuntime, selection: &Selection, overrun: Value) -> Result<Value> {
+    let mut edit = Edit::open(ctx)?;
+    let budget = PlacementBudget::new(edit.doc.symbols().count());
+    let report =
+        match sch_floorplan::live::rewire(ctx.env(), &mut edit.doc, selection, Some(budget)) {
+            Ok(report) => report,
+            Err(_) => return Ok(overrun),
+        };
+    if !report.committed {
+        return Ok(overrun);
+    }
+    let mut value = finish_arrangement(edit, report, ctx)?;
+    value["placement"] = overrun["placement"].clone();
+    value["note"] = json!(
+        "the placement search overran its budget; the selection's wiring was redrawn where it \
+         stands instead. Arrange a smaller selection to move it."
+    );
+    Ok(value)
 }
 
 pub(crate) fn rewire(input: Value, ctx: &AgentRuntime) -> Result<Value> {
