@@ -286,3 +286,6 @@ re-place." Quality first; time later via parallel subagents; schematic too.
   rotated-envelope bug and outline refit unstaging parts). Prompt tightened back under 8000 chars.
   Local main now holds: train 3 (pace, looks), sch-refusals-4, pcb-seed-shorts, prompt trim — push
   waits on graft-additive; then round 7.
+- USER: "we should never stop on a partial state" → lane/no-turn-budget (Opus): delete the 270 s wall
+  clock, the 56-request cap, the `## Partial state` handoff and harness continuation; one prompt runs
+  to completion; only an off-by-default user cap remains.
