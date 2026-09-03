@@ -219,7 +219,7 @@ fn write_parts(
     }
 }
 
-fn write_power_symbols(out: &mut String, power: &[&SymbolInst], full: bool) {
+fn write_power_symbols(out: &mut String, power: &[&SymbolInst]) {
     let mut counts = BTreeMap::new();
     for symbol in power {
         *counts.entry(symbol.value()).or_insert(0_usize) += 1;
@@ -228,33 +228,59 @@ fn write_power_symbols(out: &mut String, power: &[&SymbolInst], full: bool) {
     for (value, count) in counts {
         write!(out, "  {value} ×{count}").expect("writing to a string cannot fail");
     }
-    if !full {
-        out.push_str("   (detail=full lists each with its position)");
-    }
     out.push('\n');
-    if full {
-        let mut symbols = power.to_vec();
-        symbols.sort_by(|left, right| compare_refdes(left.refdes(), right.refdes()));
-        let ref_width = symbols
-            .iter()
-            .map(|symbol| symbol.refdes().len())
-            .max()
-            .unwrap_or(1);
-        let value_width = symbols
-            .iter()
-            .map(|symbol| symbol.value().len())
-            .max()
-            .unwrap_or(1);
-        for symbol in symbols {
-            writeln!(
-                out,
-                "  {:<ref_width$}  {:<value_width$}  {}",
-                symbol.refdes(),
-                symbol.value(),
-                pose(symbol),
-            )
-            .expect("writing to a string cannot fail");
-        }
+    let mut symbols = power.to_vec();
+    symbols.sort_by(|left, right| compare_refdes(left.refdes(), right.refdes()));
+    let ref_width = symbols
+        .iter()
+        .map(|symbol| symbol.refdes().len())
+        .max()
+        .unwrap_or(1);
+    let value_width = symbols
+        .iter()
+        .map(|symbol| symbol.value().len())
+        .max()
+        .unwrap_or(1);
+    for symbol in symbols {
+        writeln!(
+            out,
+            "  {:<ref_width$}  {:<value_width$}  {}  uuid={}",
+            symbol.refdes(),
+            symbol.value(),
+            pose(symbol),
+            symbol.uuid,
+        )
+        .expect("writing to a string cannot fail");
+    }
+}
+
+fn label_kind(kind: sch_doc::LabelKind) -> &'static str {
+    match kind {
+        sch_doc::LabelKind::Local => "local",
+        sch_doc::LabelKind::Global => "global",
+        sch_doc::LabelKind::Hier => "hierarchical",
+    }
+}
+
+fn write_labels(out: &mut String, doc: &SchDoc) {
+    let mut labels = doc.labels().collect::<Vec<_>>();
+    labels.sort_by(|left, right| {
+        sch_doc::unescape(&left.text)
+            .cmp(&sch_doc::unescape(&right.text))
+            .then_with(|| left.uuid.cmp(&right.uuid))
+    });
+    out.push_str("\nLABELS  (scope  name  @x,y  uuid)\n");
+    for label in labels {
+        writeln!(
+            out,
+            "  {}  {}  @{:.2},{:.2}  uuid={}",
+            label_kind(label.kind),
+            sch_doc::unescape(&label.text),
+            label.at.x,
+            label.at.y,
+            label.uuid,
+        )
+        .expect("writing to a string cannot fail");
     }
 }
 
@@ -333,7 +359,8 @@ pub fn read_schematic(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         netlist.nets.len(),
     );
     write_parts(&mut out, &doc, &netlist, &placed, region, full);
-    write_power_symbols(&mut out, &power, full);
+    write_power_symbols(&mut out, &power);
+    write_labels(&mut out, &doc);
 
     out.push_str("\nNETS  (name: pins; power symbols counted, not listed)\n");
     let mut nets: Vec<&Net> = netlist.nets.iter().collect();
@@ -608,6 +635,30 @@ pub fn get_net(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             pin.name, pin.etype, pin.at.x, pin.at.y,
         )
         .expect("writing to a string cannot fail");
+    }
+    let scene = sch_doc::connect::scene(&doc);
+    let labels = doc
+        .labels()
+        .filter(|label| {
+            sch_doc::unescape(&label.text) == net.name
+                || scene.points.iter().any(|(point, point_net)| {
+                    point_net == &net.name && point.near_eq(label.at.point(), geom::EPS)
+                })
+        })
+        .collect::<Vec<_>>();
+    if !labels.is_empty() {
+        out.push_str("LABELS\n");
+        for label in labels {
+            writeln!(
+                out,
+                "{}  @{:.2},{:.2}  uuid={}",
+                label_kind(label.kind),
+                label.at.x,
+                label.at.y,
+                label.uuid,
+            )
+            .expect("writing to a string cannot fail");
+        }
     }
     Ok(Value::String(out))
 }

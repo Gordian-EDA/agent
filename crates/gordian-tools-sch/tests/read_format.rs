@@ -74,6 +74,23 @@ fn read_schematic_groups_and_sorts_the_demo() {
         3
     );
     assert!(compact.contains("POWER SYMBOLS  GND ×7  PWR_FLAG ×2"));
+    assert!(
+        compact
+            .lines()
+            .filter(|line| line.trim_start().starts_with('#'))
+            .all(|line| line.contains("uuid=")),
+        "{compact}"
+    );
+    assert!(compact.contains("\nLABELS  (scope  name  @x,y  uuid)\n"));
+    let labels = compact
+        .split_once("\nLABELS  (scope  name  @x,y  uuid)\n")
+        .unwrap()
+        .1
+        .split_once("\nNETS")
+        .unwrap()
+        .0;
+    assert!(labels.lines().next().is_some_and(|line| line.contains("uuid=")));
+    assert!(labels.lines().all(|line| line.contains("uuid=")), "{labels}");
     let gnd = compact
         .lines()
         .find(|line| line.starts_with("GND "))
@@ -128,7 +145,11 @@ fn focused_lookups_are_aligned_plain_text() {
 
     let net = text(&ctx, "get_net", json!({"name": "GND"}));
     assert!(net.starts_with("NET GND  7 pins  named by: power symbol\n"));
-    let pins: Vec<&str> = net.lines().skip(1).collect();
+    let pins: Vec<&str> = net
+        .lines()
+        .skip(1)
+        .take_while(|line| *line != "LABELS")
+        .collect();
     assert_eq!(pins.len(), 7, "{net}");
     assert!(pins.iter().all(|line| !line.starts_with('#')));
 }
