@@ -842,7 +842,7 @@ fn removed_items(before: &SchDoc, after: &SchDoc) -> RemovedItems {
     removed
 }
 
-fn symbol_targets(doc: &SchDoc, targets: &[String]) -> Result<Vec<String>, Vec<String>> {
+fn symbol_targets(doc: &SchDoc, targets: &[String]) -> (Vec<String>, Vec<String>) {
     let mut uuids = Vec::new();
     let mut missing = Vec::new();
     for target in targets {
@@ -863,11 +863,7 @@ fn symbol_targets(doc: &SchDoc, targets: &[String]) -> Result<Vec<String>, Vec<S
     }
     uuids.sort();
     uuids.dedup();
-    if missing.is_empty() {
-        Ok(uuids)
-    } else {
-        Err(missing)
-    }
+    (uuids, missing)
 }
 
 fn welded_flags(doc: &SchDoc, pins: &[Point2], removed_owners: &[String]) -> Vec<String> {
@@ -966,14 +962,13 @@ pub fn remove_symbols(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     }
     let mut edit = Edit::open(ctx)?;
     let original = edit.doc.clone();
-    let mut uuids = match symbol_targets(&edit.doc, &targets) {
-        Ok(uuids) => uuids,
-        Err(missing) => {
-            return Ok(json!({
-                    "error": format!("not on the sheet: {}", missing.join(", ")),
-            }));
-        }
-    };
+    let (mut uuids, missing) = symbol_targets(&edit.doc, &targets);
+    if uuids.is_empty() {
+        return Ok(json!({
+            "error": format!("not on the sheet: {}", missing.join(", ")),
+            "missing": missing,
+        }));
+    }
 
     let orphaned: Vec<Point2> = placed_pins(&edit.doc)
         .into_iter()
@@ -1012,35 +1007,67 @@ pub fn remove_symbols(input: Value, ctx: &AgentRuntime) -> Result<Value> {
                 "power": removed.power,
             },
             "now_loose": loose,
+            "missing": missing,
         }),
         allow,
     )
 }
 
-fn region_bounds(input: &Value, doc: &SchDoc) -> std::result::Result<(Rect, Vec<String>), String> {
-    let bbox = input.get("bbox");
+struct RegionSelection {
+    bounds: Rect,
+    block_uuids: Vec<String>,
+    missing_block: Option<String>,
+    blocks: Vec<String>,
+}
+
+fn region_bbox(input: &Value) -> std::result::Result<Option<Rect>, String> {
+    let Some(values) = input.get("bbox") else {
+        return Ok(None);
+    };
+    let coordinates = values
+        .as_array()
+        .map(|values| values.iter().filter_map(Value::as_f64).collect::<Vec<_>>())
+        .unwrap_or_default();
+    if coordinates.len() != 4 {
+        return Err("`bbox` must be [x1, y1, x2, y2] in mm".to_string());
+    }
+    Ok(Some(Rect::from_points(
+        Point2::new(coordinates[0], coordinates[1]),
+        Point2::new(coordinates[2], coordinates[3]),
+    )))
+}
+
+fn block_names(doc: &SchDoc) -> Vec<String> {
+    let mut blocks = doc
+        .symbols()
+        .filter_map(|symbol| {
+            symbol
+                .fields
+                .get(sch_model::result::AP_BLOCK)
+                .map(|field| field.value.clone())
+                .filter(|value| !value.is_empty())
+        })
+        .collect::<Vec<_>>();
+    blocks.sort();
+    blocks.dedup();
+    blocks
+}
+
+fn region_bounds(input: &Value, doc: &SchDoc) -> std::result::Result<RegionSelection, Value> {
+    let bbox = region_bbox(input).map_err(|error| json!({"error": error}))?;
     let block = input.get("block").and_then(Value::as_str);
     match (bbox, block) {
-        (Some(_), Some(_)) | (None, None) => {
-            Err("remove_region needs exactly one of `bbox` or `block`".to_string())
-        }
-        (Some(values), None) => {
-            let coordinates = values
-                .as_array()
-                .map(|values| values.iter().filter_map(Value::as_f64).collect::<Vec<_>>())
-                .unwrap_or_default();
-            if coordinates.len() != 4 {
-                return Err("`bbox` must be [x1, y1, x2, y2] in mm".to_string());
-            }
-            Ok((
-                Rect::from_points(
-                    Point2::new(coordinates[0], coordinates[1]),
-                    Point2::new(coordinates[2], coordinates[3]),
-                ),
-                Vec::new(),
-            ))
-        }
-        (None, Some(block)) => {
+        (None, None) => Err(json!({
+            "error": "remove_region needs `bbox`, `block`, or both",
+        })),
+        (Some(bounds), None) => Ok(RegionSelection {
+            bounds,
+            block_uuids: Vec::new(),
+            missing_block: None,
+            blocks: Vec::new(),
+        }),
+        (fallback, Some(block)) => {
+            let blocks = block_names(doc);
             let uuids = doc
                 .symbols()
                 .filter(|symbol| {
@@ -1052,7 +1079,18 @@ fn region_bounds(input: &Value, doc: &SchDoc) -> std::result::Result<(Rect, Vec<
                 .map(|symbol| symbol.uuid.clone())
                 .collect::<Vec<_>>();
             if uuids.is_empty() {
-                return Err(format!("no symbols belong to block `{block}`"));
+                return match fallback {
+                    Some(bounds) => Ok(RegionSelection {
+                        bounds,
+                        block_uuids: Vec::new(),
+                        missing_block: Some(block.to_string()),
+                        blocks,
+                    }),
+                    None => Err(json!({
+                        "error": format!("no symbols belong to block `{block}`"),
+                        "blocks": blocks,
+                    })),
+                };
             }
             let bounds = combined_extent(doc, &uuids).or_else(|| {
                 Rect::bounding(
@@ -1063,8 +1101,15 @@ fn region_bounds(input: &Value, doc: &SchDoc) -> std::result::Result<(Rect, Vec<
                 )
             });
             bounds
-                .map(|bounds| (bounds, uuids))
-                .ok_or_else(|| format!("block `{block}` has no measurable region"))
+                .map(|bounds| RegionSelection {
+                    bounds,
+                    block_uuids: uuids,
+                    missing_block: None,
+                    blocks,
+                })
+                .ok_or_else(
+                    || json!({"error": format!("block `{block}` has no measurable region")}),
+                )
         }
     }
 }
@@ -1102,10 +1147,12 @@ fn merge_refusal(delta: &sch_doc::NetDelta) -> Option<String> {
 /// its boundary and reporting the surviving ends.
 pub fn remove_region(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let mut edit = Edit::open(ctx)?;
-    let (bounds, block_uuids) = match region_bounds(&input, &edit.doc) {
+    let selection = match region_bounds(&input, &edit.doc) {
         Ok(selection) => selection,
-        Err(error) => return Ok(json!({ "error": error })),
+        Err(error) => return Ok(error),
     };
+    let bounds = selection.bounds;
+    let block_uuids = selection.block_uuids;
     let original = edit.doc.clone();
     let old_scene = sch_doc::connect::scene(&edit.doc);
     let mut symbol_uuids = edit
@@ -1206,13 +1253,18 @@ pub fn remove_region(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         .chain(edit.doc.symbols().map(|symbol| symbol.refdes().to_string()))
         .chain(removed_refs)
         .collect::<BTreeSet<_>>();
+    let mut changed = json!({
+        "bbox": [bounds.min_x, bounds.min_y, bounds.max_x, bounds.max_y],
+        "removed": counts,
+        "now_loose": now_loose,
+        "nets_lost_members": nets_lost_members,
+    });
+    if let Some(block) = selection.missing_block {
+        changed["block_not_found"] = json!(block);
+        changed["blocks"] = json!(selection.blocks);
+    }
     edit.commit(
-        json!({
-            "bbox": [bounds.min_x, bounds.min_y, bounds.max_x, bounds.max_y],
-            "removed": counts,
-            "now_loose": now_loose,
-            "nets_lost_members": nets_lost_members,
-        }),
+        changed,
         Allow::nothing()
             .joining_nets(all_nets)
             .parts(all_refs)

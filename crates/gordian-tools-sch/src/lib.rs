@@ -195,6 +195,7 @@ pub fn tool_defs() -> Vec<Tool> {
         (
             "remove_region",
             "Remove a complete design region in one call, selected by rectangle or `ap_block`. \
+             When both are supplied, the rectangle is a fallback if the block is absent. \
              Deletes symbols, power symbols, labels, wires, junctions, no-connects and text. Wires \
              crossing the boundary are cut there; each surviving outside endpoint is reported with \
              its old net so a replacement block can reconnect it.",
@@ -208,7 +209,7 @@ pub fn tool_defs() -> Vec<Tool> {
                     },
                     "block": {"type": "string", "description": "Functional `ap_block` value."}
                 },
-                "oneOf": [{"required": ["bbox"]}, {"required": ["block"]}],
+                "anyOf": [{"required": ["bbox"]}, {"required": ["block"]}],
                 "additionalProperties": false
             }),
         ),

@@ -63,6 +63,74 @@ fn power_symbols_are_removable_by_reference_and_uuid() {
 }
 
 #[test]
+fn remove_symbols_commits_matches_and_reports_missing_references() {
+    let Some(ctx) = sheet() else {
+        eprintln!("SKIP: KiCad 10 is not installed");
+        return;
+    };
+    add(&ctx, json!([{"lib_id": "Device:R", "ref": "R1"}]));
+
+    let removed = call(&ctx, "remove_symbols", json!({"refs": ["R1", "J1"]}));
+
+    assert!(removed.get("error").is_none(), "{removed}");
+    assert_eq!(removed["changed"]["removed"]["symbols"], 1, "{removed}");
+    assert_eq!(removed["changed"]["missing"], json!(["J1"]), "{removed}");
+    assert!(
+        SchDoc::read(ctx.sch_path())
+            .unwrap()
+            .symbol_by_ref("R1")
+            .is_none()
+    );
+
+    let none = call(&ctx, "remove_symbols", json!({"refs": ["J1"]}));
+    assert!(none.get("error").is_some(), "{none}");
+    assert_eq!(none["missing"], json!(["J1"]), "{none}");
+}
+
+#[test]
+fn remove_region_lists_blocks_and_uses_a_bbox_fallback() {
+    let Some(ctx) = sheet() else {
+        eprintln!("SKIP: KiCad 10 is not installed");
+        return;
+    };
+    add(
+        &ctx,
+        json!([
+            {"lib_id": "Device:R", "ref": "R1"},
+            {"lib_id": "Device:R", "ref": "R2"},
+        ]),
+    );
+    let mut doc = SchDoc::read(ctx.sch_path()).unwrap();
+    let r1 = doc.symbol_by_ref("R1").unwrap().uuid.clone();
+    let r2 = doc.symbol_by_ref("R2").unwrap().uuid.clone();
+    doc.set_field(&r1, sch_model::result::AP_BLOCK, "supply")
+        .unwrap();
+    doc.set_field(&r2, sch_model::result::AP_BLOCK, "load")
+        .unwrap();
+    let r1_at = doc.symbol(&r1).unwrap().at.point();
+    doc.write(ctx.sch_path()).unwrap();
+
+    let missing = call(&ctx, "remove_region", json!({"block": "cell_monitor"}));
+    assert!(missing.get("error").is_some(), "{missing}");
+    assert_eq!(missing["blocks"], json!(["load", "supply"]), "{missing}");
+
+    let fallback = call(
+        &ctx,
+        "remove_region",
+        json!({
+            "block": "cell_monitor",
+            "bbox": [r1_at.x - 1.0, r1_at.y - 1.0, r1_at.x + 1.0, r1_at.y + 1.0]
+        }),
+    );
+    assert!(fallback.get("error").is_none(), "{fallback}");
+    assert_eq!(fallback["changed"]["block_not_found"], "cell_monitor");
+    assert_eq!(fallback["changed"]["blocks"], json!(["load", "supply"]));
+    let doc = SchDoc::read(ctx.sch_path()).unwrap();
+    assert!(doc.symbol_by_ref("R1").is_none(), "{fallback}");
+    assert!(doc.symbol_by_ref("R2").is_some(), "{fallback}");
+}
+
+#[test]
 fn delete_labels_by_net_reports_disconnected_pins_and_query_uuids() {
     let Some(ctx) = sheet() else {
         eprintln!("SKIP: KiCad 10 is not installed");
