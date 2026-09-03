@@ -46,6 +46,12 @@ KICAD_DEMOS = Path(
 )
 VALIDATED_KICAD_CLIS = set()
 CAPPED_SCORE = 3
+CLEAN_RENDER_DENSITY = "600"
+CLEAN_RENDER_SIZE = "1600x900"
+PCB_CLEAN_LAYERS = {
+    "front": "F.Cu,F.SilkS,F.Mask,Edge.Cuts",
+    "back": "B.Cu,B.SilkS,B.Mask,Edge.Cuts",
+}
 FINDING_TAGS = (
     "tool-contract",
     "prompt",
@@ -779,72 +785,9 @@ def render_reference_candidate(kind, source, count):
     digest = hashlib.sha256(str(source).encode()).hexdigest()[:10]
     stem = re.sub(r"[^A-Za-z0-9_.-]+", "-", source.stem).strip("-")
     REFERENCES.mkdir(parents=True, exist_ok=True)
-    render_style = "" if kind == "schematic" else "-svgplot"
-    png = REFERENCES / f"{kind}-{count}-{stem}-{digest}{render_style}.png"
-    svg = REFERENCES / f"{kind}-{count}-{stem}-{digest}.svg"
+    png = REFERENCES / f"{kind}-{count}-{stem}-{digest}-clean-v2.png"
     if not png.is_file():
-        if kind == "schematic":
-            with tempfile.TemporaryDirectory(prefix="gordian-quality-reference-") as temporary:
-                export = Path(temporary)
-                result = command(
-                    [
-                        kicad_cli(), "sch", "export", "svg", "--output", str(export),
-                        "--exclude-drawing-sheet", str(source),
-                    ],
-                    timeout=180,
-                    check=False,
-                )
-                rendered = sorted(export.glob("*.svg"))
-                if result.returncode or not rendered:
-                    detail = (result.stderr or result.stdout).strip()
-                    raise RuntimeError(f"KiCad demo schematic render failed: {detail}")
-                shutil.copy2(rendered[0], svg)
-                # Keep the required KiCad SVG as the reference source. Poppler
-                # rasterizes an equivalent KiCad PDF for gateways that reject
-                # SVG image inputs; ImageMagick cannot reliably parse KiCad's
-                # deeply nested text and embedded bitmap constructs.
-                pdf = export / "reference.pdf"
-                pdf_result = command(
-                    [
-                        kicad_cli(), "sch", "export", "pdf", "--output", str(pdf),
-                        "--exclude-drawing-sheet", str(source),
-                    ],
-                    timeout=180,
-                    check=False,
-                )
-                if pdf_result.returncode or not pdf.is_file():
-                    detail = (pdf_result.stderr or pdf_result.stdout).strip()
-                    raise RuntimeError(f"KiCad demo schematic PDF render failed: {detail}")
-                raster = export / "reference"
-                command(
-                    ["pdftoppm", "-png", "-singlefile", "-r", "144", str(pdf), str(raster)],
-                    timeout=180,
-                )
-                shutil.copy2(export / "reference.png", png)
-        else:
-            with tempfile.TemporaryDirectory(prefix="gordian-quality-reference-") as temporary:
-                export = Path(temporary) / "reference.svg"
-                result = command(
-                    [
-                        kicad_cli(), "pcb", "export", "svg", "--output", str(export),
-                        "--layers", "F.Cu,F.Silkscreen,Edge.Cuts", "--mode-single",
-                        "--fit-page-to-board", "--exclude-drawing-sheet", str(source),
-                    ],
-                    timeout=180,
-                    check=False,
-                )
-                if result.returncode or not export.is_file():
-                    detail = (result.stderr or result.stdout).strip()
-                    raise RuntimeError(f"KiCad demo PCB SVG render failed: {detail}")
-                shutil.copy2(export, svg)
-                command(
-                    [
-                        "magick", "-density", "300", str(export), "-background", "white",
-                        "-alpha", "remove", "-alpha", "off", "-resize", "1600x900>",
-                        str(png),
-                    ],
-                    timeout=180,
-                )
+        clean_render(kind, source, png)
     return {"path": str(png), "source": str(source), "part_count": count}
 
 
@@ -1067,6 +1010,15 @@ def critic(kind, rendered, prompt, facts, llm):
         model,
         "--json-only",
     ]
+    if kind == "pcb":
+        args.extend(
+            [
+                "--layers-note",
+                "Two panels are shown at the same scale: front copper/silkscreen/mask "
+                "on the left, and the mirrored back copper/silkscreen/mask on the right; "
+                "both include Edge.Cuts.",
+            ]
+        )
     if (
         kind == "schematic"
         and facts.get("wires_through_bodies") == []
@@ -1115,6 +1067,91 @@ def critic(kind, rendered, prompt, facts, llm):
 # --- render + run -----------------------------------------------------------
 
 
+def rasterize_clean_svg(svg, png, size=CLEAN_RENDER_SIZE):
+    """Rasterize one transparent KiCad SVG with a tight, consistent frame."""
+    command(
+        [
+            "magick", "-density", CLEAN_RENDER_DENSITY, str(svg),
+            "-trim", "+repage", "-bordercolor", "white", "-border", "24",
+            "-background", "white", "-alpha", "remove", "-alpha", "off",
+            "-resize", size, str(png),
+        ],
+        timeout=180,
+    )
+    if not png.is_file():
+        raise RuntimeError(f"SVG conversion produced no PNG: {png}")
+
+
+def clean_render(kind, source, destination):
+    """Export an unannotated KiCad 10 SVG and convert it to a judge PNG.
+
+    Candidates and human-demo references both use this function so their crop,
+    density, and maximum dimensions match. PCB renders show the front and a
+    mirrored back view side by side, using the copper, silkscreen, mask, and
+    board-edge layers a fabrication preview exposes.
+    """
+    destination = Path(destination)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    svg_stem = destination.with_suffix("")
+    with tempfile.TemporaryDirectory(prefix="gordian-quality-clean-render-") as temporary:
+        temporary = Path(temporary)
+        if kind == "schematic":
+            export = temporary / "schematic"
+            export.mkdir()
+            result = command(
+                [
+                    kicad_cli(), "sch", "export", "svg", "--output", str(export),
+                    "--exclude-drawing-sheet", "--no-background-color", str(source),
+                ],
+                timeout=180,
+                check=False,
+            )
+            rendered = sorted(export.glob("*.svg"))
+            if result.returncode or not rendered:
+                detail = (result.stderr or result.stdout).strip()
+                raise RuntimeError(f"KiCad schematic SVG export failed: {detail}")
+            svg = svg_stem.with_suffix(".svg")
+            shutil.copy2(rendered[0], svg)
+            rasterize_clean_svg(svg, destination)
+            return {"path": str(destination), "svg_paths": [str(svg)]}
+
+        if kind != "pcb":
+            raise ValueError(f"unknown render kind: {kind}")
+        side_pngs = []
+        svg_paths = []
+        for side, layers in PCB_CLEAN_LAYERS.items():
+            exported = temporary / f"{side}.svg"
+            args = [
+                kicad_cli(), "pcb", "export", "svg", "--output", str(exported),
+                "--layers", layers, "--mode-single", "--page-size-mode", "2",
+                "--fit-page-to-board", "--exclude-drawing-sheet", "--check-zones",
+            ]
+            if side == "back":
+                args.append("--mirror")
+            args.append(str(source))
+            result = command(args, timeout=180, check=False)
+            if result.returncode or not exported.is_file():
+                detail = (result.stderr or result.stdout).strip()
+                raise RuntimeError(f"KiCad PCB {side} SVG export failed: {detail}")
+            kept_svg = svg_stem.parent / f"{svg_stem.name}-{side}.svg"
+            shutil.copy2(exported, kept_svg)
+            side_png = temporary / f"{side}.png"
+            rasterize_clean_svg(kept_svg, side_png, "776x900")
+            side_pngs.append(side_png)
+            svg_paths.append(str(kept_svg))
+        command(
+            [
+                "magick", str(side_pngs[0]), str(side_pngs[1]),
+                "-gravity", "center", "-background", "white", "+append",
+                str(destination),
+            ],
+            timeout=180,
+        )
+        if not destination.is_file():
+            raise RuntimeError(f"PCB composition produced no PNG: {destination}")
+        return {"path": str(destination), "svg_paths": svg_paths}
+
+
 def capture_render(project, tool_name, destination):
     try:
         value = tool(project, tool_name)
@@ -1130,16 +1167,40 @@ def capture_render(project, tool_name, destination):
     return rendered
 
 
+def capture_clean_render(project, kind, destination):
+    source = (
+        first_schematic(project)
+        if kind == "schematic"
+        else next(iter(sorted(project.glob("*.kicad_pcb"))), None)
+    )
+    if source is None:
+        return {"error": f"no {kind} source"}
+    try:
+        return clean_render(kind, source, destination)
+    except Exception as error:
+        return {"error": str(error)}
+
+
 def render_project(project, artifacts, prefix):
     rendered = {}
     if next(project.glob("*.kicad_sch"), None):
-        rendered["schematic"] = capture_render(
-            project, "render_schematic", artifacts / f"{prefix}-schematic.png"
+        annotated = capture_render(
+            project, "render_schematic", artifacts / f"{prefix}-schematic-agent.png"
         )
+        clean = capture_clean_render(
+            project, "schematic", artifacts / f"{prefix}-schematic-clean.png"
+        )
+        rendered["schematic"] = {**clean, "agent_render": annotated}
+        if isinstance(annotated.get("visual"), dict):
+            rendered["schematic"]["visual"] = annotated["visual"]
     if next(project.glob("*.kicad_pcb"), None):
-        rendered["pcb"] = capture_render(
-            project, "render_board", artifacts / f"{prefix}-pcb.png"
+        annotated = capture_render(
+            project, "render_board", artifacts / f"{prefix}-pcb-agent.png"
         )
+        clean = capture_clean_render(
+            project, "pcb", artifacts / f"{prefix}-pcb-clean.png"
+        )
+        rendered["pcb"] = {**clean, "agent_render": annotated}
     return rendered
 
 
@@ -1360,29 +1421,41 @@ def write_gallery(artifacts, phases):
         images = []
         for kind in ("schematic", "pcb"):
             rendered = phase.get("renders", {}).get(kind, {})
-            if rendered.get("path"):
-                relative = Path(rendered["path"]).relative_to(artifacts)
-                images.append(
-                    f'<figure><img src="{html.escape(str(relative))}" '
-                    f'alt="Turn {phase["turn"]} {kind}"><figcaption>{kind}</figcaption></figure>'
-                )
-            else:
-                images.append(
-                    f'<figure class="missing"><div>No {kind} render</div><figcaption>{kind}</figcaption></figure>'
-                )
+            pair = []
+            for label, item in (
+                ("Clean judge view", rendered),
+                ("What the agent saw", rendered.get("agent_render", {})),
+            ):
+                if item.get("path"):
+                    relative = Path(item["path"]).relative_to(artifacts)
+                    pair.append(
+                        f'<figure><img src="{html.escape(str(relative))}" '
+                        f'alt="Turn {phase["turn"]} {kind} {html.escape(label)}">'
+                        f'<figcaption>{html.escape(label)}</figcaption></figure>'
+                    )
+                else:
+                    pair.append(
+                        f'<figure class="missing"><div>No {kind} render</div>'
+                        f'<figcaption>{html.escape(label)}</figcaption></figure>'
+                    )
+            images.append(
+                f'<div class="kind"><h3>{html.escape(kind.title())}</h3>'
+                f'<div class="pair">{"".join(pair)}</div></div>'
+            )
         cards.append(
-            f'<section><h2>{html.escape(caption)}</h2><div class="pair">'
+            f'<section><h2>{html.escape(caption)}</h2>'
             + "".join(images)
-            + "</div></section>"
+            + "</section>"
         )
     document = """<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><title>Gordian phase gallery</title>
 <style>
 body{font:15px system-ui,sans-serif;margin:24px;background:#17191d;color:#eee}
-section{margin:0 0 32px}h1,h2{font-weight:600}h2{font-size:16px;color:#bbb}
+section{margin:0 0 32px}h1,h2,h3{font-weight:600}h2{font-size:16px;color:#bbb}
+.kind{margin-top:20px}.kind h3{font-size:15px;text-transform:capitalize}
 .pair{display:grid;grid-template-columns:1fr 1fr;gap:16px}figure{margin:0;background:#fff;padding:8px;color:#222}
 img{display:block;width:100%;height:auto}.missing div{display:grid;min-height:220px;place-items:center;color:#777}
-figcaption{text-align:center;padding-top:6px;text-transform:capitalize}@media(max-width:800px){.pair{grid-template-columns:1fr}}
+figcaption{text-align:center;padding-top:6px}@media(max-width:800px){.pair{grid-template-columns:1fr}}
 </style></head><body><h1>Design phases</h1>""" + "".join(cards) + "</body></html>\n"
     (artifacts / "gallery.html").write_text(document, encoding="utf-8")
 
