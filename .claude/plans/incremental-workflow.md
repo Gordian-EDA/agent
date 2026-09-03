@@ -226,3 +226,7 @@ re-place." Quality first; time later via parallel subagents; schematic too.
   in stale detection, wider nudge search, compass sides, refit skip on routed boards),
   lane/netlist-parity (our extractor 56 nets vs KiCAD 52 on stm32 — root cause + 100-sheet parity),
   lane/sch-looks. Round 5 after pcb-refusals-3.
+- netlist-parity merged (extractor: label on a wire crossing joined; stacked NC pins separate;
+  stm32 sheet = KiCAD exactly; human sample 97/97 unambiguous). Merge train 2: pcb-refusals-3
+  (pseudo-nets ignored, nudge rings 5/10/20 mm then outline, compass sides, refit skip on routed
+  boards, pin did-you-mean by pad order) → corpus → push → campaign round 5 (camp7).
