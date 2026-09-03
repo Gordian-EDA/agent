@@ -218,3 +218,11 @@ re-place." Quality first; time later via parallel subagents; schematic too.
   41 mm), no title block/frames/notes — not label count. lane/sch-looks (Opus) fixes the four
   owners: page fit + standard paper, body-only placement geometry, post-placement wire-vs-label,
   title block + block frames/notes through graft.
+- Pushed: pcb-incremental-2 (plane routing keeps what it reached + `plane_unreached`; route_track
+  honest with blockers/waypoints, width clamp, via notes; sync_board{intent} on existing boards;
+  ERC reported not blocking; stale net table detected; move_parts lenient + 5 mm nudge; place_board
+  classifies refs; delete_copper reports now_open; geometry-only findings stay as partial work;
+  led-array-60 routes 32/32 DRC 0). Running: lane/pcb-refusals-3 (ignore `unconnected-*` pseudo-nets
+  in stale detection, wider nudge search, compass sides, refit skip on routed boards),
+  lane/netlist-parity (our extractor 56 nets vs KiCAD 52 on stm32 — root cause + 100-sheet parity),
+  lane/sch-looks. Round 5 after pcb-refusals-3.
