@@ -559,8 +559,9 @@ fn a_footprint_written_as_a_lib_id_says_so() {
 
     let unplaced = audit.unplaced.first().expect("J1 left out");
     assert!(unplaced.reason.contains("FOOTPRINT"), "{unplaced:?}");
-    assert!(
-        unplaced.did_you_mean.is_empty(),
-        "a footprint name has no nearer SYMBOL: {unplaced:?}"
+    assert_eq!(
+        unplaced.did_you_mean,
+        ["Connector_Generic:Conn_01x11"],
+        "the footprint's pad geometry should identify its generic symbol: {unplaced:?}"
     );
 }

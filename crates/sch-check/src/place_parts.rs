@@ -547,20 +547,13 @@ fn unresolvable(
             continue;
         };
         let Some(meta) = provider.symbol(&spec.part) else {
-            // A footprint written where a symbol belongs gets its own explicit
-            // message and no shortlist: the repair is a different FIELD, not a
-            // nearer name.
-            let diagnostic = authored::unknown_part(&refdes, &spec.part, provider);
-            let did_you_mean = match diagnostic.suggestion.is_some() {
-                true => provider.suggest(&spec.part),
-                false => Vec::new(),
-            };
+            let (reason, did_you_mean) = authored::unknown_part_details(&spec.part, provider);
             dropped.insert(index);
             out.push(Unplaced {
-                refdes,
+                reason: format!("{refdes}: {reason}"),
                 part: spec.part.clone(),
-                reason: diagnostic.message,
                 did_you_mean,
+                refdes,
             });
             continue;
         };

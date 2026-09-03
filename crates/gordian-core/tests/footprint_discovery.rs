@@ -111,3 +111,36 @@ fn symbol_info_exposes_only_a_validated_footprint() {
     .unwrap();
     assert!(verdict.compatible);
 }
+
+#[test]
+fn symbol_info_recognizes_a_pin_header_footprint_name() {
+    let Some(ctx) = AgentRuntime::detect_for_test() else {
+        eprintln!("SKIP: no KiCad detected");
+        return;
+    };
+
+    let result = run_tool(
+        "get_symbol_info",
+        json!({
+            "lib_id": "Connector_PinHeader_2.54mm:PinHeader_1x06_P2.54mm_Vertical"
+        }),
+        &ctx,
+    )
+    .unwrap();
+
+    assert!(result["error"].as_str().is_some_and(|error| {
+        error.contains("is a FOOTPRINT name, not a symbol")
+    }));
+    assert_eq!(
+        result["suggestions"],
+        json!(["Connector_Generic:Conn_01x06"]),
+        "{result}"
+    );
+    assert!(
+        result["error"]
+            .as_str()
+            .unwrap()
+            .contains("Did you mean `Connector_Generic:Conn_01x06`?"),
+        "{result}"
+    );
+}

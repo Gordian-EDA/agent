@@ -35,14 +35,29 @@ pub fn lint(d: &Design, provider: &SymbolTable) -> Diagnostics {
 /// (`Fuse:Fuse`) needs the whole shortlist, not just the single best, to pick the
 /// part it meant. The first is also attached as the machine-readable suggestion.
 pub fn unknown_part(refdes: &str, part: &str, provider: &SymbolTable) -> Diagnostic {
+    let (message, near) = unknown_part_details(part, provider);
+    let mut diagnostic = Diagnostic::error("unknown-part", format!("{refdes}: {message}"));
+    if let Some(suggestion) = near.into_iter().next() {
+        diagnostic = diagnostic.with_suggestion(suggestion);
+    }
+    diagnostic
+}
+
+/// Explain an unknown symbol without assuming which tool asked for it.
+pub fn unknown_part_details(part: &str, provider: &SymbolTable) -> (String, Vec<String>) {
     if looks_like_footprint(part) {
-        return Diagnostic::error(
-            "unknown-part",
+        let near = footprint_symbol_suggestions(part);
+        let did_you_mean = near
+            .first()
+            .map(|symbol| format!(" Did you mean `{symbol}`?"))
+            .unwrap_or_default();
+        return (
             format!(
-                "{refdes}: `{part}` is a FOOTPRINT name, not a symbol. `part` takes a symbol \
+                "`{part}` is a FOOTPRINT name, not a symbol. `part` takes a symbol \
                  lib_id like `Device:R` or `Connector_Generic:Conn_01x11`; put the footprint in \
-                 this part's `footprint` field instead. Use search_symbols to find the symbol."
+                 this part's `footprint` field instead. Use search_symbols to find the symbol.{did_you_mean}"
             ),
+            near,
         );
     }
     let near = provider.suggest(part);
@@ -50,14 +65,7 @@ pub fn unknown_part(refdes: &str, part: &str, provider: &SymbolTable) -> Diagnos
         Some(_) => format!("; did you mean {}?", near.join(", ")),
         None => "; search_symbols will find the right lib_id".to_string(),
     };
-    let mut e = Diagnostic::error(
-        "unknown-part",
-        format!("{refdes}: {part} not found in any library{did_you_mean}"),
-    );
-    if let Some(s) = near.into_iter().next() {
-        e = e.with_suggestion(s);
-    }
-    e
+    (format!("{part} not found in any library{did_you_mean}"), near)
 }
 
 /// Whether `part` reads as a KiCAD footprint identifier rather than a symbol one.
@@ -66,7 +74,7 @@ pub fn unknown_part(refdes: &str, part: &str, provider: &SymbolTable) -> Diagnos
 /// the footprint to hand readily writes it where the symbol belongs. Footprint
 /// names carry package geometry that symbol names never do: a pitch, a pad count
 /// in `NxM` form, or a mounting word.
-fn looks_like_footprint(part: &str) -> bool {
+pub fn looks_like_footprint(part: &str) -> bool {
     let name = part.rsplit(':').next().unwrap_or(part);
     let lower = name.to_ascii_lowercase();
     lower.contains("mm")
@@ -75,6 +83,22 @@ fn looks_like_footprint(part: &str) -> bool {
             || lower.ends_with("vertical")
             || lower.ends_with("horizontal")
             || lower.contains("handsolder"))
+}
+
+/// Infer the generic connector symbol represented by a pin-header footprint.
+pub fn footprint_symbol_suggestions(footprint: &str) -> Vec<String> {
+    let name = footprint.rsplit(':').next().unwrap_or(footprint);
+    let dimensions = name.split('_').find_map(|word| {
+        let (columns, rows) = word.split_once('x')?;
+        let columns = columns.parse::<u32>().ok()?;
+        let rows = rows.parse::<u32>().ok()?;
+        (matches!(columns, 1 | 2) && rows > 0).then_some((columns, rows))
+    });
+    match dimensions {
+        Some((1, rows)) => vec![format!("Connector_Generic:Conn_01x{rows:02}")],
+        Some((2, rows)) => vec![format!("Connector_Generic:Conn_02x{rows:02}_Odd_Even")],
+        _ => Vec::new(),
+    }
 }
 
 /// `key` is not a pin of `part`, with ranked physical and alternate names.

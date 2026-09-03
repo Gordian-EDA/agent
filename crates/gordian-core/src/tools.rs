@@ -934,6 +934,14 @@ fn get_symbol_info_one(lib_id: &str, ctx: &AgentRuntime) -> Result<Value> {
             }))
         }
         None => {
+            if sch_check::authored::looks_like_footprint(lib_id) {
+                let (message, suggestions) =
+                    sch_check::authored::unknown_part_details(lib_id, ctx.provider());
+                return Ok(json!({
+                    "error": message,
+                    "suggestions": suggestions,
+                }));
+            }
             let suggestions = ctx.provider().suggest(lib_id);
             Ok(json!({
                 "error": format!("unknown symbol `{lib_id}`"),
