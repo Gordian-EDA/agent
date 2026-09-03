@@ -29,5 +29,6 @@ pub use patch::{
 pub use sexpr::{sexpr_end, sexpr_point};
 pub use snapshot::{
     BoardSide, BoardSnapshot, FootprintPlacement, ImportedBoard, ImportedPad, ImportedPart,
-    SEED_ROW_PITCH, seed_row_references, seed_row_x, seed_row_y,
+    SEED_ROW_PITCH, is_derived_net_name, is_design_net_name, seed_row_references, seed_row_x,
+    seed_row_y,
 };

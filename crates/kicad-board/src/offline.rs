@@ -297,6 +297,7 @@ fn read_pad(
         None
     } else {
         child_net_name(text, &children, &BTreeMap::new())
+            .filter(|name| crate::is_design_net_name(name))
     };
     Some(ParsedPad {
         number,
@@ -1071,6 +1072,29 @@ mod tests {
         );
         assert_eq!(snapshot.copper.traces.len(), 2);
         assert_eq!(snapshot.copper.vias.len(), 1);
+    }
+
+    #[test]
+    fn unconnected_pad_pseudo_nets_are_not_imported_as_design_nets() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("board.kicad_pcb");
+        std::fs::write(
+            &path,
+            r#"(kicad_pcb
+ (layers (0 "F.Cu" signal) (2 "B.Cu" signal) (44 "Edge.Cuts" user))
+ (net 0 "") (net 1 "unconnected-(J1-PadSN)")
+ (gr_rect (start 0 0) (end 10 10) (layer "Edge.Cuts"))
+ (footprint "Connector_Audio:Jack" (layer "F.Cu") (at 5 5)
+   (property "Reference" "J1")
+   (pad "SN" smd rect (at 0 0) (size 1 1) (layers "F.Cu")
+     (net 1 "unconnected-(J1-PadSN)"))))"#,
+        )
+        .unwrap();
+
+        let snapshot = read_snapshot(&path).unwrap();
+        assert_eq!(snapshot.imported.parts[0].pads[0].net, None);
+        assert!(snapshot.problem.connections.is_empty());
+        assert!(snapshot.problem.obstacles[0].connected_to.is_empty());
     }
 
     #[test]

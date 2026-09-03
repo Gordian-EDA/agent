@@ -258,7 +258,7 @@ impl BoardDoc {
             else {
                 continue;
             };
-            if number.is_empty() || name.is_empty() {
+            if number.is_empty() || !crate::is_design_net_name(&name) {
                 continue;
             }
             pad_nets.insert(number, name);
