@@ -75,11 +75,13 @@ fn sheet_points(sch: &str) -> Vec<[f64; 2]> {
         while let Some(i) = rest.find(tag) {
             rest = &rest[i + tag.len()..];
             let mut nums = rest.split_whitespace();
-            if let (Some(x), Some(y)) = (nums.next(), nums.next()) {
-                if let (Ok(x), Ok(y)) = (x.parse::<f64>(), y.trim_end_matches(')').parse::<f64>()) {
-                    out.push([x, y]);
-                }
-            }
+            let parsed = nums.next().zip(nums.next()).and_then(|(x, y)| {
+                Some([
+                    x.parse::<f64>().ok()?,
+                    y.trim_end_matches(')').parse::<f64>().ok()?,
+                ])
+            });
+            out.extend(parsed);
         }
     }
     out
