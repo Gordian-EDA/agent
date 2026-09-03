@@ -70,7 +70,7 @@ pub struct RegionOutput {
     pub poses: Vec<Pose>,
     /// What the typesetter had to decide because the author's trees did not.
     pub warnings: Vec<String>,
-    /// The IR the sheet ships with — its recognized idioms and rail decisions.
+    /// The IR the sheet ships with — its rail and port decisions.
     pub ir: LayoutIr,
     pub result: PlaceResult,
 }

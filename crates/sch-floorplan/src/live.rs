@@ -24,10 +24,9 @@
 //! the partition must be *identical*. When a wire redraw misses that bar, the original
 //! route stays and same-named labels expose the layout debit without changing the netlist.
 //!
-//! ## The budget
-//!
-//! Every edit is also a promise about *time*: see [`PlacementBudget`]. Nothing is
-//! written until the gate passes, so overrunning is always safe to refuse.
+//! Every edit also runs on a clone of the document in its own thread
+//! ([`panic_isolated_edit`]), so a panic inside the typesetter cannot leave the caller's
+//! document half-written.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
@@ -184,7 +183,7 @@ pub fn blank_sheet() -> Result<SchDoc> {
     Ok(crate::realize::to_doc(crate::write::SchematicWriter::new())?)
 }
 
-/// Add `input`'s parts to `doc`, wired as it says and placed by `engine`.
+/// Add `input`'s parts to `doc`, wired as it says and typeset by `sch_flex`.
 ///
 /// An empty sheet is laid out whole; a sheet with content keeps every symbol it has and
 /// the new parts are placed around them, avoiding their wires and labels. Either way the
@@ -196,7 +195,7 @@ pub fn place_parts(
     input: &PlacePartsInput,
 ) -> Result<PlaceReport> {
     let input = input.clone();
-    bounded_edit(env, doc, move |env, doc| {
+    panic_isolated_edit(env, doc, move |env, doc| {
         place_parts_inner(&env, doc, &input)
     })
 }
@@ -380,8 +379,8 @@ pub struct AddReport {
 /// truthfully keeps its connectivity anyway — and `why` is what the report says
 /// about each benched symbol.
 ///
-/// Unlike a placement this is not searched, so it takes no budget: seating a symbol
-/// in the next free bench cell and hanging a label on each pin is linear work.
+/// Unlike a placement this is not typeset: seating a symbol in the next free bench
+/// cell and hanging a label on each pin is linear work.
 pub fn add_parts(
     env: &KicadInstallation,
     doc: &mut SchDoc,
@@ -511,7 +510,7 @@ pub fn arrange(
     layout: Option<sch_model::tree::Tree>,
 ) -> Result<ArrangeReport> {
     let selection = selection.clone();
-    bounded_edit(env, doc, move |env, doc| {
+    panic_isolated_edit(env, doc, move |env, doc| {
         rearrange_inner(&env, doc, &selection, intent, layout, true)
     })
 }
@@ -523,7 +522,7 @@ pub fn rewire(
     selection: &Selection,
 ) -> Result<ArrangeReport> {
     let selection = selection.clone();
-    bounded_edit(env, doc, move |env, doc| {
+    panic_isolated_edit(env, doc, move |env, doc| {
         rearrange_inner(&env, doc, &selection, None, None, false)
         },
     )
@@ -611,8 +610,8 @@ fn rearrange_inner(
     // Read before the erase: a net whose only labels belong to the selection would
     // otherwise have no scope on record by the time the redraw needs one.
     let was_global = global_label_nets(doc);
-    // The ports the boundary needs are the CALLER's contract, not a hint: an engine
-    // is free to rewrite the IR it searched with, and one that drops them leaves the
+    // The ports the boundary needs are the CALLER's contract, not a hint: `arrange`
+    // is free to rewrite the IR it typeset with, and one that drops them leaves the
     // redraw with a one-terminal net and nothing to name it.
     let boundary_ports: BTreeMap<String, sch_model::ir::Side> = boundary
         .iter()
@@ -778,7 +777,7 @@ enum WorkerReply<T> {
 /// Run an edit on a CLONE of the document in its own thread, adopting the result only if
 /// it finished. The thread is the panic boundary: a panic inside the layout stages leaves
 /// the caller's document exactly as it was rather than poisoning it.
-fn bounded_edit<T, F>(env: &KicadInstallation, doc: &mut SchDoc, run: F) -> Result<T>
+fn panic_isolated_edit<T, F>(env: &KicadInstallation, doc: &mut SchDoc, run: F) -> Result<T>
 where
     T: Send + 'static,
     F: FnOnce(KicadInstallation, &mut SchDoc) -> Result<T> + Send + 'static,
