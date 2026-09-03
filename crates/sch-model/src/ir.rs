@@ -9,6 +9,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 
 use crate::result::IdiomReport;
+use crate::tree::Trees;
 
 /// Global signal-flow direction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -92,7 +93,7 @@ pub enum Axis {
 ///
 /// Orthogonal to the other [`LayoutIr`] keys by design:
 /// - [`LayoutIr::grid`] is the DENSE form (a full authored 2D arrangement, already
-///   enforced by `grid_order_viol`); relations are the SPARSE pairwise form an LLM can
+///   already enforced); relations are the SPARSE pairwise form an LLM can
 ///   state about two parts without laying out the whole sheet. They share the same
 ///   comparison convention (part origins, `x` grows right, `y` grows down).
 /// - [`LayoutIr::zone`] is an ABSOLUTE coarse bias (a fraction of the board bbox);
@@ -212,14 +213,6 @@ pub struct LayoutIr {
     /// point the right way (e.g. a level translator's B-side toward a connector).
     #[serde(default)]
     pub mirror: BTreeSet<String>,
-    /// Refdes → authored grid bounding box `[col_min, row_min, col_max, row_max]`
-    /// in composed grid-ordinal coords (from the per-block `layout:`). The search
-    /// holds gridded parts in this RELATIVE order — left/right by column, top/bottom
-    /// by row — so the author's arrangement is "relatively rigid"; a part spanning a
-    /// column range floats within it. Empty on the sidecar/baseline paths (no
-    /// authored grid ⇒ no ordering constraint, so tuned references are unaffected).
-    #[serde(default)]
-    pub grid: BTreeMap<String, [i32; 4]>,
     /// Idioms the engine recognized from connectivity and co-placed as cohesive
     /// clusters (crystal+load-caps, decoupling bank, op-amp feedback). Surfaced to
     /// the agent via `EmitOutput.detected_idioms`. `#[serde(default)]` so existing
@@ -270,6 +263,12 @@ pub struct LayoutIr {
     /// resolved arbitrarily, and a relation whose parts are all frozen cannot be met.
     #[serde(default)]
     pub relations: Vec<Relation>,
+    /// Block name → the row/col arrangement its author composed
+    /// ([`crate::tree::Tree`]). This is the layout: the typesetter measures the
+    /// symbols and computes every coordinate from it. A block absent here is
+    /// arranged as one default row.
+    #[serde(default)]
+    pub trees: Trees,
 }
 
 impl LayoutIr {

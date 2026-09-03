@@ -29,7 +29,7 @@ use sch_model::engine::{
 use sch_model::place::{Crossings, PlaceResult};
 
 use sch_model::cells::{apply_cells, assign_cells};
-use sch_model::geometry::{COL_GAP, GRID_KEY, ROW_GAP, body_overlap_count, grid_order_viol, item_rect, pin_endpoint};
+use sch_model::geometry::{COL_GAP, GRID_KEY, ROW_GAP, body_overlap_count, item_rect, pin_endpoint};
 use sch_model::idiom::{align_idiom_clusters, align_led_chains, align_rail_cap_rows, build_anchor_blocks, cluster_group, cohesion_targets, multi_unit_siblings, orient_angle};
 use sch_model::refine::{FAST_PINS, decongest, normalize, overlaps_any};
 use sch_model::relation::{relation_group_spread, relation_viol, repair_relations};
@@ -138,7 +138,6 @@ fn base_cost(m: &RawMetrics) -> f64 {
         + RELATION_W * m.relation as f64
         + 1500.0 * m.overlaps as f64
         + 1000.0 * m.fallbacks as f64
-        + 1200.0 * m.grid_order as f64
         + 30.0 * m.body_cross as f64
         + 12.0 * m.orient_viol as f64
         + 10.0 * m.spine_viol as f64;
@@ -164,7 +163,6 @@ fn amplified_energy(m: &RawMetrics) -> f64 {
         + RELATION_W * m.relation as f64
         + 1500.0 * m.overlaps as f64
         + 1000.0 * m.fallbacks as f64
-        + 1200.0 * m.grid_order as f64
         + 30.0 * m.body_cross as f64
         + 12.0 * m.orient_viol as f64
         + 10.0 * m.spine_viol as f64;
@@ -1232,7 +1230,6 @@ fn proxy_cost(
     cohesion: &[(usize, Vec<(usize, usize)>)],
 ) -> f64 {
     let overlaps = body_overlap_count(items);
-    let grid_order = grid_order_viol(items, ir);
     let mut hpwl = 0.0;
     for pins in inc.values() {
         let pts: Vec<Point2> = pins.iter().map(|(i, _)| items[*i].at).collect();
@@ -1281,7 +1278,6 @@ fn proxy_cost(
     1500.0 * overlaps as f64
         + RELATION_W * relation_viol(items, ir) as f64
         + GROUP_COHESION * relation_group_spread(items, ir)
-        + 1200.0 * grid_order as f64
         + 0.15 * hpwl
         + PROXY_SPREAD_W * spread
         + 0.7 * cohere

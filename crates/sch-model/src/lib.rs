@@ -33,6 +33,7 @@ pub mod route;
 pub mod stub;
 pub mod text;
 pub mod topology;
+pub mod tree;
 
 /// Load a golden [`engine::ProblemFixture`] corpus for a leaf's tests and benches.
 ///

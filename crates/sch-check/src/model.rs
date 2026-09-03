@@ -11,7 +11,7 @@ pub type BlockName = String;
 /// The one thing the checkers, the placement engines, and the writer operate
 /// on — whether built from a live `.kicad_sch` or a tool call. It holds
 /// connectivity and intent, never geometry.
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, PartialEq)]
 pub struct Design {
     pub name: Option<String>,
     pub description: Option<String>,
@@ -21,17 +21,8 @@ pub struct Design {
     pub lint_allow: std::collections::BTreeSet<String>,
 }
 
-/// A module's author-facing placement grid (the per-block `layout:` 2D array).
-/// Each row is a left→right list of cells; a cell names one of THIS block's
-/// refdes, or is `None` for a `~` hole. Column index = x, row index = y
-/// (ordinal). Empty = no grid → the engine arranges the block's parts by
-/// inference. A refdes repeated down a column **spans** those rows and floats
-/// within that span (a tall IC). Inter-block placement is always inferred — the
-/// grid only controls a module's internal arrangement, the thing inference can't
-/// derive from connectivity.
-pub type LayoutGrid = Vec<Vec<Option<String>>>;
 
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, PartialEq)]
 pub struct Block {
     /// Caption drawn on the block's frame. Defaults to the block's own name.
     pub title: Option<String>,
@@ -39,9 +30,10 @@ pub struct Block {
     /// have to reverse-engineer — what a human writes on a schematic.
     pub note: Option<String>,
     pub components: IndexMap<RefDes, Component>,
-    /// This module's internal placement grid (per-block `layout:`). See
-    /// [`LayoutGrid`]. Empty = infer the block's internal arrangement.
-    pub layout: LayoutGrid,
+    /// How this module is arranged: the row/col tree its author composed
+    /// (`layout:`). `None` = nobody composed one, and the typesetter falls back to
+    /// a single row.
+    pub layout: Option<sch_model::tree::Tree>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

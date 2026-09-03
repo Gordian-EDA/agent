@@ -13,8 +13,10 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum PlacementEngineKind {
-    /// Annealing followed by cluster-pose and compaction polish.
+    /// The typesetter: every block drawn from the tree its author composed.
     #[default]
+    Flex,
+    /// Annealing followed by cluster-pose and compaction polish.
     Cluster,
     /// Simulated annealing only.
     #[serde(alias = "sa")]

@@ -32,7 +32,7 @@ use super::score::{
     supply_pin_target,
 };
 use sch_model::geometry::body_overlap_count;
-use sch_model::geometry::{grid_order_viol, item_rect};
+use sch_model::geometry::item_rect;
 use sch_model::relation::{relation_group_spread, relation_viol};
 
 /// Which routed realization to build.
@@ -494,7 +494,6 @@ pub fn raw_metrics(
         body_corners.push(Point2::new(r.max_x, r.max_y));
     }
     let spread = Rect::bounding(&body_corners).map_or(0.0, |r| r.half_perimeter());
-    let grid_order = grid_order_viol(items, ir);
     let mut by_refdes: BTreeMap<&str, Vec<Point2>> = BTreeMap::new();
     for it in items {
         by_refdes.entry(&it.refdes).or_default().push(it.at);
@@ -519,7 +518,6 @@ pub fn raw_metrics(
         leg_viol,
         spine_viol,
         spread,
-        grid_order,
         sib_spread,
         relation: relation_viol(items, ir),
         group_spread: relation_group_spread(items, ir),

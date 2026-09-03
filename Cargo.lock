@@ -2424,6 +2424,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "sch-flex"
+version = "0.1.0"
+dependencies = [
+ "circuit-graph",
+ "geom",
+ "kicad-symbol",
+ "sch-model",
+]
+
+[[package]]
 name = "sch-floorplan"
 version = "0.1.0"
 dependencies = [
@@ -2439,6 +2449,7 @@ dependencies = [
  "rayon",
  "sch-check",
  "sch-doc",
+ "sch-flex",
  "sch-model",
  "serde",
  "serde_json",

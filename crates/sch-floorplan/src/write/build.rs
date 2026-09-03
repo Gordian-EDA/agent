@@ -7,7 +7,7 @@ use std::io;
 use geom::{GRID_50_MIL, Point2, Rect, Segment};
 use kicad::KicadInstallation;
 use kicad_symbol::geometry::{PinGeom, SymbolGeometry};
-use sch_model::geometry::pin_endpoint;
+use sch_model::geometry::{pin_endpoint, quantize_dir};
 
 use sch_model::route::{DrawnSegment, NetSegment};
 
@@ -1195,27 +1195,6 @@ pub fn pin_end0(env: &KicadInstallation, lib_id: &str, pin: &str) -> io::Result<
         .into_iter()
         .map(|pg| <[f64; 2]>::from(pg.at.transform_offset(0.0, false)))
         .collect())
-}
-
-/// Quantize a pin's outward direction to the four sheet axes.
-///
-/// `pin_angle` is the pin's local `(at … angle)` in the symbol — it points from
-/// the connection tip INTO the body, so outward (away from the body) is
-/// `pin_angle + 180`. That outward vector goes through [`Point2::transform_offset`]
-/// — the SAME pose transform as the endpoint, so a direction can never point back
-/// through the body its endpoint sits on — and is then snapped to the dominant axis.
-/// Shared by [`SchematicWriter::pin_dirs`] (stub directions) and anchor-pin slotting
-/// (cluster join sides).
-pub fn quantize_dir(pin_angle: f64, inst_angle: f64, mirror: bool) -> Dir {
-    let theta = (pin_angle + 180.0).to_radians();
-    let out = Point2::new(theta.cos(), theta.sin()).transform_offset(inst_angle, mirror);
-    if out.x.abs() >= out.y.abs() {
-        if out.x >= 0.0 { Dir::East } else { Dir::West }
-    } else if out.y >= 0.0 {
-        Dir::South
-    } else {
-        Dir::North
-    }
 }
 
 #[cfg(test)]

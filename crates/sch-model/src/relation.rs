@@ -6,7 +6,7 @@
 //! PROJECTION onto the feasible set ([`repair_relations`]) that seeds a search inside the
 //! constraint polytope so a hard move-rejection rule can keep it there.
 //!
-//! Every comparison is on part origins in the same convention as `grid_order_viol`:
+//! Every comparison is on part origins:
 //! `x` grows right, `y` grows down, so "above" is the smaller `y`. A refdes with several
 //! items (a multi-unit part) is represented by their centroid.
 
@@ -97,7 +97,7 @@ fn median(mut vals: Vec<f64>) -> Option<f64> {
 }
 
 /// Count of unsatisfied relational statements — the engine-facing correctness term,
-/// weighted like `grid_order` in every objective.
+/// weighted heavily in every objective.
 ///
 /// - An ordering relation contributes 1 when the pair is not strictly ordered.
 /// - A [`Relation::Group`] contributes 1 per FOREIGN part sitting inside the group's

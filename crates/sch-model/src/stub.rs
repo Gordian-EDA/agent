@@ -13,7 +13,7 @@ use std::collections::BTreeMap;
 use geom::{Point2, Rect};
 
 use crate::engine::{CandidateEvaluator, CohesionPlan, RawMetrics};
-use crate::geometry::{body_overlap_count, grid_order_viol, item_rect};
+use crate::geometry::{body_overlap_count, item_rect};
 use crate::ir::LayoutIr;
 use crate::item::{Incidence, Item};
 use crate::place::Crossings;
@@ -76,7 +76,6 @@ impl CandidateEvaluator for StubEvaluator<'_> {
             leg_viol: 0,
             spine_viol: 0,
             spread,
-            grid_order: grid_order_viol(items, self.ir),
             sib_spread: by_refdes
                 .values()
                 .filter_map(|pts| Rect::bounding(pts))

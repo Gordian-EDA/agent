@@ -27,6 +27,7 @@
 //! in `geom`; live `.kicad_sch` editing lives in `sch-doc`.
 
 pub mod bench;
+pub mod flex;
 pub mod floorplan;
 pub mod label;
 pub mod live;

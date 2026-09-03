@@ -25,7 +25,6 @@ pub(crate) fn base_cost(m: &RawMetrics) -> f64 {
     let correctness = 2000.0 * m.merges as f64
         + 1500.0 * m.overlaps as f64
         + 1000.0 * m.fallbacks as f64
-        + 1200.0 * m.grid_order as f64
         + 30.0 * m.body_cross as f64
         + 12.0 * m.orient_viol as f64
         + 10.0 * m.spine_viol as f64;

@@ -166,17 +166,15 @@ impl PlacementBudget {
     /// The engine that keeps this budget, honouring an explicit `requested` one.
     /// The caller builds it and hands it back to [`place_parts`] / [`arrange`].
     pub fn engine(&self, requested: Option<PlacementEngineKind>) -> PlacementEngineKind {
-        requested.unwrap_or(if self.parts >= SPINE_ABOVE_PARTS {
-            PlacementEngineKind::Spine
-        } else {
-            PlacementEngineKind::Cluster
-        })
+        requested.unwrap_or(PlacementEngineKind::Flex)
     }
 
     /// Whether a measured engine run fits in `remaining` with enough time to
     /// realise and verify its result.
     pub fn engine_fits(&self, engine: PlacementEngineKind, remaining: Duration) -> bool {
         let seconds = match engine {
+            // The typesetter does not search: it measures the tree once.
+            PlacementEngineKind::Flex => 2,
             PlacementEngineKind::Spine => match self.parts {
                 0..=19 => 8,
                 20..=39 => 35,

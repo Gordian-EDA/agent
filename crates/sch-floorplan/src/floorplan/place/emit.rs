@@ -30,68 +30,6 @@ use sch_model::item::{Incidence, Item};
 // `geom::union_find`, shared with the desugar pin reconciler.
 use sch_model::ir::LayoutIr;
 
-/// Compose every block's per-block `layout:` grid into one global relative seed:
-/// refdes → (grid col, grid row). Each gridded block occupies its own column band
-/// (declaration order, laid left→right); within a band a cell maps its refdes to
-/// `(band_base + local_col, local_row)`. `None` (`~`) holes are skipped; a refdes
-/// repeated in a column takes its FIRST occurrence (the seed — the search then
-/// floats/spans it, since the grid is RELATIVE positioning, never an absolute
-/// pin). Blocks with no grid contribute nothing here — the engine infers their
-/// internal arrangement. Empty when no block carries a `layout:`.
-pub(crate) fn grid_from_layout(design: &Design) -> BTreeMap<String, [i32; 4]> {
-    let mut out: BTreeMap<String, [i32; 4]> = BTreeMap::new();
-    let mut col_base = 0i32;
-    for block in design.blocks.values() {
-        if block.layout.is_empty() {
-            continue;
-        }
-        let mut width = 0i32;
-        for (r, row) in block.layout.iter().enumerate() {
-            for (c, cell) in row.iter().enumerate() {
-                let Some(name) = cell else { continue };
-                let (gc, gr) = (col_base + c as i32, r as i32);
-                // Bounding box: a refdes in several cells (a column span) grows its
-                // box; the seed uses the top-left, the order constraint the whole box.
-                let e = out.entry(name.clone()).or_insert([gc, gr, gc, gr]);
-                e[0] = e[0].min(gc);
-                e[1] = e[1].min(gr);
-                e[2] = e[2].max(gc);
-                e[3] = e[3].max(gr);
-                width = width.max(c as i32 + 1);
-            }
-        }
-        // Next gridded block starts past this one's columns, so bands never overlap.
-        col_base += width.max(1);
-    }
-    out
-}
-
-/// Every authored occurrence of a refdes, in row-major order. Repeated cells are
-/// meaningful for multi-unit symbols: occurrence 1 seeds unit 1, occurrence 2
-/// seeds unit 2, and so on. `grid_from_layout` deliberately keeps only their
-/// bounding box for ordering; this companion view preserves the individual cells.
-pub(crate) fn grid_occurrences(design: &Design) -> BTreeMap<String, Vec<(i32, i32)>> {
-    let mut out: BTreeMap<String, Vec<(i32, i32)>> = BTreeMap::new();
-    let mut col_base = 0i32;
-    for block in design.blocks.values() {
-        if block.layout.is_empty() {
-            continue;
-        }
-        let mut width = 0i32;
-        for (r, row) in block.layout.iter().enumerate() {
-            for (c, cell) in row.iter().enumerate() {
-                let Some(name) = cell else { continue };
-                out.entry(name.clone())
-                    .or_default()
-                    .push((col_base + c as i32, r as i32));
-                width = width.max(c as i32 + 1);
-            }
-        }
-        col_base += width.max(1);
-    }
-    out
-}
-
 // ---------------------------------------------------------------------------
 // Compiler internal model.
 // ---------------------------------------------------------------------------

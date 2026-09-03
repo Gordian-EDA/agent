@@ -33,65 +33,8 @@ mod grid_tests {
     use super::*;
     use geom::{Dir, Rect};
     use indexmap::IndexMap;
-    use sch_check::model::{Block, Component, Design, LayoutGrid};
     use sch_model::ir::Side;
     use sch_model::route::DrawnSegment;
-
-    fn cells(names: &[&str]) -> Vec<Option<String>> {
-        names
-            .iter()
-            .map(|n| {
-                if *n == "~" {
-                    None
-                } else {
-                    Some((*n).to_string())
-                }
-            })
-            .collect()
-    }
-
-    fn block(refs: &[&str], layout: LayoutGrid) -> Block {
-        let mut components = IndexMap::new();
-        for r in refs {
-            components.insert((*r).to_string(), Component::default());
-        }
-        Block {
-            title: None,
-            note: None,
-            components,
-            layout,
-        }
-    }
-
-    #[test]
-    fn per_block_grids_compose_into_column_bands_with_spans_and_holes() {
-        let mut design = Design::default();
-        // block `usb`: J1 | hole | R1  -> width 3
-        design.blocks.insert(
-            "usb".into(),
-            block(&["J1", "R1"], vec![cells(&["J1", "~", "R1"])]),
-        );
-        // block `mcu`: U1 spans its column across two rows (repeated) -> first occ.
-        design.blocks.insert(
-            "mcu".into(),
-            block(&["U1"], vec![cells(&["U1"]), cells(&["U1"])]),
-        );
-
-        let g = grid_from_layout(&design);
-        // usb band starts at col 0; the `~` hole reserves col 1. Boxes are
-        // [col_min, row_min, col_max, row_max].
-        assert_eq!(g["J1"], [0, 0, 0, 0]);
-        assert_eq!(g["R1"], [2, 0, 2, 0]);
-        // mcu band starts AFTER usb's 3 columns (no overlap); U1 SPANS rows 0..1 in
-        // its column (repeated down it), so its box grows in the row axis.
-        assert_eq!(g["U1"], [3, 0, 3, 1]);
-        assert_eq!(g.len(), 3);
-
-        let occurrences = grid_occurrences(&design);
-        assert_eq!(occurrences["J1"], vec![(0, 0)]);
-        assert_eq!(occurrences["R1"], vec![(2, 0)]);
-        assert_eq!(occurrences["U1"], vec![(3, 0), (3, 1)]);
-    }
 
     #[test]
     fn collinear_body_crossing_fires_on_passthrough_not_on_series() {
@@ -130,14 +73,6 @@ mod grid_tests {
         );
     }
 
-    #[test]
-    fn block_without_layout_contributes_nothing() {
-        let mut design = Design::default();
-        design
-            .blocks
-            .insert("main".into(), block(&["U1", "R1"], Vec::new()));
-        assert!(grid_from_layout(&design).is_empty());
-    }
 
     #[test]
     fn dir_to_side_inverts_side_dir() {

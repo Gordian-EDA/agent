@@ -111,8 +111,6 @@ pub struct RawMetrics {
     pub spine_viol: usize,
     /// Bounding-box half-perimeter of all part bodies (compactness).
     pub spread: f64,
-    /// Authored per-block `layout:` relative-order violations.
-    pub grid_order: usize,
     /// Same-refdes (multi-unit) bounding-box spread (cohesion).
     pub sib_spread: f64,
     /// Unsatisfied [`crate::ir::Relation`] statements (the LLM's relational intent).
@@ -140,7 +138,6 @@ impl RawMetrics {
             leg_viol: usize::MAX,
             spine_viol: usize::MAX,
             spread: f64::INFINITY,
-            grid_order: usize::MAX,
             sib_spread: f64::INFINITY,
             relation: usize::MAX,
             group_spread: f64::INFINITY,

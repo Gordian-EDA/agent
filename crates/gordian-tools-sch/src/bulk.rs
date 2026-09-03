@@ -533,10 +533,8 @@ fn rewrite_payload_references(
             }
         }
     }
-    for grid in payload.layout.values_mut() {
-        for refdes in grid.iter_mut().flatten().flatten() {
-            rewrite_ref(refdes, renamed);
-        }
+    for tree in payload.layout.values_mut() {
+        rewrite_tree_refs(tree, renamed);
     }
     let Some(intent) = &mut payload.intent else {
         return;
@@ -1201,9 +1199,21 @@ fn payload_pin_net(payload: &sch_check::PlacePartsInput, spec: &str) -> Option<S
     (!net.starts_with(crate::refs::NET_OF_PIN)).then(|| net.clone())
 }
 
+/// Rewrite every refdes a layout tree names.
+fn rewrite_tree_refs(tree: &mut sch_model::tree::Tree, renamed: &BTreeMap<String, String>) {
+    match tree {
+        sch_model::tree::Tree::Leaf(leaf) => rewrite_ref(&mut leaf.part, renamed),
+        sch_model::tree::Tree::Container(c) => c
+            .children
+            .iter_mut()
+            .for_each(|child| rewrite_tree_refs(child, renamed)),
+    }
+}
+
 /// The engine a payload named, if it named a real one.
 fn engine_named(name: &str) -> Option<PlacementEngineKind> {
     match name {
+        "flex" => Some(PlacementEngineKind::Flex),
         "anneal" => Some(PlacementEngineKind::Anneal),
         "spine" => Some(PlacementEngineKind::Spine),
         "cluster" => Some(PlacementEngineKind::Cluster),
@@ -1217,11 +1227,7 @@ fn engines_to_try(requested: Option<PlacementEngineKind>) -> Vec<PlacementEngine
     if let Some(kind) = requested {
         return vec![kind];
     }
-    vec![
-        PlacementEngineKind::Spine,
-        PlacementEngineKind::Cluster,
-        PlacementEngineKind::Anneal,
-    ]
+    vec![PlacementEngineKind::Flex]
 }
 
 /// The tool behind `add_parts`: a payload with no layout at all.
@@ -1370,6 +1376,7 @@ fn with_check(mut value: Value, ctx: &AgentRuntime) -> Result<Value> {
 
 fn placement_engine(selected: PlacementEngineKind) -> Box<dyn PlacementEngine> {
     match selected {
+        PlacementEngineKind::Flex => Box::new(sch_floorplan::flex::FlexPlace),
         PlacementEngineKind::Anneal => Box::new(anneal_place::Anneal),
         PlacementEngineKind::Spine => Box::new(spine_place::SpinePlace),
         PlacementEngineKind::Cluster => Box::new(cluster_place::ClusterPlace),
@@ -1378,6 +1385,7 @@ fn placement_engine(selected: PlacementEngineKind) -> Box<dyn PlacementEngine> {
 
 fn engine_kind_name(selected: PlacementEngineKind) -> &'static str {
     match selected {
+        PlacementEngineKind::Flex => "flex",
         PlacementEngineKind::Anneal => "anneal",
         PlacementEngineKind::Spine => "spine",
         PlacementEngineKind::Cluster => "cluster",

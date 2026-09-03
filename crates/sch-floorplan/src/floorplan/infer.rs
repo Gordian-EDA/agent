@@ -10,12 +10,20 @@ use kicad::KicadInstallation;
 use sch_check::model::Design;
 
 use super::idiom;
-use super::place::{gather, grid_from_layout, grid_occurrences, incidence};
+use super::place::{gather, incidence};
 use super::*;
 use circuit_graph::netclass::{is_connector_like, is_ground, is_neg_supply, is_power_net};
-use sch_model::cells::unit_place_key;
 use sch_model::item::{Incidence, Item, PinSide, pin_side};
 use sch_model::topology::anchor_tap;
+
+/// Each block's authored arrangement, the tree the typesetter draws it from.
+fn block_trees(design: &Design) -> sch_model::tree::Trees {
+    design
+        .blocks
+        .iter()
+        .filter_map(|(name, block)| Some((name.clone(), block.layout.clone()?)))
+        .collect()
+}
 
 /// A deterministic baseline IR for designs without an LLM-produced one: rails
 /// from the design's power nets (ground-like → bottom, else top), no explicit
@@ -38,7 +46,7 @@ pub fn baseline_ir(design: &Design) -> LayoutIr {
         place: BTreeMap::new(),
         ports: BTreeMap::new(),
         mirror: BTreeSet::new(),
-        grid: BTreeMap::new(),
+        trees: block_trees(design),
         idioms: Vec::new(),
         frozen: BTreeSet::new(),
         rail_locals: local_rail_nets(design),
@@ -142,18 +150,11 @@ pub fn infer_ir(env: &KicadInstallation, design: &Design) -> LayoutIr {
     // orders (apply_cells packs populated rows by ROW_GAP).
     const ROW_BAND: i32 = 10;
     let mut place: BTreeMap<String, Cell> = BTreeMap::new();
-    // Authored placement grid (`layout:` 2D array): refdes → (grid col, grid row).
-    // A gridded anchor takes its cell; the rest flow left→right in connectivity
-    // order after the last grid column. With no grid the map is empty and this is
-    // exactly the old col=k*5 / row=MID behaviour.
-    let authored = grid_from_layout(design);
-    let authored_occurrences = grid_occurrences(design);
     let order = order_anchors(&items, &inc, &anchors);
-    let max_gcol = authored.values().map(|b| b[2]).max().unwrap_or(-1);
     let mut anchor_col: BTreeMap<usize, i32> = BTreeMap::new();
     let mut anchor_row: BTreeMap<usize, i32> = BTreeMap::new();
 
-    // The anchors the author did NOT grid are 2-D SHELF-PACKED into a page-shaped block
+    // The anchors are 2-D SHELF-PACKED into a page-shaped block
     // (≈√n per shelf) toward the TOP-LEFT, instead of laid out in one ever-widening row.
     // One flat row is the #1 sprawl source on a multi-module board (4-5 ICs + connectors
     // unroll into a wide strip with an empty vertical middle and long cross-sheet rails —
@@ -162,11 +163,7 @@ pub fn infer_ir(env: &KicadInstallation, design: &Design) -> LayoutIr {
     // are ORDINAL — `apply_cells` packs each populated track by its real content size — so
     // a module only needs the right SHELF and order, not a metric footprint; a satellite-
     // heavy anchor still reserves extra columns so its tap fan does not collide a neighbour.
-    let inferred: Vec<usize> = order
-        .iter()
-        .copied()
-        .filter(|ai| !authored.contains_key(&items[*ai].refdes))
-        .collect();
+    let inferred: Vec<usize> = order.to_vec();
     let fwidth = |ai: usize| -> i32 {
         let nsat = sats
             .iter()
@@ -179,8 +176,8 @@ pub fn infer_ir(env: &KicadInstallation, design: &Design) -> LayoutIr {
         (1 + nsat / 6).max(1)
     };
     let per_row = (inferred.len() as f64).sqrt().ceil().max(1.0) as i32;
-    let x0 = max_gcol + 1;
-    let (mut gx, mut shelf, mut in_row, mut max_used) = (x0, 0i32, 0i32, max_gcol);
+    let x0 = 0i32;
+    let (mut gx, mut shelf, mut in_row, mut max_used) = (x0, 0i32, 0i32, -1i32);
     let mut packed: BTreeMap<usize, (i32, i32)> = BTreeMap::new();
     for &ai in &inferred {
         if in_row >= per_row {
@@ -198,26 +195,12 @@ pub fn infer_ir(env: &KicadInstallation, design: &Design) -> LayoutIr {
 
     for &ai in &order {
         let rd = &items[ai].refdes;
-        let authored_unit_cell = authored_occurrences
-            .get(rd)
-            .and_then(|cells| cells.get(items[ai].unit.saturating_sub(1) as usize))
-            .copied();
-        let (gcol, grow) = match authored_unit_cell {
-            Some(cell) => cell,
-            None => match authored.get(rd) {
-                Some(b) => (b[0], b[1]), // seed from the box's top-left cell
-                None => packed[&ai],
-            },
-        };
+        let (gcol, grow) = packed[&ai];
         let col = gcol * 5; // wide gaps leave room for tap satellites either side
         let row = MID + grow * ROW_BAND;
         anchor_col.insert(ai, col);
         anchor_row.insert(ai, row);
-        let key = if authored_unit_cell.is_some() {
-            unit_place_key(rd, items[ai].unit)
-        } else {
-            rd.clone()
-        };
+        let key = rd.clone();
         place.insert(
             key,
             Cell {
@@ -274,13 +257,6 @@ pub fn infer_ir(env: &KicadInstallation, design: &Design) -> LayoutIr {
     let mut placed: BTreeSet<String> = BTreeSet::new();
     let mut idiom_reports: Vec<sch_model::result::IdiomReport> = Vec::new();
     for idiom in &detected {
-        // If the author gridded the anchor or any member, their grid wins — skip.
-        let gridded = std::iter::once(&items[idiom.anchor].refdes)
-            .chain(idiom.cells.iter().map(|(rd, _)| rd))
-            .any(|rd| authored.contains_key(rd));
-        if gridded {
-            continue;
-        }
         if idiom.freeze {
             for (rd, cell) in &idiom.cells {
                 place.insert(rd.clone(), *cell);
@@ -294,26 +270,12 @@ pub fn infer_ir(env: &KicadInstallation, design: &Design) -> LayoutIr {
         });
     }
 
-    // Spare columns for satellites that don't resolve to an anchor pin. Start
-    // past the last placed anchor column (`next_col` covers grid + inferred).
+    // Spare columns for satellites that don't resolve to an anchor pin, past the last
+    // placed anchor column.
     let mut spare_col = next_col * 5 + 3;
     // Track how many V+/GND-band parts already sit in each column, to spread them.
     let mut band_fill: BTreeMap<(i32, i32), i32> = BTreeMap::new();
 
-    // Grid cells that contain an anchor: a satellite the author gridded into such
-    // a cell still FLANKS the anchor (inference); one gridded into an anchor-less
-    // cell (a bare 2-pin connector, or an all-passive block) is stacked there.
-    let anchor_cells: BTreeSet<(i32, i32)> = anchors
-        .iter()
-        .filter_map(|&ai| {
-            authored_occurrences
-                .get(&items[ai].refdes)
-                .and_then(|cells| cells.get(items[ai].unit.saturating_sub(1) as usize))
-                .copied()
-                .or_else(|| authored.get(&items[ai].refdes).map(|b| (b[0], b[1])))
-        })
-        .collect();
-    let mut stack_row: BTreeMap<(i32, i32), i32> = BTreeMap::new();
     // How many satellites have already tapped a given (anchor, pin), so the next
     // one fans into the adjacent column instead of overlapping.
     let mut same_pin: BTreeMap<(usize, String), i32> = BTreeMap::new();
@@ -328,26 +290,6 @@ pub fn infer_ir(env: &KicadInstallation, design: &Design) -> LayoutIr {
         let (Some(n1), Some(n2)) = (n1, n2) else {
             continue;
         };
-
-        // An explicitly-gridded satellite in an anchor-less cell: place it at its
-        // cell, stacking successive parts down the column so they don't collide.
-        if let Some(b) = authored.get(&s.refdes).copied()
-            && !anchor_cells.contains(&(b[0], b[1]))
-        {
-            let (gc, gr) = (b[0], b[1]);
-            let k = stack_row.entry((gc, gr)).or_insert(0);
-            let row = MID + gr * ROW_BAND + *k;
-            *k += 1;
-            place.insert(
-                s.refdes.clone(),
-                Cell {
-                    col: gc * 5,
-                    row,
-                    orient: orient_for(&s.pins, &n1, true),
-                },
-            );
-            continue;
-        }
 
         // The single anchor pin this satellite taps (if any), with its side/rank.
         let tap = anchor_tap(&items, &inc, &anchors, si, &rails);
@@ -537,25 +479,13 @@ pub fn infer_ir(env: &KicadInstallation, design: &Design) -> LayoutIr {
         }
     }
 
-    // The author's per-block `layout:` grid OVERRIDES inferred placement for every
-    // gridded part — anchors AND satellites. A gridded satellite SEEDS where the
-    // grid's relative arrangement says, not where its tap would pull it (the grid
-    // is the author's explicit intent; inference only fills the rest). The search
-    // then holds that relative order via the `grid_order` cost.
-    for (rd, b) in &authored {
-        if let Some(cell) = place.get_mut(rd) {
-            cell.col = b[0] * 5;
-            cell.row = MID + b[1] * ROW_BAND;
-        }
-    }
-
     LayoutIr {
         flow: Flow::Lr,
         rails,
         place,
         ports,
         mirror,
-        grid: authored,
+        trees: block_trees(design),
         idioms: idiom_reports,
         frozen: placed,
         rail_locals: local_rail_nets(design),

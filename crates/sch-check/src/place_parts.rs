@@ -13,6 +13,7 @@ use fuzzy_matcher::FuzzyMatcher;
 use fuzzy_matcher::skim::SkimMatcherV2;
 use indexmap::IndexMap;
 use sch_model::ir::{Band, Cell, Flow, LayoutIr, Relation, Side};
+use sch_model::tree::Tree;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -30,11 +31,10 @@ pub struct PlacePartsInput {
     /// Region every part without its own `block` joins.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub block: Option<BlockName>,
-    /// Region → its internal placement grid: rows of refdes, `null` for a hole.
-    /// A refdes repeated down a column spans those rows. Regions left out are
-    /// arranged from connectivity.
+    /// Region → the row/col tree it is drawn from. This IS the layout: the
+    /// typesetter measures the symbols and computes every coordinate from it.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub layout: BTreeMap<BlockName, LayoutGrid>,
+    pub layout: BTreeMap<BlockName, Tree>,
     /// Region → how it is documented on the sheet: the caption drawn on its frame
     /// and a note explaining a decision. Regions left out are captioned with their
     /// own name and carry no note.
@@ -403,9 +403,9 @@ pub fn into_design(
             )),
         }
     }
-    for (name, grid) in &input.layout {
+    for (name, tree) in &input.layout {
         match design.blocks.get_mut(name) {
-            Some(block) => block.layout = grid.clone(),
+            Some(block) => block.layout = Some(tree.clone()),
             // A layout hint for a region nobody joined is a hint about nothing,
             // not a broken circuit — it is dropped and said so.
             None => diags.push(Diagnostic::warning(

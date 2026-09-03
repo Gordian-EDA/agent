@@ -52,7 +52,8 @@ mod textsolve;
 
 // Re-export the public surface VERBATIM so external `crate::write::…` paths
 // resolve unchanged across the split.
-pub use build::{pin_end0, point_key, quantize_dir};
+pub use build::{pin_end0, point_key};
+pub use sch_model::geometry::quantize_dir;
 pub use emit::{escape_sexpr_string, fmt_coord};
 
 /// Stable key identifying *this* schematic sheet for root-uuid derivation.

@@ -10,6 +10,7 @@ description = "Schematic layout composition root: infer, place, route, text-solv
 sch-model = { path = "../sch-model" }
 sch-doc = { path = "../sch-doc" }
 sch-check = { path = "../sch-check" }
+sch-flex = { path = "../sch-flex" }
 circuit-graph = { path = "../circuit-graph" }
 kicad-symbol = { path = "../kicad-symbol" }
 kicad = { path = "../kicad" }
