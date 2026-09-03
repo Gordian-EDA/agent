@@ -663,6 +663,23 @@ impl Item {
         }
     }
 
+    /// The UUID KiCAD gave this item, when it has one. Header and trailer sections
+    /// (`paper`, `title_block`, `version`) do not.
+    pub fn uuid(&self) -> Option<&str> {
+        match self {
+            Item::Symbol(s) => Some(&s.uuid),
+            Item::Wire(w) => Some(&w.uuid),
+            Item::Junction(j) => Some(&j.uuid),
+            Item::NoConnect(n) => Some(&n.uuid),
+            Item::Label(l) => Some(&l.uuid),
+            Item::Text(t) => Some(&t.uuid),
+            Item::Rectangle(r) => Some(&r.uuid),
+            Item::Sheet(s) => Some(&s.uuid),
+            Item::LibSymbols(_) => None,
+            Item::Other(raw) => sexpr::child_text(&raw.node, "uuid"),
+        }
+    }
+
     /// The head token this item writes as.
     pub fn head(&self) -> &str {
         match self {
