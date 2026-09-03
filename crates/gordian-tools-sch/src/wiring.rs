@@ -309,6 +309,10 @@ pub fn label_tool(input: Value, ctx: &AgentRuntime) -> Result<Value> {
                  merges `{was}` and `{net}` into one net. Use delete_wires to take {spec} off \
                  `{was}` first, or name a pin that is loose."
             ),
+            "fix": {
+                "tool": "delete_wires",
+                "args": {"pins": [spec]},
+            },
         }));
     }
     // A net has one scope on the sheet: a plain label on a net the sheet names with
@@ -872,6 +876,10 @@ fn drawing_on_net(doc: &SchDoc, net: &str) -> NetDrawing {
 pub fn delete_wires(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let mut edit = Edit::open(ctx)?;
     let live = connect::scene(&edit.doc);
+    let wanted_bbox = match input_bbox(&input) {
+        Ok(bbox) => bbox,
+        Err(error) => return Ok(json!({"error": error})),
+    };
     let wanted_net = input.get("net").and_then(Value::as_str);
     let wanted_refs: Vec<String> = input
         .get("refs")
@@ -914,9 +922,10 @@ pub fn delete_wires(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         && wanted_refs.is_empty()
         && wanted_uuids.is_empty()
         && wanted_pins.is_empty()
+        && wanted_bbox.is_none()
     {
         return Ok(json!({
-            "error": "delete_wires needs one of `pins`, `net`, `refs` or `uuids`",
+            "error": "delete_wires needs one of `pins`, `net`, `refs`, `uuids` or `bbox`",
         }));
     }
     let pins = sch_doc::placed_pins(&edit.doc);
@@ -933,7 +942,10 @@ pub fn delete_wires(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let net_of_segment = |a: Point2, b: Point2| {
         live.segments
             .iter()
-            .find(|(from, to, _)| from.near_eq(a, EPS) && to.near_eq(b, EPS))
+            .find(|(from, to, _)| {
+                from.near_eq(a, EPS) && to.near_eq(b, EPS)
+                    || from.near_eq(b, EPS) && to.near_eq(a, EPS)
+            })
             .map(|(_, _, name)| name.clone())
     };
     let mut doomed: Vec<String> = edit
@@ -946,6 +958,7 @@ pub fn delete_wires(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             wanted_uuids.contains(&wire.uuid)
                 || touches_pin(a, b)
                 || touches_ref(a, b)
+                || wanted_bbox.is_some_and(|bounds| Segment::new(a, b).dist_to_rect(&bounds) <= EPS)
                 || wanted_net.is_some_and(|net| net_of_segment(a, b).as_deref() == Some(net))
         })
         .map(|wire| wire.uuid.clone())
@@ -968,6 +981,47 @@ pub fn delete_wires(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     if doomed.is_empty() {
         return Ok(json!({ "changed": "no wire matched", "net_delta": "connectivity unchanged" }));
     }
+    let selected_segments = edit
+        .doc
+        .wires()
+        .filter(|wire| doomed.contains(&wire.uuid))
+        .flat_map(|wire| wire.points.windows(2).map(|pair| (pair[0], pair[1])))
+        .collect::<Vec<_>>();
+    let mut selected_nets = live
+        .segments
+        .iter()
+        .filter(|(a, b, _)| {
+            selected_segments.iter().any(|(from, to)| {
+                from.near_eq(*a, EPS) && to.near_eq(*b, EPS)
+                    || from.near_eq(*b, EPS) && to.near_eq(*a, EPS)
+            })
+        })
+        .map(|(_, _, net)| net.clone())
+        .collect::<std::collections::BTreeSet<_>>();
+    for item in edit.doc.items() {
+        let point = match item {
+            sch_doc::Item::Label(label) if doomed.contains(&label.uuid) => Some(label.at.point()),
+            sch_doc::Item::Junction(junction) if doomed.contains(&junction.uuid) => {
+                Some(junction.at)
+            }
+            _ => None,
+        };
+        if let Some(point) = point {
+            selected_nets.extend(
+                live.points
+                    .iter()
+                    .filter(|(at, _)| at.near_eq(point, EPS))
+                    .map(|(_, net)| net.clone()),
+            );
+        }
+    }
+    let affected_pins = edit
+        .before()
+        .nets
+        .iter()
+        .filter(|net| selected_nets.contains(&net.name))
+        .flat_map(|net| net.pins.iter().cloned())
+        .collect::<std::collections::BTreeSet<_>>();
     // The endpoints the cut is about to leave in the air. Deleting the middle of a
     // run leaves the surviving half anchored at one end and dangling at the other,
     // which is the same `unconnected_wire_endpoint` a removed pin leaves behind.
@@ -981,12 +1035,22 @@ pub fn delete_wires(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let mut removed = edit.doc.remove_drawing(&doomed);
     removed += crate::edit::retract_stubs(&mut edit.doc, &cut);
     removed += edit.doc.remove_drawing(&floating_wires(&edit.doc));
+    let after = connect::extract(&edit.doc);
+    selected_nets.extend(
+        after
+            .nets
+            .iter()
+            .filter(|net| net.pins.iter().any(|pin| affected_pins.contains(pin)))
+            .map(|net| net.name.clone()),
+    );
     // Deleting copper loosens the pins that shared it, which is the point of
     // the call: every net the request named, and every pin on one, is fair game.
     let mut named: Vec<String> = wanted_refs.clone();
     named.extend(pin_owners);
+    named.extend(affected_pins.iter().map(|pin| pin.refdes.clone()));
     let mut nets = refs::nets_touching(edit.before(), &named);
     nets.extend(wanted_net.map(str::to_string));
+    nets.extend(selected_nets);
     let loosened: Vec<String> = edit
         .before()
         .nets
@@ -999,7 +1063,7 @@ pub fn delete_wires(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         .parts(named)
         .parts(loosened)
         .creating();
-    let loose = refs::newly_loose(edit.before(), &connect::extract(&edit.doc));
+    let loose = refs::newly_loose(edit.before(), &after);
     let changed = match loose.is_empty() {
         true => format!("deleted {removed} wiring item(s)"),
         false => format!(

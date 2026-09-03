@@ -405,7 +405,7 @@ pub fn tool_defs() -> Vec<Tool> {
         ),
         (
             "delete_wires",
-            "Remove wires by pin, net, touching part, or uuid; reports loose pins. For a part IN \
+            "Remove wires by pin, net, touching part, rectangle, or uuid; reports loose pins. For a part IN \
              SERIES cut ONE pin — {pins:[\"RX.1\"]} — then connect through it. RX.1 is a \
              placeholder. `net` cuts the whole net and loosens every pin.",
             json!({
@@ -414,7 +414,12 @@ pub fn tool_defs() -> Vec<Tool> {
                     "pins": { "type": "array", "items": { "type": "string" } },
                     "net": { "type": "string" },
                     "refs": { "type": "array", "items": { "type": "string" } },
-                    "uuids": { "type": "array", "items": { "type": "string" } }
+                    "uuids": { "type": "array", "items": { "type": "string" } },
+                    "bbox": {
+                        "type": "array", "items": {"type": "number"},
+                        "minItems": 4, "maxItems": 4,
+                        "description": "Delete wires entering [x1,y1,x2,y2] in mm."
+                    }
                 },
                 "additionalProperties": false
             }),

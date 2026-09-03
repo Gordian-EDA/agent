@@ -108,6 +108,75 @@ fn get_net_resolves_power_only_nets_and_a_unique_close_name() {
 }
 
 #[test]
+fn label_refusal_gives_the_exact_delete_wires_repair() {
+    let Some(ctx) = sheet() else {
+        eprintln!("SKIP: no KiCad detected");
+        return;
+    };
+    labelled_resistor(&ctx);
+    let first = call(&ctx, "label", json!({"pin": "R1.1", "net": "I2C_SDA"}));
+    assert!(first.get("error").is_none(), "fixture failed: {first}");
+
+    let refused = call(&ctx, "label", json!({"pin": "R1.1", "net": "I2C_ALERT"}));
+
+    assert!(
+        refused["error"]
+            .as_str()
+            .is_some_and(|error| { error.contains("a label does not replace that name") })
+    );
+    assert_eq!(
+        refused["fix"],
+        json!({"tool": "delete_wires", "args": {"pins": ["R1.1"]}}),
+        "{refused}"
+    );
+}
+
+#[test]
+fn delete_wires_declares_names_created_by_its_own_split() {
+    let Some(ctx) = sheet() else {
+        eprintln!("SKIP: no KiCad detected");
+        return;
+    };
+    let added = call(
+        &ctx,
+        "add_symbols",
+        json!({"parts": [
+            {"lib_id": "Device:R", "ref": "R1"},
+            {"lib_id": "Device:R", "ref": "R2"}
+        ]}),
+    );
+    assert!(added.get("error").is_none(), "fixture failed: {added}");
+    let mut doc = sch_doc::SchDoc::read(ctx.sch_path()).unwrap();
+    let pins = sch_doc::placed_pins(&doc);
+    let at = |reference: &str| {
+        pins.iter()
+            .find(|pin| pin.refdes == reference && pin.number == "1")
+            .unwrap()
+            .at
+    };
+    let (a, b) = (at("R1"), at("R2"));
+    let elbow = geom::Point2::new(a.x, b.y);
+    if !a.near_eq(elbow, geom::EPS) {
+        doc.add_wire(a, elbow);
+    }
+    if !elbow.near_eq(b, geom::EPS) {
+        doc.add_wire(elbow, b);
+    }
+    doc.add_label(LabelKind::Local, "I2C_SDA", Pose::new(a.x, a.y, 0.0));
+    doc.add_label(LabelKind::Local, "N_R32_1_U1_30", Pose::new(b.x, b.y, 0.0));
+    doc.write(ctx.sch_path()).unwrap();
+
+    let result = call(&ctx, "delete_wires", json!({"pins": ["R1.1"]}));
+
+    assert!(result.get("error").is_none(), "{result}");
+    let after = sch_doc::connect::extract(&sch_doc::SchDoc::read(ctx.sch_path()).unwrap());
+    assert!(
+        after.nets.iter().any(|net| net.name == "N_R32_1_U1_30"),
+        "the surviving authored side was lost: {result}"
+    );
+}
+
+#[test]
 fn no_connect_retracts_single_pin_nets_in_one_batch() {
     let Some(ctx) = sheet() else {
         eprintln!("SKIP: no KiCad detected");
