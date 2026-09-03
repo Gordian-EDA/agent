@@ -49,30 +49,12 @@
     }
   ],
   "intent": {
-    "flow": "lr",
     "rails": {
       "GND": "bottom",
       "VCC": "top"
     },
     "ports": {
       "OUT": "right"
-    },
-    "place": {
-      "C3": {
-        "col": 1,
-        "row": 1,
-        "orient": "down"
-      },
-      "R7": {
-        "col": 0,
-        "row": 0,
-        "orient": "down"
-      },
-      "R8": {
-        "col": 0,
-        "row": 1,
-        "orient": "down"
-      }
     }
   }
 }

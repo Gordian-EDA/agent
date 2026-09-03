@@ -632,7 +632,6 @@
   "name": "USB-C ESP32 Environmental Sensor Node",
   "block": "node",
   "intent": {
-    "flow": "lr",
     "rails": {
       "+3V3": "top",
       "GND": "bottom",

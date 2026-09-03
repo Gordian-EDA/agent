@@ -144,7 +144,6 @@
     }
   ],
   "intent": {
-    "flow": "lr",
     "rails": {
       "GNDD": "bottom",
       "VCC3V3": "top",
@@ -153,67 +152,6 @@
     "ports": {
       "RXD1": "right",
       "TXD1": "right"
-    },
-    "place": {
-      "C14": {
-        "col": 5,
-        "row": 0,
-        "orient": "down"
-      },
-      "C16": {
-        "col": 6,
-        "row": 0,
-        "orient": "down"
-      },
-      "J1": {
-        "col": 0,
-        "row": 1,
-        "orient": "down"
-      },
-      "R13": {
-        "col": 4,
-        "row": 2,
-        "orient": "right"
-      },
-      "R15": {
-        "col": 4,
-        "row": 1,
-        "orient": "right"
-      },
-      "R16": {
-        "col": 3,
-        "row": 0,
-        "orient": "up"
-      },
-      "R20": {
-        "col": 7,
-        "row": 1,
-        "orient": "down"
-      },
-      "R7": {
-        "col": 1,
-        "row": 1,
-        "orient": "right"
-      },
-      "R8": {
-        "col": 1,
-        "row": 2,
-        "orient": "right"
-      },
-      "R9": {
-        "col": 2,
-        "row": 0,
-        "orient": "up"
-      },
-      "U2": {
-        "col": 2,
-        "row": 1,
-        "orient": "down"
-      }
-    },
-    "mirror": [
-      "J1",
-      "U2"
-    ]
+    }
   }
 }
