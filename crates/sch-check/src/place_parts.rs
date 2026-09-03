@@ -405,7 +405,12 @@ pub fn into_design(
     }
     for (name, tree) in &input.layout {
         match design.blocks.get_mut(name) {
-            Some(block) => block.layout = Some(tree.clone()),
+            Some(block) => {
+                for error in tree_faults(name, tree, block) {
+                    diags.push(error);
+                }
+                block.layout = Some(tree.clone());
+            }
             // A layout hint for a region nobody joined is a hint about nothing,
             // not a broken circuit — it is dropped and said so.
             None => diags.push(Diagnostic::warning(
@@ -932,6 +937,87 @@ fn relations_schema() -> Value {
     }})
 }
 
+/// What is wrong with a region's layout tree: a leaf naming a part that is not in the
+/// region, or the same part placed twice. Both would silently lose a part off the drawing,
+/// so they refuse the payload rather than surprise the author.
+fn tree_faults(name: &str, tree: &Tree, block: &Block) -> Vec<Diagnostic> {
+    let mut seen: BTreeSet<(String, u8)> = BTreeSet::new();
+    let mut out = Vec::new();
+    for (refdes, unit) in tree.keys() {
+        if !block.components.contains_key(&refdes) {
+            let near = closest_ref(&refdes, block.components.keys().map(String::as_str));
+            let hint = near.map_or(String::new(), |r| format!(" (did you mean `{r}`?)"));
+            out.push(Diagnostic::error(
+                "layout-unknown-part",
+                format!("`layout.{name}` places `{refdes}`, which is not a part of that region{hint}"),
+            ));
+        } else if !seen.insert((refdes.clone(), unit)) {
+            out.push(Diagnostic::error(
+                "layout-duplicate-part",
+                format!("`layout.{name}` places `{refdes}` twice; every part gets one place"),
+            ));
+        }
+    }
+    out
+}
+
+/// The region member a mistyped refdes most likely meant.
+fn closest_ref<'a>(refdes: &str, candidates: impl Iterator<Item = &'a str>) -> Option<String> {
+    candidates
+        .map(|c| (strsim::normalized_levenshtein(refdes, c), c))
+        .filter(|(score, _)| *score >= 0.6)
+        .max_by(|a, b| a.0.total_cmp(&b.0))
+        .map(|(_, c)| c.to_owned())
+}
+
+/// The layout tree a region is drawn from: nested rows and columns of parts.
+///
+/// The schema is recursive by `$ref`, and its description carries the composition rules —
+/// they are what separates a readable block from a merely correct one.
+fn layout_tree_schema() -> Value {
+    json!({
+        "$ref": "#/$defs/node",
+        "$defs": {
+            "node": {
+                "type": "object",
+                "description":
+                    "One of: {part} for a part, {row:[...]} for a left-to-right signal path, \
+                     {col:[...]} for what hangs off a node. RULES: a row is ONE signal path \
+                     (neighbours in a row must share a net, so they get a straight wire) — \
+                     never put unrelated parts side by side. Anything hanging off a node (a \
+                     shunt cap to GND, a pull-up, a bias resistor) goes in a col with the \
+                     series part it attaches to. Around an IC: \
+                     {row:[{col:[input-side parts]}, {part:IC}, {col:[output-side parts]}]}. \
+                     Decoupling caps: a row of caps right after the IC. Two parts that meet \
+                     only through a rail (GND, +3V3) need no adjacency — power symbols join \
+                     them. Symmetric halves (H-bridge, differential pair, dual channel) are \
+                     two mirrored cols side by side in one row. Keep a block to 3-12 parts \
+                     and give every part a place. Gaps: 4-6 in a passive chain, 6-8 around \
+                     an IC and between sub-rows; keep blocks COMPACT — empty space, long \
+                     wires and parts far from what they connect to all read badly.",
+                "properties": {
+                    "part": {"type": "string", "description": "Refdes of a part in this region."},
+                    "unit": {"type": "integer", "description": "Unit of a multi-unit symbol; one leaf per unit."},
+                    "rot": {
+                        "type": "integer", "enum": [0, 90, 180, 270],
+                        "description":
+                            "Only when the default looks wrong. 0 stands a 2-pin part up, \
+                             90 lays it along the row. By default series passives lie along \
+                             their row, a part touching a rail stands with GND down and the \
+                             supply up, and a connector at a row end faces the circuit."
+                    },
+                    "mirror": {"type": "boolean", "description": "Flip the symbol left-to-right."},
+                    "row": {"type": "array", "items": {"$ref": "#/$defs/node"}, "minItems": 1},
+                    "col": {"type": "array", "items": {"$ref": "#/$defs/node"}, "minItems": 1},
+                    "gap": {"type": "number", "description": "Grid units between children (1 unit = 1.27 mm, an 0603 resistor is 6 units). Default 8."},
+                    "align": {"type": "string", "enum": ["center", "start", "end"]}
+                },
+                "additionalProperties": false
+            }
+        }
+    })
+}
+
 pub fn place_parts_input_schema() -> Value {
     json!({
         "type": "object",
@@ -997,15 +1083,9 @@ pub fn place_parts_input_schema() -> Value {
             "layout": {
                 "type": "object",
                 "description":
-                    "Region -> rows of refdes (null for a hole): that region's internal grid. \
-                     A refdes repeated down a column spans those rows.",
-                "additionalProperties": {
-                    "type": "array",
-                    "items": {
-                        "type": "array",
-                        "items": {"type": ["string", "null"]}
-                    }
-                }
+                    "Region -> its layout TREE: how that region is drawn. This is the layout; \
+                     compose one for every region.",
+                "additionalProperties": layout_tree_schema()
             },
             "blocks": {
                 "type": "object",
@@ -1025,7 +1105,7 @@ pub fn place_parts_input_schema() -> Value {
             },
             "engine": {
                 "type": "string",
-                "enum": ["anneal", "spine", "cluster"],
+                "enum": ["flex"],
                 "description":
                     "Placement engine override. Only worth setting after a placement-engine \
                      failure; the default is chosen from the sheet's size."

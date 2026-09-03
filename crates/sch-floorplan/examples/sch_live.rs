@@ -46,7 +46,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             (serde_json::to_string_pretty(&report)?, report.committed)
         }
         "arrange" => {
-            let report = live::arrange(&env, &mut doc, &selection(rest)?, None, engine, None)?;
+            let report = live::arrange(&env, &mut doc, &selection(rest)?, None, None, engine, None)?;
             (serde_json::to_string_pretty(&report)?, report.committed)
         }
         "rewire" => {

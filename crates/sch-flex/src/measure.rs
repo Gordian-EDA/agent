@@ -86,7 +86,7 @@ pub struct Placed {
 pub fn typeset_block(tree: &Tree, parts: &[Part], index: &dyn Fn(&str, u8) -> Option<usize>) -> Vec<Placed> {
     let node = measure(tree, parts, index, Axis::Row);
     let mut out = Vec::new();
-    place(&node, 0.0, 0.0, parts, &mut out);
+    place(&node, 0.0, 0.0, &mut out);
     out
 }
 
@@ -579,7 +579,7 @@ fn seat_column(col: &mut Node, parts: &[Part], lines: &[(String, f64)]) -> bool 
 
 /// Walk the measured tree, writing out one position per leaf. `(x, y)` is the node box's
 /// top-left corner.
-fn place(node: &Node, x: f64, y: f64, parts: &[Part], out: &mut Vec<Placed>) {
+fn place(node: &Node, x: f64, y: f64, out: &mut Vec<Placed>) {
     match &node.kind {
         Kind::Leaf { part, pose, anchor } => {
             // Snap the ALIGNMENT LINE to the grid and derive the instance origin from it,
@@ -613,7 +613,7 @@ fn place(node: &Node, x: f64, y: f64, parts: &[Part], out: &mut Vec<Placed>) {
                     Axis::Row => (x + along, y + across),
                     Axis::Col => (x + across, y + along),
                 };
-                place(child, cx, cy, parts, out);
+                place(child, cx, cy, out);
                 cursor = along + main(child, *axis) + gap;
             }
         }

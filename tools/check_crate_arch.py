@@ -30,7 +30,7 @@ API_CRATES = {"pcb-model"}
 # `cargo run -p <leaf> --example bench` must work with no installation and no agent.
 PURE_HELPERS = {"geom", "circuit-graph", "kicad-symbol", "pcb-grid"}
 MODEL_CRATES = {"sch-model": PURE_HELPERS, "pcb-model": PURE_HELPERS}
-SCH_LEAVES = {"anneal-place", "cluster-place", "spine-place"}
+SCH_LEAVES = {"anneal-place", "cluster-place", "spine-place", "sch-flex"}
 # `sch-drag` is a leaf over the *document* rather than over the abstract model: it
 # edits a real `.kicad_sch` and gates itself on the connectivity extracted from it,
 # so `sch-doc` is its model crate.

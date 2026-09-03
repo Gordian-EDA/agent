@@ -68,6 +68,7 @@ fn arranging_one_symbol_keeps_its_neighbours_on_their_nets() {
         &mut doc,
         &selection,
         None,
+        None,
         Box::new(spine_place::SpinePlace),
         None,
     )
@@ -156,6 +157,7 @@ fn arranging_a_whole_reference_sheet_keeps_its_netlist() {
         &mut doc,
         &Selection::Refs(refs),
         None,
+        None,
         Box::new(spine_place::SpinePlace),
         None,
     )
@@ -207,6 +209,7 @@ fn arranging_a_forty_part_block_keeps_its_netlist() {
         &env,
         &mut doc,
         &Selection::Refs(refs),
+        None,
         None,
         Box::new(spine_place::SpinePlace),
         None,

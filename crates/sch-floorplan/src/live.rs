@@ -59,13 +59,6 @@ use sch_model::result::SHEET_BLOCK;
 /// Clearance added around a selected part when deciding which wires belong to it.
 const TOUCH_MARGIN: f64 = 1.27;
 
-/// Sheet size at or above which the deterministic engine is the default.
-///
-/// Below it, `cluster`'s pose search and de-sprawl polish — each of which re-routes
-/// and re-text-solves the whole sheet several times — still fit comfortably; above it
-/// they are what turns a 20-second placement into a two-minute one.
-const SPINE_ABOVE_PARTS: usize = 32;
-
 /// Share of the budget the search may spend, leaving the rest for realising the
 /// sheet, extracting its connectivity and gating it.
 const SEARCH_SHARE: f64 = 0.7;
@@ -719,6 +712,7 @@ pub fn arrange(
     doc: &mut SchDoc,
     selection: &Selection,
     intent: Option<sch_check::Intent>,
+    layout: Option<sch_model::tree::Tree>,
     engine: Box<dyn PlacementEngine>,
     budget: Option<PlacementBudget>,
 ) -> Result<ArrangeReport> {
@@ -734,6 +728,7 @@ pub fn arrange(
                 doc,
                 &selection,
                 intent,
+                layout,
                 Some(engine.as_ref()),
                 phase,
                 deadlines,
@@ -757,7 +752,7 @@ pub fn rewire(
         budget,
         "rewire",
         move |env, doc, phase, deadlines| {
-            rearrange_inner(&env, doc, &selection, None, None, phase, deadlines)
+            rearrange_inner(&env, doc, &selection, None, None, None, phase, deadlines)
         },
     )
 }
@@ -768,6 +763,7 @@ fn rearrange_inner(
     doc: &mut SchDoc,
     selection: &Selection,
     intent: Option<sch_check::Intent>,
+    layout: Option<sch_model::tree::Tree>,
     engine: Option<&dyn PlacementEngine>,
     phase: &Phase,
     deadlines: Deadlines,
@@ -837,6 +833,18 @@ fn rearrange_inner(
         let (intent, warnings) = intent.into_layout_ir_for(&available);
         intent_warnings = warnings;
         apply_intent(&mut ir, intent);
+    }
+    if let Some(tree) = layout {
+        // The selection is drawn from the caller's tree. It is one arrangement, so it
+        // belongs to one block: the block the selection's first part is tagged with.
+        let block = movable
+            .first()
+            .map(|it| it.block.clone())
+            .unwrap_or_else(|| sch_model::result::DEFAULT_BLOCK.to_owned());
+        for it in &mut movable {
+            it.block = block.clone();
+        }
+        ir.trees.insert(block, tree);
     }
     let snapshot = doc.snapshot();
     // Read before the erase: a net whose only labels belong to the selection would
@@ -1965,15 +1973,12 @@ mod tests {
     }
 
     #[test]
-    fn policy_picks_the_engine_that_keeps_the_budget() {
-        let small = PlacementBudget::new(SPINE_ABOVE_PARTS - 1);
-        let large = PlacementBudget::new(SPINE_ABOVE_PARTS);
-        assert_eq!(small.engine(None), PlacementEngineKind::Cluster);
-        assert_eq!(large.engine(None), PlacementEngineKind::Spine);
+    fn the_typesetter_is_the_default_and_an_explicit_engine_overrides_it() {
+        let policy = PlacementBudget::new(40);
+        assert_eq!(policy.engine(None), PlacementEngineKind::Flex);
         assert_eq!(
-            large.engine(Some(PlacementEngineKind::Anneal)),
-            PlacementEngineKind::Anneal,
-            "an explicit engine overrides the policy"
+            policy.engine(Some(PlacementEngineKind::Anneal)),
+            PlacementEngineKind::Anneal
         );
     }
 

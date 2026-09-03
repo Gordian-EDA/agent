@@ -32,7 +32,6 @@ pub(crate) use route::*;
 mod grid_tests {
     use super::*;
     use geom::{Dir, Rect};
-    use indexmap::IndexMap;
     use sch_model::ir::Side;
     use sch_model::route::DrawnSegment;
 

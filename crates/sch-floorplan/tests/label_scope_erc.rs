@@ -254,6 +254,7 @@ fn arranging_keeps_each_nets_scope() {
         &mut doc,
         &selection,
         None,
+        None,
         Box::new(engine()), None).expect("arrange");
     assert!(report.committed, "rolled back — {:?}", report.mismatch);
     doc.write(&path).unwrap();

@@ -48,6 +48,7 @@ struct SelectionInput {
     bbox: Option<[f64; 4]>,
     block: Option<String>,
     intent: Option<sch_check::Intent>,
+    layout: Option<sch_model::tree::Tree>,
     engine: Option<PlacementEngineKind>,
 }
 
@@ -82,11 +83,11 @@ pub(crate) fn selection_schema(engine: bool) -> Value {
     if engine {
         properties["intent"] =
             sch_check::place_parts_input_schema()["properties"]["intent"].clone();
-        properties["engine"] = json!({
-            "type": "string",
-            "enum": ["anneal", "spine", "cluster"],
-            "description": "Optional placement engine override."
-        });
+        properties["layout"] =
+            sch_check::place_parts_input_schema()["properties"]["layout"]["additionalProperties"]
+                .clone();
+        properties["layout"]["description"] =
+            json!("How the selection is arranged: one row/col tree over its parts.");
     }
     json!({
         "type": "object",
@@ -883,6 +884,7 @@ pub(crate) fn arrange(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         &mut edit.doc,
         &selection,
         input.intent.clone(),
+        input.layout.clone(),
         engine,
         Some(budget),
     ) {

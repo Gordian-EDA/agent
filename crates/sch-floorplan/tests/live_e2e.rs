@@ -438,6 +438,7 @@ fn arrange_is_idempotent_on_connectivity() {
         &mut doc,
         &selection,
         None,
+        None,
         Box::new(engine()), None).unwrap();
     assert!(report.committed, "rolled back — {:?}", report.mismatch);
     // Over the PARTS: a re-wire is free to replace the rail terminals and flags it
@@ -479,6 +480,7 @@ fn arranging_one_end_of_a_net_keeps_the_other_end_on_it() {
         &env,
         &mut doc,
         &selection,
+        None,
         None,
         Box::new(engine()), None).unwrap();
 
