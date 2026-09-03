@@ -585,7 +585,15 @@ fn finish_arrangement(edit: Edit, report: ArrangeReport, ctx: &AgentRuntime) -> 
             "report": report,
         }));
     }
-    let value = edit.commit(json!(report), Allow::nothing())?;
+    // The re-layout owns the selection's own drawing: its rail symbols and flags
+    // are replaced, and a net it now draws as a wire loses the authored name its
+    // erased label carried. The partition is what may not move, and the live gate
+    // has already checked that.
+    let allow = Allow::nothing()
+        .parts(report.moved.clone())
+        .unname_nets(report.nets.clone())
+        .creating();
+    let value = edit.commit(json!(report), allow)?;
     if value.get("error").is_some() {
         return Ok(value);
     }

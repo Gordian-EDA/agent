@@ -385,3 +385,33 @@ fn a_minted_designator_never_takes_a_reserved_reference() {
         .collect();
     assert_eq!(refs, ["R5"], "{added:#}");
 }
+
+/// A symbol on the bench is on its nets but has no layout, so a board built from
+/// it would silently omit real circuitry. That is the one refusal an unfinished
+/// design earns, and it names the way out.
+#[test]
+fn the_board_tools_refuse_while_the_schematic_bench_is_not_empty() {
+    let Some(ctx) = AgentRuntime::detect_for_test() else {
+        eprintln!("SKIP: no KiCAD detected");
+        return;
+    };
+    tool(
+        &ctx,
+        "add_parts",
+        json!({"parts": [
+            {"ref": "R1", "part": "Device:R", "pins": {"1": "VIN", "2": "MID"}},
+            {"ref": "R2", "part": "Device:R", "pins": {"1": "MID", "2": "GND"}}
+        ]}),
+    );
+
+    for name in ["sync_board", "export_fab"] {
+        let refused = run_tool(name, json!({}), &ctx).unwrap();
+        assert_eq!(refused["code"], json!("bench_not_empty"), "{name}: {refused:#}");
+        assert_eq!(refused["bench"], json!(2), "{name}: {refused:#}");
+        assert_eq!(refused["bench_refs"], json!(["R1", "R2"]), "{name}: {refused:#}");
+    }
+
+    tool(&ctx, "arrange", json!({"refs": ["R1", "R2"]}));
+    let synced = run_tool("sync_board", json!({}), &ctx).unwrap();
+    assert_ne!(synced["code"], json!("bench_not_empty"), "{synced:#}");
+}

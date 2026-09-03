@@ -76,3 +76,71 @@ fn arranging_one_symbol_keeps_its_neighbours_on_their_nets() {
     assert!(report.committed, "rolled back — {:?}", report.mismatch);
     assert_eq!(before, partition(&doc), "arranging changed a net");
 }
+
+/// The netlist `kicad-cli` exports, as sets of pins — the only oracle that is not
+/// this crate's own opinion of what it drew.
+fn cli_partition(env: &KicadInstallation, path: &std::path::Path) -> BTreeSet<Vec<String>> {
+    env.netlist(path)
+        .expect("kicad-cli netlist")
+        .nets
+        .into_iter()
+        .filter(|net| !net.name.contains("unconnected-"))
+        .map(|net| {
+            let mut pins: Vec<String> = net
+                .nodes
+                .iter()
+                .filter(|(refdes, _)| !refdes.starts_with('#'))
+                .map(|(refdes, pin)| format!("{refdes}.{pin}"))
+                .collect();
+            pins.sort();
+            pins.dedup();
+            pins
+        })
+        .filter(|pins| pins.len() > 1)
+        .collect()
+}
+
+fn save(doc: &mut SchDoc, dir: &std::path::Path, name: &str) -> std::path::PathBuf {
+    let path = dir.join(format!("{name}.kicad_sch"));
+    std::fs::write(&path, doc.to_text()).unwrap();
+    path
+}
+
+/// Re-laying out EVERY symbol on a sheet is the hardest form of the promise: the
+/// whole drawing is thrown away and drawn again from the netlist alone. What comes
+/// back has to be the same circuit, judged by `kicad-cli` rather than by us.
+#[test]
+fn arranging_a_whole_reference_sheet_keeps_its_netlist() {
+    let Some(env) = KicadInstallation::detect() else {
+        eprintln!("SKIP: no KiCad environment detected");
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let mut doc = SchDoc::read(std::path::Path::new(
+        "tests/fixtures/validation/bluepill.kicad_sch",
+    ))
+    .unwrap();
+    let before = cli_partition(&env, &save(&mut doc, dir.path(), "before"));
+    assert!(before.len() > 20, "fixture is the reference sheet");
+
+    let refs: Vec<String> = doc
+        .symbols()
+        .map(|symbol| symbol.refdes().to_string())
+        .filter(|refdes| !refdes.starts_with('#'))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let report = live::arrange(
+        &env,
+        &mut doc,
+        &Selection::Refs(refs),
+        None,
+        Box::new(spine_place::SpinePlace),
+        None,
+    )
+    .unwrap();
+
+    assert!(report.committed, "rolled back — {:?}", report.mismatch);
+    let after = cli_partition(&env, &save(&mut doc, dir.path(), "after"));
+    assert_eq!(before, after, "re-laying out the sheet changed its netlist");
+}

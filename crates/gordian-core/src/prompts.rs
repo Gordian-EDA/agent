@@ -18,13 +18,13 @@ Discover symbols once with `search_symbols({queries})`; top hits include pins, a
 
 Build these phases in order: power entry; regulator; MCU core including every supply-pin decoupler, crystal, reset, and boot straps; interfaces; connectors and indicators. Use `place_parts({parts, name?, intent?, block?})` for only the current block, then use `connect`, `label`, `no_connect`, and `arrange({refs|block|region, intent})` for focused corrections. Include support, protection, decoupling, bias, termination, indicator resistors, and exposed-signal protection. State real symbol `Lib:Name`s, values, footprints and pin-to-net maps. Pin keys accept number, name or alternate case-insensitively (`PH0-OSC_IN` works); `"nc"` means no-connect. Rails and ports accept left, right, top or bottom. `intent.relations`: `left_of`/`right_of`/`above`/`below` ({kind,a,b}), `group` ({kind,name,members,side?,anchor?}), `align` ({kind,members,axis}).
 
-A refusal lists EVERY fault at once; fix them all before retrying. `place_parts` appends, so resubmit only the parts it named: rewriting working ones is how they acquire new errors.
+`place_parts` never refuses a whole payload. Parts nothing can resolve come back as `unplaced` ({ref, reason, did_you_mean}), not on the sheet, their nets left open; every other part is placed. When no engine can draw a block truthfully it is committed to the BENCH: `benched` symbols are wired by NAME with no layout, and `add_parts({parts})` puts a payload straight there. `arrange({refs|block})` lays them out and empties the bench; checks and renders report `bench: n`, and `sync_board`/`export_fab` refuse while it is non-empty. `place_parts` appends, so resubmit only the parts it named.
 
 `dangling` pins are reported, not fatal: the parts are placed and the net has one end. Close each with a `connect`, or declare real board I/O in `intent.ports`. Write `"@R1.2"` as a net to join whatever net that pin is on; KiCAD's own `Net-(...)` names fork the net if reused. Resolve `completeness.gaps` for a complete powered/interface design with one follow-up `place_parts` of only the missing parts; gaps are advisory for deliberately minimal designs and focused edits.
 
 Unknown or pad-incompatible footprints are cleared, reported in `footprints_unresolved`, and repaired in one `assign_footprints` call before PCB work.
 
-For an existing schematic: `read_schematic()` once, perform only the requested mutators, use their returned `connectivity`/`unconnected` report for every new or swapped part, then `diff_schematic()` instead of re-reading to verify the exact edit, then `check_schematic()`. `set_fields`, `set_flags`, `swap_symbol`, `add_symbols`, `remove_symbols`, `label`, `no_connect`, `add_power`, `delete_wires` edit; `arrange({refs|bbox})` re-places. Do not move unrelated parts.
+For an existing schematic: `read_schematic()` once, perform only the requested mutators, use their returned `connectivity`/`unconnected` report for every new or swapped part, then `diff_schematic()` instead of re-reading to verify the exact edit, then `check_schematic()`. `set_fields`, `set_flags`, `swap_symbol`, `add_symbols`, `remove_symbols`, `label`, `no_connect`, `add_power`, `delete_wires` edit; `arrange({refs|bbox|block, intent})` re-places and redraws the selection's wires from the netlist, leaving a matching label where it cannot draw one. Do not move unrelated parts.
 
 Create wires only with `connect` or `rewire`; never provide wire coordinates. To insert a series part, disconnect one real target pin, add the part, then connect both sides.
 
@@ -74,6 +74,23 @@ mod tests {
         assert!(prompt.contains("footprints_unresolved"));
         assert!(prompt.contains("Rails and ports accept left, right, top or bottom"));
         assert!(!prompt.contains("YAML"));
+    }
+
+    /// The bench and `unplaced` are the two partial states the model has to be able
+    /// to recognise and clear, so the prompt has to name both and their repair.
+    #[test]
+    fn prompt_teaches_the_partial_states() {
+        let prompt = system_prompt();
+        for phrase in [
+            "never refuses a whole payload",
+            "`unplaced`",
+            "BENCH",
+            "add_parts({parts})",
+            "empties the bench",
+            "bench: n",
+        ] {
+            assert!(prompt.contains(phrase), "prompt missing `{phrase}`");
+        }
     }
 
     #[test]

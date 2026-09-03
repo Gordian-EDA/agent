@@ -296,6 +296,12 @@ pub struct ArrangeReport {
     /// Symbols this call took off the bench, now laid out.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub left_bench: Vec<String>,
+    /// Nets the redrawn wiring touches — the scope of what this call may rename.
+    /// A net the selection drew as a label and now draws as a wire loses its
+    /// authored name to KiCAD's derived one; the partition is unchanged, which is
+    /// what the gate above actually checks.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub nets: Vec<String>,
     /// Wires, junctions, labels and markers removed and redrawn.
     pub redrawn: usize,
     pub warnings: Vec<String>,
@@ -758,6 +764,13 @@ fn rearrange_inner(
             }
             design.nets.entry(net.drawn().to_string()).or_default().port = true;
         }
+        // A net the sheet NAMED with a label keeps its name: the redraw erases that
+        // label, and drawing the net as a bare wire instead would hand it back to
+        // KiCAD's `Net-(…)` derivation — a rename the board's rules and pours would
+        // then miss. Power nets are excluded; they draw their own rail symbols.
+        for net in named_nets(&before, &chosen) {
+            design.nets.entry(net).or_default().port = true;
+        }
         sch_check::nets::derive_attrs(&mut design);
         (before, design, boundary)
     });
@@ -849,8 +862,9 @@ fn rearrange_inner(
             // The held half of a nameless boundary net needs the minted name too:
             // one label each side is what makes the two halves one net again.
             for net in &boundary {
-                if let Some(minted) = &net.mint {
-                    doc.add_label(sch_doc::LabelKind::Local, minted, Pose::new(net.held.x, net.held.y, 0.0));
+                let Some(minted) = &net.mint else { continue };
+                for held in &net.held {
+                    doc.add_label(sch_doc::LabelKind::Local, minted, Pose::new(held.x, held.y, 0.0));
                 }
             }
             let inc = incidence(&placed);
@@ -886,6 +900,15 @@ fn rearrange_inner(
     }
     Ok(ArrangeReport {
         left_bench,
+        nets: before
+            .nets
+            .iter()
+            .filter(|net| net.pins.iter().any(|pin| chosen.contains(&pin.refdes)))
+            .map(|net| net.name.clone())
+            .chain(inc.keys().cloned())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect(),
         moved: placed
             .iter()
             .map(|it| it.refdes.clone())
@@ -1254,8 +1277,10 @@ struct BoundaryNet {
     /// A stable name to give it, when the one it has is KiCAD's own derivation
     /// from its pins — writing THAT down forks the net the moment a pin moves.
     mint: Option<String>,
-    /// Where to name the held half: a pin of this net outside the selection.
-    held: Point2,
+    /// Every pin of this net outside the selection. All of them are named, not
+    /// just one: erasing the selection's drawing can cut the held side into
+    /// pieces too, and a name on each pin is what puts it back together.
+    held: Vec<Point2>,
 }
 
 impl BoundaryNet {
@@ -1275,12 +1300,13 @@ fn boundary_nets(doc: &SchDoc, before: &Netlist, chosen: &BTreeSet<String>) -> V
         .nets
         .iter()
         .filter_map(|net| {
-            let held = net
+            let held: Vec<Point2> = net
                 .pins
                 .iter()
-                .find(|pin| !chosen.contains(&pin.refdes))
-                .and_then(|pin| at.get(&(pin.refdes.clone(), pin.pin.clone())).copied())?;
-            if !net.pins.iter().any(|pin| chosen.contains(&pin.refdes)) {
+                .filter(|pin| !chosen.contains(&pin.refdes))
+                .filter_map(|pin| at.get(&(pin.refdes.clone(), pin.pin.clone())).copied())
+                .collect();
+            if held.is_empty() || !net.pins.iter().any(|pin| chosen.contains(&pin.refdes)) {
                 return None;
             }
             Some(BoundaryNet {
@@ -1290,6 +1316,18 @@ fn boundary_nets(doc: &SchDoc, before: &Netlist, chosen: &BTreeSet<String>) -> V
                 held,
             })
         })
+        .collect()
+}
+
+/// Nets touching `chosen` that the sheet names with a label of its own.
+fn named_nets(before: &Netlist, chosen: &BTreeSet<String>) -> Vec<String> {
+    use sch_doc::NetSource::{Global, Hier, Local};
+    before
+        .nets
+        .iter()
+        .filter(|net| matches!(net.source, Local | Global | Hier))
+        .filter(|net| net.pins.iter().any(|pin| chosen.contains(&pin.refdes)))
+        .map(|net| net.name.clone())
         .collect()
 }
 
