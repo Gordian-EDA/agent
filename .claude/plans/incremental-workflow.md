@@ -172,3 +172,8 @@ re-place." Quality first; time later via parallel subagents; schematic too.
   (130.81,109.22)→(152.4,106.68) — it re-seats pins without the drag primitive's orthogonal redraw.
   QUEUED after lane/swap-flex merges: swap_symbol (and any pin re-seat) goes through `sch_drag`, plus a
   document invariant that every wire segment is axis-aligned (debug assert + test).
+- Pushed: judge-clean-render (judges see clean KiCAD exports; sch human-look honest 4/10 on
+  edit-add-testpoints), swap-flex (swap_symbol/add_symbols: footprints repairable metadata;
+  connector case 6→7, replace-ic 10). Running: lane/orthogonal-wires (every pin re-seat via the drag
+  primitive + axis-aligned wire invariant), campaign rerun camp5 (`--max-turns 3`, quality-first
+  rubric) = accounting round 3; slow floorplan gates on pushed main.
