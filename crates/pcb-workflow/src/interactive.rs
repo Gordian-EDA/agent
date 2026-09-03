@@ -31,7 +31,7 @@ struct CopperDeleteRequest {
     near_point: bool,
     radius: f64,
     kinds: BTreeSet<CopperKind>,
-    net: Option<String>,
+    nets: Option<BTreeSet<String>>,
     layer: Option<u32>,
     all: bool,
 }
@@ -561,6 +561,95 @@ fn nudge_overlaps(board: &mut MoveBoard, plan: &mut MovePlan, clearance: f64) {
     }
 }
 
+/// Placer output after every pose was rechecked against exact footprint envelopes.
+pub(super) struct NudgedPlacements {
+    /// The poses to write, collision-free against the saved footprints.
+    pub placements: Vec<FootprintPlacement>,
+    /// The parts a collision moved, with where they came from.
+    pub nudges: Vec<Value>,
+    /// The parts no legal pose fit, with the reason.
+    pub unplaced: Vec<Value>,
+}
+
+/// Recheck placer output against exact saved-footprint envelopes and nudge collisions.
+pub(super) fn nudge_placement_overlaps(
+    snapshot: &BoardSnapshot,
+    ctx: &AgentRuntime,
+    placements: Vec<FootprintPlacement>,
+    bounds: Rect,
+    outline: Option<&Polygon>,
+) -> std::result::Result<NudgedPlacements, String> {
+    let mut board = MoveBoard::from_snapshot(
+        snapshot,
+        &crate::place::courtyard_extents(snapshot, ctx),
+        &back_side_references(snapshot),
+    );
+    let moving = placements
+        .iter()
+        .map(|placement| placement.reference.as_str())
+        .collect::<BTreeSet<_>>();
+    board.bounds = bounds;
+    board.outline = outline.cloned();
+    let originals = board.parts.clone();
+    board
+        .parts
+        .retain(|reference, _| !moving.contains(reference.as_str()));
+
+    let mut accepted = Vec::new();
+    let mut nudged = Vec::new();
+    let mut unplaced = Vec::new();
+    for placement in placements {
+        let reference = placement.reference.clone();
+        let Some(mut part) = originals.get(&placement.reference).cloned() else {
+            unplaced.push(json!({
+                "ref": placement.reference,
+                "reason": "footprint extent was unavailable for exact placement validation",
+            }));
+            continue;
+        };
+        let requested = placement.at;
+        let rotation = placement.rotation_deg.unwrap_or(part.rotation);
+        part.at = requested;
+        part.rotation = rotation;
+        board.parts.insert(placement.reference.clone(), part);
+        let mut plan = MovePlan {
+            placements: vec![placement],
+            positions: vec![ResolvedPosition {
+                reference,
+                at: requested,
+                rotation,
+                read_as: "placement intent".to_owned(),
+                nudged_from: None,
+            }],
+            changed: 1,
+        };
+        nudge_overlaps(&mut board, &mut plan, snapshot.problem.clearance);
+        if illegal_move_error(&board, &plan, snapshot.problem.clearance).is_some() {
+            board.parts.remove(&plan.positions[0].reference);
+            unplaced.push(json!({
+                "ref": plan.positions[0].reference,
+                "requested_at": [requested.x, requested.y],
+                "reason": "no non-overlapping pad/courtyard position fit inside the outline",
+            }));
+            continue;
+        }
+        if let Some(from) = plan.positions[0].nudged_from {
+            nudged.push(json!({
+                "ref": plan.positions[0].reference,
+                "from": [from.x, from.y],
+                "to": [plan.positions[0].at.x, plan.positions[0].at.y],
+                "distance_mm": from.dist(plan.positions[0].at),
+            }));
+        }
+        accepted.push(plan.placements.remove(0));
+    }
+    Ok(NudgedPlacements {
+        placements: accepted,
+        nudges: nudged,
+        unplaced,
+    })
+}
+
 const MOVE_SEARCH_GRID_MM: f64 = 0.25;
 
 fn nearest_legal_in_ring(
@@ -965,25 +1054,32 @@ fn delete_copper_file(
     if request.kinds.contains(&CopperKind::Track) {
         for (index, trace) in snapshot.copper.traces.iter().enumerate() {
             if request
-                .net
-                .as_deref()
-                .is_some_and(|net| net != trace.connection)
+                .nets
+                .as_ref()
+                .is_some_and(|nets| !nets.contains(&trace.connection))
                 || request
                     .layer
                     .is_some_and(|layer| trace.layer.index(layer_count) != Some(layer))
             {
                 continue;
             }
-            for pair in trace.path.windows(2) {
-                if selection
-                    .bbox
-                    .is_some_and(|bbox| !trace_segment_hits_bbox(trace, pair, &bbox))
-                {
-                    continue;
-                }
-                let distance = (geom::Segment::new(pair[0], pair[1]).dist_to_point(request.at)
-                    - trace.width / 2.0)
-                    .max(0.0);
+            let hit = trace
+                .path
+                .windows(2)
+                .filter_map(|pair| {
+                    if selection
+                        .bbox
+                        .is_some_and(|bbox| !trace_segment_hits_bbox(trace, pair, &bbox))
+                    {
+                        return None;
+                    }
+                    let distance = (geom::Segment::new(pair[0], pair[1]).dist_to_point(request.at)
+                        - trace.width / 2.0)
+                        .max(0.0);
+                    Some((distance, pair))
+                })
+                .min_by(|a, b| a.0.total_cmp(&b.0));
+            if let Some((distance, pair)) = hit {
                 matches.push((
                     Selected::Trace(index),
                     CopperHit {
@@ -1006,9 +1102,9 @@ fn delete_copper_file(
     if request.kinds.contains(&CopperKind::Via) {
         for (index, via) in snapshot.copper.vias.iter().enumerate() {
             if request
-                .net
-                .as_deref()
-                .is_some_and(|net| net != via.connection)
+                .nets
+                .as_ref()
+                .is_some_and(|nets| !nets.contains(&via.connection))
             {
                 continue;
             }
@@ -1646,6 +1742,11 @@ fn parse_delete_copper_request(
     layer_count: u32,
 ) -> std::result::Result<DeleteCopperSelection, String> {
     let ctx = "delete_copper";
+    if input.get("net").is_some() {
+        return Err(
+            "delete_copper uses `nets` as an array; singular `net` is not accepted".to_owned(),
+        );
+    }
     let at = input
         .get("at")
         .map(|_| parse_point(input, "at", ctx))
@@ -1659,13 +1760,19 @@ fn parse_delete_copper_request(
         return Err("delete_copper `radius` must be non-negative".to_owned());
     }
     let kinds = parse_copper_kinds(input)?;
-    let net = input
-        .get("net")
-        .and_then(Value::as_str)
-        .filter(|s| !s.is_empty())
-        .map(str::to_owned);
-    if at.is_none() && net.is_none() {
-        return Err("delete_copper needs `at`, or a `net` with optional `bbox`".to_owned());
+    let nets = parse_delete_nets(input)?;
+    let all = match input.get("all") {
+        None => false,
+        Some(Value::Bool(all)) => *all,
+        Some(_) => return Err("delete_copper `all` must be a boolean".to_owned()),
+    };
+    if all && (at.is_some() || bbox.is_some() || nets.is_some()) {
+        return Err(
+            "delete_copper `all:true` cannot be combined with `at`, `bbox`, or `nets`".to_owned(),
+        );
+    }
+    if at.is_none() && bbox.is_none() && nets.is_none() && !all {
+        return Err("delete_copper needs `at`, `all:true`, `nets`, or `bbox`".to_owned());
     }
     let layer = input
         .get("layer")
@@ -1678,7 +1785,6 @@ fn parse_delete_copper_request(
             })
         })
         .transpose()?;
-    let all = at.is_none() || input.get("all").and_then(Value::as_bool).unwrap_or(false);
     Ok(DeleteCopperSelection {
         request: CopperDeleteRequest {
             at: at
@@ -1687,12 +1793,35 @@ fn parse_delete_copper_request(
             near_point: at.is_some(),
             radius,
             kinds,
-            net,
+            nets,
             layer,
-            all,
+            all: all || at.is_none(),
         },
         bbox,
     })
+}
+
+fn parse_delete_nets(input: &Value) -> std::result::Result<Option<BTreeSet<String>>, String> {
+    let Some(value) = input.get("nets") else {
+        return Ok(None);
+    };
+    let values = value
+        .as_array()
+        .ok_or_else(|| "delete_copper `nets` must be a non-empty array".to_owned())?;
+    if values.is_empty() {
+        return Err("delete_copper `nets` must not be empty".to_owned());
+    }
+    values
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .filter(|net| !net.is_empty())
+                .map(str::to_owned)
+                .ok_or_else(|| "delete_copper `nets` entries must be non-empty strings".to_owned())
+        })
+        .collect::<std::result::Result<BTreeSet<_>, _>>()
+        .map(Some)
 }
 
 fn parse_copper_kinds(input: &Value) -> std::result::Result<BTreeSet<CopperKind>, String> {
@@ -1732,11 +1861,20 @@ fn delete_copper_output(
 ) -> Value {
     let request = &selection.request;
     let matches: Vec<Value> = hits.iter().map(copper_hit_json).collect();
+    let tracks = hits
+        .iter()
+        .filter(|hit| hit.kind == CopperKind::Track)
+        .count();
+    let vias = hits
+        .iter()
+        .filter(|hit| hit.kind == CopperKind::Via)
+        .count();
     json!({
         "ok": true,
         "deleted": hits.len(),
+        "deleted_by_kind": { "track": tracks, "via": vias },
         "all": request.all,
-        "net": request.net,
+        "nets": request.nets,
         "bbox": selection.bbox,
         "matches": matches,
         "now_open": now_open,
@@ -2633,16 +2771,26 @@ mod tests {
     }
 
     #[test]
-    fn delete_copper_accepts_net_wide_and_bounded_selection() {
-        let whole = parse_delete_copper_request(&json!({ "net": "GND" }), 2).unwrap();
-        assert_eq!(whole.request.net.as_deref(), Some("GND"));
+    fn delete_copper_accepts_global_net_and_bounded_selections() {
+        let global =
+            parse_delete_copper_request(&json!({ "all": true, "kinds": ["track", "via"] }), 2)
+                .unwrap();
+        assert!(global.request.nets.is_none());
+        assert!(global.request.all);
+        assert!(!global.request.near_point);
+        assert!(global.bbox.is_none());
+
+        let whole = parse_delete_copper_request(&json!({ "nets": ["GND", "VCC"] }), 2).unwrap();
+        assert_eq!(
+            whole.request.nets,
+            Some(BTreeSet::from(["GND".to_owned(), "VCC".to_owned()]))
+        );
         assert!(whole.request.all);
         assert!(!whole.request.near_point);
         assert!(whole.bbox.is_none());
 
         let bounded = parse_delete_copper_request(
             &json!({
-                "net": "GND",
                 "bbox": { "min_x": 4.0, "min_y": 4.0, "max_x": 6.0, "max_y": 6.0 }
             }),
             2,
@@ -2650,6 +2798,7 @@ mod tests {
         .unwrap();
         assert_eq!(bounded.bbox, Some(Rect::new(4.0, 4.0, 6.0, 6.0)));
         assert!(parse_delete_copper_request(&json!({}), 2).is_err());
+        assert!(parse_delete_copper_request(&json!({ "net": "GND" }), 2).is_err());
         assert!(
             parse_delete_copper_request(
                 &json!({

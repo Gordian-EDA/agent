@@ -311,19 +311,21 @@ fn route_live_board(
     nets: Option<BTreeSet<String>>,
     bbox: Option<geom::Rect>,
 ) -> std::result::Result<Value, Value> {
+    let before = crate::active_board(ctx).map_err(refusal)?;
+    let net_table_import = crate::sync::refresh_route_net_table(ctx, &before).map_err(refusal)?;
     let board = crate::active_board(ctx).map_err(refusal)?;
-    let schematic_changes = crate::sync::schematic_net_changes(ctx, &board).map_err(refusal)?;
-    if !schematic_changes.is_empty() {
-        return Err(json!({
-            "error": format!(
-                "run sync_board first (schematic changed: nets {})",
-                schematic_changes.join(", ")
-            ),
-            "code": "board_net_table_stale",
-            "schematic_changed": { "nets": schematic_changes },
-            "next_tool": "sync_board",
-        }));
-    }
+    let nets = nets
+        .map(|requested| {
+            requested
+                .into_iter()
+                .map(|net| {
+                    crate::sync::resolve_board_net(ctx, &board, &net)
+                        .map(|resolved| resolved.unwrap_or(net))
+                })
+                .collect::<std::result::Result<BTreeSet<_>, _>>()
+        })
+        .transpose()
+        .map_err(refusal)?;
     // A partially placed board routes what it can. The nets that reach a part
     // still in the staging row are the exception: copper drawn into the seed
     // row would have to be ripped again the moment the part is placed, so those
@@ -361,6 +363,7 @@ fn route_live_board(
                     "total_connection_count": 0,
                     "ratsnest": [],
                     "blocked": [],
+                    "net_table_import": net_table_import,
                     "bbox": {
                         "min_x": bbox.min_x, "min_y": bbox.min_y,
                         "max_x": bbox.max_x, "max_y": bbox.max_y,
@@ -399,9 +402,14 @@ fn route_live_board(
                 .map(|c| c.name.as_str())
                 .collect();
             if let Some(unknown) = nets.iter().find(|n| !known.contains(n.as_str())) {
-                return Err(refusal(format!(
-                    "no net named {unknown} on this board; run sync_board first if the schematic changed, otherwise get_board lists the board's nets"
-                )));
+                return Err(json!({
+                    "error": format!(
+                        "no routable board connection is named {unknown}; get_board lists the board's routable nets"
+                    ),
+                    "code": "unknown_board_net",
+                    "net": unknown,
+                    "net_table_import": net_table_import,
+                }));
             }
             let mut view = board.problem.clone();
             // Foreign copper stays an obstacle so the re-route goes around it;
@@ -432,7 +440,7 @@ fn route_live_board(
         }
     };
     // A net with a terminal on a staged part leaves the router's problem: its
-    // pads are in the seed row, not where they will be, so any copper drawn to
+    // pads are in the staging row, not where they will be, so any copper drawn to
     // them is copper the next place_board would rip out again.
     let staged_nets = nets_reaching_staged(&board, &staged);
     let mut solve_view = solve_view;
@@ -593,6 +601,7 @@ fn route_live_board(
             Some(nets) => json!(nets.iter().collect::<Vec<_>>()),
             None => json!("whole board"),
         },
+        "net_table_import": net_table_import,
         "bbox": bbox.map(|b| json!({
             "min_x": b.min_x, "min_y": b.min_y, "max_x": b.max_x, "max_y": b.max_y,
         })),

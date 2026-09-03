@@ -164,6 +164,12 @@ pub fn routed_board_text(
         })
         .collect::<Vec<_>>();
     let placed = kicad_board::patch_placements(&seed, &moves)?;
+    let placed = kicad_board::patch_annotations(
+        &placed,
+        &super::staging::clear_annotations(
+            moves.iter().map(|placement| placement.reference.clone()),
+        ),
+    )?;
     let layer_names = copper_layer_names(board.rules.layer_count);
     kicad_board::append_copper(&placed, solution, board.rules.layer_count, &layer_names)
 }

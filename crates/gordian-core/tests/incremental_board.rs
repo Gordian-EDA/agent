@@ -354,8 +354,18 @@ fn the_board_is_built_incrementally_through_legal_partial_states() {
         .and_then(|track| track["net"].as_str())
         .expect("a routed track to delete")
         .to_owned();
-    let deleted = tool(&ctx, "delete_copper", json!({ "net": routed_net.clone() }));
+    let deleted = tool(
+        &ctx,
+        "delete_copper",
+        json!({ "all": true, "kinds": ["track", "via"] }),
+    );
     assert!(deleted["deleted"].as_u64().is_some_and(|count| count > 0));
+    assert!(
+        deleted["deleted_by_kind"]["track"]
+            .as_u64()
+            .is_some_and(|count| count > 0),
+        "track deletion is counted by kind: {deleted:#}"
+    );
     assert!(
         deleted["now_open"]
             .as_array()
@@ -428,10 +438,59 @@ fn the_sixty_part_led_array_routes_in_monotone_batches() {
     );
 }
 
-/// A live schematic edit makes the board net table stale until sync imports the
-/// new nets; ERC findings and placement intent remain reportable parallel work.
+/// Routing imports a live schematic net rename and proceeds without a sync loop.
 #[test]
-fn stale_nets_request_sync_and_existing_board_intent_runs_both_halves() {
+fn route_imports_stale_net_names_without_changing_geometry() {
+    let Some(ctx) = AgentRuntime::detect_for_test() else {
+        eprintln!("SKIP: no KiCAD detected");
+        return;
+    };
+    tool(
+        &ctx,
+        "place_parts",
+        json!({ "parts": [
+            {"ref":"R1", "part":"Device:R", "footprint":R0805,
+             "pins":{"1":"VIN", "2":"MID"}},
+            {"ref":"R2", "part":"Device:R", "footprint":R0805,
+             "pins":{"1":"MID", "2":"GND"}}
+        ]}),
+    );
+    tool(&ctx, "label", json!({ "pin": "R1.2", "net": "MID" }));
+    tool(
+        &ctx,
+        "sync_board",
+        json!({ "intent": { "keep_near": [["R1", "R2"]] } }),
+    );
+    let before = tool(&ctx, "get_board", json!({}));
+    let schematic = std::fs::read_to_string(ctx.sch_path()).unwrap();
+    assert!(schematic.contains("MID"));
+    std::fs::write(ctx.sch_path(), schematic.replace("MID", "ROUTE_MID")).unwrap();
+
+    let routed = run_tool("route_board", json!({ "nets": ["ROUTE_MID"] }), &ctx).unwrap();
+    assert!(routed.get("error").is_none(), "{routed:#}");
+    assert_eq!(routed["net_table_import"]["changed"], json!(true));
+    assert_eq!(routed["net_table_import"]["geometry_changed"], json!(false));
+    assert!(
+        routed["net_table_import"]["pads_retargeted"]
+            .as_array()
+            .is_some_and(|pads| pads.len() == 2),
+        "{routed:#}"
+    );
+    assert_eq!(routed["scope"], json!(["/ROUTE_MID"]), "{routed:#}");
+
+    let fresh = tool(&ctx, "get_board", json!({}));
+    assert_ne!(fresh["sync_required"], json!(true), "{fresh:#}");
+    assert_eq!(fresh["board"]["parts"], before["board"]["parts"]);
+    assert!(
+        std::fs::read_to_string(ctx.pcb_path())
+            .unwrap()
+            .contains("ROUTE_MID")
+    );
+}
+
+/// ERC findings and existing-board placement intent remain parallel sync work.
+#[test]
+fn existing_board_intent_runs_both_sync_halves() {
     let Some(ctx) = AgentRuntime::detect_for_test() else {
         eprintln!("SKIP: no KiCAD detected");
         return;
@@ -454,27 +513,6 @@ fn stale_nets_request_sync_and_existing_board_intent_runs_both_halves() {
     )
     .expect("add an intentionally incomplete symbol");
     tool(&ctx, "label", json!({ "pin": "R99.1", "net": "UNSYNCED" }));
-
-    let stale_get = run_tool("get_board", json!({ "net": "UNSYNCED" }), &ctx).unwrap();
-    let imported_net = "UNSYNCED".to_owned();
-    for stale in [
-        stale_get,
-        run_tool("route_board", json!({ "nets": ["UNSYNCED"] }), &ctx).unwrap(),
-    ] {
-        assert_eq!(stale["code"], "board_net_table_stale", "{stale:#}");
-        assert!(
-            stale["error"]
-                .as_str()
-                .is_some_and(|error| error.contains("run sync_board first")),
-            "{stale:#}"
-        );
-        assert!(
-            !stale["schematic_changed"]["nets"]
-                .as_array()
-                .unwrap()
-                .is_empty()
-        );
-    }
 
     let synced = run_tool(
         "sync_board",
@@ -508,7 +546,7 @@ fn stale_nets_request_sync_and_existing_board_intent_runs_both_halves() {
     assert!(
         std::fs::read_to_string(ctx.pcb_path())
             .unwrap()
-            .contains(&imported_net),
+            .contains("UNSYNCED"),
         "sync must import the new net into the KiCad board table"
     );
 }

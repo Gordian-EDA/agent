@@ -55,7 +55,7 @@ fn seed(ctx: &AgentRuntime) {
     assert_eq!(
         placed["still_staged"],
         Value::Null,
-        "a whole-board placement leaves nothing in the seed row"
+        "a whole-board placement leaves nothing in the staging row"
     );
     tool(ctx, "route_board", json!({}));
 }
