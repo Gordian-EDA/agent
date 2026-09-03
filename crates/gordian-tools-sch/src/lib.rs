@@ -426,7 +426,9 @@ pub fn tool_defs() -> Vec<Tool> {
 
 /// Dispatch one of this crate's tools. `None` when the name is not ours.
 pub fn run(name: &str, input: Value, ctx: &AgentRuntime) -> Option<Result<Value>> {
-    if !ctx.sch_path().is_file() && name != "place_parts" {
+    // `place_parts` and `add_parts` are the two ways a schematic comes into
+    // existence; everything else needs one to already be there.
+    if !ctx.sch_path().is_file() && !matches!(name, "place_parts" | "add_parts") {
         return handles(name).then(|| {
             Ok(json!({
                 "error": format!(
