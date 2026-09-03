@@ -8,8 +8,12 @@
 //! measures what is drawn, shifts it rigidly to the margin, and picks the
 //! smallest standard page that holds it.
 //!
-//! Rigid translation cannot change connectivity (every coincidence is
-//! preserved), so this runs unconditionally after every write path.
+//! What may move is the caller's to say. A graft promises the sheet's own parts stay
+//! where they are, so the fit is told which items are frozen and slides only the rest —
+//! and a slide that is not whole-sheet is not rigid, so it is offered only when the new
+//! drawing does not touch the frozen one.
+
+use std::collections::BTreeSet;
 
 use geom::{GRID_50_MIL, Point2, Rect};
 
@@ -58,7 +62,9 @@ pub fn standard_page(size: [f64; 2]) -> Option<(&'static str, [f64; 2])> {
 /// What [`SchDoc::refit_page`] did.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PageFit {
-    /// The grid-snapped shift applied to every drawn item.
+    /// The grid-snapped shift applied to the items that were free to move. `[0, 0]`
+    /// means the drawing already started inside the frame, or that the only shift that
+    /// would have rescued it would have torn it away from the frozen content.
     pub shift: [f64; 2],
     /// The page the sheet now declares, in mm.
     pub page: [f64; 2],
@@ -106,54 +112,115 @@ fn shift_raw_points(node: &mut kiutils_sexpr::Node, dx: f64, dy: f64) {
     }
 }
 
-impl SchDoc {
-    /// The bounding box of everything drawn on the sheet, in mm.
-    ///
-    /// Symbol bodies come from the embedded definition's graphics
-    /// ([`crate::body::body_rect`]), so this is the shape KiCAD renders, not a
-    /// pin-span approximation; visible field text, label text and annotation text
-    /// are boxed by their estimated width in both directions, which covers every
-    /// justification without decoding one. `None` for an empty sheet.
-    pub fn content_bbox(&self) -> Option<Rect> {
-        let mut points: Vec<Point2> = Vec::new();
-        let text_at = |pose: Pose, s: &str, size: f64, points: &mut Vec<Point2>| {
-            let w = text_width(s, size);
-            points.push(Point2::new(pose.x - w, pose.y - size));
-            points.push(Point2::new(pose.x + w, pose.y + size));
-        };
-        for item in self.items() {
-            match item {
-                Item::Symbol(inst) => {
-                    if let Some(r) = body_rect(self, inst) {
-                        points.push(Point2::new(r.min_x, r.min_y));
-                        points.push(Point2::new(r.max_x, r.max_y));
-                    } else {
-                        points.push(inst.at.point());
-                    }
-                    for field in inst.fields.values() {
-                        if field.hidden || field.value.is_empty() {
-                            continue;
-                        }
-                        if let Some(at) = field.at {
-                            text_at(at, &field.value, field.font_size[0].max(1.27), &mut points);
-                        }
-                    }
-                }
-                Item::Wire(w) => points.extend(w.points.iter().copied()),
-                Item::Junction(j) => points.push(j.at),
-                Item::NoConnect(n) => points.push(n.at),
-                Item::Label(l) => text_at(l.at, &l.text, 1.27, &mut points),
-                Item::Text(t) => text_at(t.at, &t.text, 1.27, &mut points),
-                Item::Rectangle(r) => points.extend([r.start, r.end]),
-                Item::Sheet(s) => {
-                    points.push(s.at);
-                    points.push(Point2::new(s.at.x + s.size.x, s.at.y + s.size.y));
-                }
-                // Buses, images, rule areas — whatever the typed model does not decode
-                // still occupies the sheet and still carries connectivity.
-                Item::Other(raw) => raw_points(&raw.node, &mut points),
-                Item::LibSymbols(_) => {}
+/// The corner points of one item as drawn, appended to `out`.
+///
+/// Symbol bodies come from the embedded definition's graphics ([`crate::body::body_rect`]),
+/// so this is the shape KiCAD renders, not a pin-span approximation; visible field text,
+/// label text and annotation text are boxed by their estimated width in both directions,
+/// which covers every justification without decoding one.
+fn item_points(doc: &SchDoc, item: &Item, points: &mut Vec<Point2>) {
+    let text_at = |pose: Pose, s: &str, size: f64, points: &mut Vec<Point2>| {
+        let w = text_width(s, size);
+        points.push(Point2::new(pose.x - w, pose.y - size));
+        points.push(Point2::new(pose.x + w, pose.y + size));
+    };
+    match item {
+        Item::Symbol(inst) => {
+            if let Some(r) = body_rect(doc, inst) {
+                points.push(Point2::new(r.min_x, r.min_y));
+                points.push(Point2::new(r.max_x, r.max_y));
+            } else {
+                points.push(inst.at.point());
             }
+            for field in inst.fields.values() {
+                if field.hidden || field.value.is_empty() {
+                    continue;
+                }
+                if let Some(at) = field.at {
+                    text_at(at, &field.value, field.font_size[0].max(1.27), points);
+                }
+            }
+        }
+        Item::Wire(w) => points.extend(w.points.iter().copied()),
+        Item::Junction(j) => points.push(j.at),
+        Item::NoConnect(n) => points.push(n.at),
+        Item::Label(l) => text_at(l.at, &l.text, 1.27, points),
+        Item::Text(t) => text_at(t.at, &t.text, 1.27, points),
+        Item::Rectangle(r) => points.extend([r.start, r.end]),
+        Item::Sheet(s) => {
+            points.push(s.at);
+            points.push(Point2::new(s.at.x + s.size.x, s.at.y + s.size.y));
+        }
+        // Buses, images, rule areas — whatever the typed model does not decode
+        // still occupies the sheet and still carries connectivity.
+        Item::Other(raw) => raw_points(&raw.node, points),
+        Item::LibSymbols(_) => {}
+    }
+}
+
+/// Where a set of items connects: the points that join nets, and the wire segments other
+/// points can attach along.
+#[derive(Default)]
+struct Wiring {
+    points: Vec<Point2>,
+    segments: Vec<[Point2; 2]>,
+}
+
+impl Wiring {
+    fn is_empty(&self) -> bool {
+        self.points.is_empty() && self.segments.is_empty()
+    }
+
+    fn shifted(&self, [dx, dy]: [f64; 2]) -> Wiring {
+        let move_point = |p: &Point2| Point2::new(p.x + dx, p.y + dy);
+        Wiring {
+            points: self.points.iter().map(move_point).collect(),
+            segments: self
+                .segments
+                .iter()
+                .map(|[a, b]| [move_point(a), move_point(b)])
+                .collect(),
+        }
+    }
+
+    /// Whether any connection point of one drawing lies on a point or a wire of the other.
+    fn touches(&self, other: &Wiring) -> bool {
+        let on_wire = |p: &Point2, w: &Wiring| w.segments.iter().any(|[a, b]| on_segment(*p, *a, *b));
+        self.points.iter().any(|p| {
+            other.points.iter().any(|q| p.near_eq(*q, TOUCH_EPS)) || on_wire(p, other)
+        }) || other.points.iter().any(|p| on_wire(p, self))
+    }
+}
+
+/// How close two connection points must be to count as one, in mm — the 1 µm the
+/// connectivity extractor quantises to.
+const TOUCH_EPS: f64 = 0.001;
+
+/// Whether `p` lies on the segment `a`-`b`, endpoints included.
+fn on_segment(p: Point2, a: Point2, b: Point2) -> bool {
+    let (ab, ap) = ((b.x - a.x, b.y - a.y), (p.x - a.x, p.y - a.y));
+    let len = (ab.0 * ab.0 + ab.1 * ab.1).sqrt();
+    if len < TOUCH_EPS {
+        return p.near_eq(a, TOUCH_EPS);
+    }
+    let along = (ap.0 * ab.0 + ap.1 * ab.1) / len;
+    let across = (ap.0 * ab.1 - ap.1 * ab.0) / len;
+    across.abs() <= TOUCH_EPS && along >= -TOUCH_EPS && along <= len + TOUCH_EPS
+}
+
+impl SchDoc {
+    /// The bounding box of everything drawn on the sheet, in mm. `None` for an
+    /// empty sheet.
+    pub fn content_bbox(&self) -> Option<Rect> {
+        self.bbox_where(|_| true)
+    }
+
+    /// The bounding box of the items `keep` accepts, in mm. `None` when it accepts
+    /// nothing drawn.
+    fn bbox_where(&self, mut keep: impl FnMut(&Item) -> bool) -> Option<Rect> {
+        let mut points: Vec<Point2> = Vec::new();
+        for item in self.items().iter().filter(|item| keep(item)) {
+            item_points(self, item, &mut points);
         }
         Rect::bounding(&points)
     }
@@ -164,6 +231,15 @@ impl SchDoc {
     /// invariant under it. Symbol field positions are absolute in KiCAD and move
     /// with their symbol.
     pub fn translate(&mut self, dx: f64, dy: f64) {
+        self.translate_where(dx, dy, |_| true);
+    }
+
+    /// Shift the items `keep` accepts by `(dx, dy)` mm, leaving the rest where they are.
+    ///
+    /// Rigid only within the moved set: a point of a moved item that coincided with a
+    /// point of a kept one stops coinciding, so a partial shift CAN change the netlist
+    /// and the caller has to establish that it does not.
+    fn translate_where(&mut self, dx: f64, dy: f64, mut keep: impl FnMut(&Item) -> bool) {
         if dx == 0.0 && dy == 0.0 {
             return;
         }
@@ -175,7 +251,7 @@ impl SchDoc {
             p.x += dx;
             p.y += dy;
         };
-        for item in self.items_mut() {
+        for item in self.items_mut().iter_mut().filter(|item| keep(item)) {
             match item {
                 Item::Symbol(inst) => {
                     shift_pose(&mut inst.at);
@@ -236,7 +312,7 @@ impl SchDoc {
         self.mark_edited();
     }
 
-    /// Bring the whole drawing inside the frame and size the page to it.
+    /// Bring the drawing inside the frame and size the page to it.
     ///
     /// Content that starts before [`PAGE_MARGIN`] — which is content the drawing frame
     /// clips away, invisibly — is pushed back to it, and the page becomes the smallest of
@@ -245,7 +321,18 @@ impl SchDoc {
     /// unconventional page. A sheet carrying a title block also reserves the band it
     /// prints in, so metadata never overprints the lowest parts.
     ///
-    /// The shift is one way and only as far as the margin. A drawing that already starts
+    /// `frozen` names, by UUID, the items that were already on the sheet before whatever
+    /// write this fit follows — a graft's promise that it placed its block BESIDE the
+    /// existing parts and did not touch them. Those never move: only the rest slides, and
+    /// only far enough to reach the margin, so an existing symbol still writes back from
+    /// its own bytes. An empty `frozen` means the whole sheet may slide, which is what a
+    /// sheet drawn from scratch and a whole-sheet re-arrange both want.
+    ///
+    /// A partial slide is not rigid, so it is offered only when the movable drawing does
+    /// not touch the frozen one — before or after the shift. A re-wire of seated symbols
+    /// draws straight to their pins and so is never slid at all.
+    ///
+    /// The shift is one way and only as far as the margin: a drawing that already starts
     /// inside the frame is not moved at all, so an untouched item still writes back from
     /// its own bytes — the crate's round-trip guarantee — and a caller that read a
     /// coordinate a moment ago still finds the part there.
@@ -253,21 +340,29 @@ impl SchDoc {
     /// The shift is snapped to the 50 mil grid, so grid-aligned geometry stays
     /// grid-aligned (KiCAD's ERC rejects off-grid endpoints). `None` for an empty
     /// sheet, which keeps whatever page it declares.
-    pub fn refit_page(&mut self) -> Option<PageFit> {
-        let bbox = self.content_bbox()?;
-        let dx = GRID_50_MIL.snap((PAGE_MARGIN - bbox.min_x).max(0.0));
-        let dy = GRID_50_MIL.snap((PAGE_MARGIN - bbox.min_y).max(0.0));
-        self.translate(dx, dy);
+    pub fn refit_page(&mut self, frozen: &BTreeSet<String>) -> Option<PageFit> {
+        // An item with no UUID cannot be told apart from one the caller froze, so it is
+        // treated as frozen: the denylist fails closed.
+        let movable = |item: &Item| item.uuid().is_some_and(|u| !frozen.contains(u));
+        let mut shift = [0.0, 0.0];
+        if let Some(bbox) = self.bbox_where(movable) {
+            let want = [
+                GRID_50_MIL.snap((PAGE_MARGIN - bbox.min_x).max(0.0)),
+                GRID_50_MIL.snap((PAGE_MARGIN - bbox.min_y).max(0.0)),
+            ];
+            if self.slide_is_safe(want, movable) {
+                shift = want;
+                self.translate_where(shift[0], shift[1], movable);
+            }
+        }
 
+        let bbox = self.content_bbox()?;
         let band = if self.has_title_block() {
             TITLE_BLOCK_BAND
         } else {
             0.0
         };
-        let need = [
-            bbox.max_x + dx + PAGE_MARGIN,
-            bbox.max_y + dy + PAGE_MARGIN + band,
-        ];
+        let need = [bbox.max_x + PAGE_MARGIN, bbox.max_y + PAGE_MARGIN + band];
         let (page, standard) = match standard_page(need) {
             Some((name, size)) => {
                 self.set_paper(tagged("paper", vec![quoted(name)]));
@@ -282,10 +377,55 @@ impl SchDoc {
             }
         };
         Some(PageFit {
-            shift: [dx, dy],
+            shift,
             page,
             standard,
         })
+    }
+
+    /// Whether moving the items `keep` accepts by `shift` leaves every connection alone.
+    ///
+    /// It does when the two drawings do not touch — no connection point of one sitting on
+    /// a point or a wire of the other — neither where they are now nor where the shift
+    /// would put them. Touching is the only way a partial move can join or break a net;
+    /// two wires that merely cross are not connected in KiCAD, only a junction connects
+    /// them, and a junction is a point.
+    fn slide_is_safe(&self, shift: [f64; 2], keep: impl Fn(&Item) -> bool) -> bool {
+        if shift == [0.0, 0.0] {
+            return true;
+        }
+        let frozen = self.connection_geometry(|item| !keep(item));
+        if frozen.is_empty() {
+            return true;
+        }
+        let moving = self.connection_geometry(keep);
+        !moving.touches(&frozen) && !moving.shifted(shift).touches(&frozen)
+    }
+
+    /// The connection geometry of the items `keep` accepts.
+    fn connection_geometry(&self, mut keep: impl FnMut(&Item) -> bool) -> Wiring {
+        let mut w = Wiring::default();
+        for item in self.items().iter().filter(|item| keep(item)) {
+            match item {
+                Item::Symbol(inst) => w
+                    .points
+                    .extend(crate::pins::pins_of(self, inst).iter().map(|pin| pin.at)),
+                Item::Wire(wire) => {
+                    w.points.extend(wire.points.iter().copied());
+                    w.segments
+                        .extend(wire.points.windows(2).map(|p| [p[0], p[1]]));
+                }
+                Item::Junction(j) => w.points.push(j.at),
+                Item::NoConnect(n) => w.points.push(n.at),
+                Item::Label(l) => w.points.push(l.at.point()),
+                Item::Sheet(s) => w.points.extend(s.pins.iter().map(|p| p.at.point())),
+                // Buses and whatever else the typed model does not decode still carry
+                // connectivity, and every coordinate they name is a place they carry it.
+                Item::Other(raw) => raw_points(&raw.node, &mut w.points),
+                Item::Text(_) | Item::Rectangle(_) | Item::LibSymbols(_) => {}
+            }
+        }
+        w
     }
 
     pub(crate) fn has_title_block(&self) -> bool {
@@ -331,7 +471,7 @@ mod tests {
     #[test]
     fn refit_brings_content_inside_the_frame_and_picks_a_standard_page() {
         let mut doc = off_page_sheet();
-        let fit = doc.refit_page().expect("content to fit");
+        let fit = doc.refit_page(&BTreeSet::new()).expect("content to fit");
         assert!(fit.standard, "this content belongs on a standard page");
         assert_eq!(fit.page, [210.0, 148.0], "a 35 mm sketch takes the smallest standard page");
         let bbox = doc.content_bbox().expect("content");
@@ -345,12 +485,74 @@ mod tests {
     fn refit_keeps_the_drawing_rigid() {
         let mut doc = off_page_sheet();
         let before = crate::connect::extract(&doc);
-        doc.refit_page();
+        doc.refit_page(&BTreeSet::new());
         let after = crate::connect::extract(&doc);
         assert!(
             crate::Netlist::diff(&before, &after).is_empty(),
             "a rigid shift cannot change connectivity"
         );
+    }
+
+    /// A graft: the sheet's own symbol is frozen, the new block landed off-page.
+    fn grafted_sheet() -> (SchDoc, String) {
+        let symbol = "\t(symbol\n\
+             \t\t(lib_id \"rectifier_schlib:VSIN\")\n\
+             \t\t(at 102.87 101.6 0)\n\
+             \t\t(uuid \"seated\")\n\
+             \t)";
+        let text = format!(
+            "(kicad_sch\n\
+             \t(version 20250114)\n\
+             \t(paper \"A4\")\n\
+             {symbol}\n\
+             \t(wire (pts (xy -25.4 -12.7) (xy -25.4 20.32)) (uuid \"new-w\"))\n\
+             \t(label \"VOUT\" (at -25.4 -12.7 0) (uuid \"new-l\"))\n\
+             )\n"
+        );
+        (SchDoc::parse(&text).expect("parse"), symbol.to_string())
+    }
+
+    #[test]
+    fn a_graft_slides_only_the_new_block() {
+        let (mut doc, symbol) = grafted_sheet();
+        let frozen = BTreeSet::from(["seated".to_string()]);
+        let fit = doc.refit_page(&frozen).expect("content to fit");
+
+        assert!(fit.standard, "the fitted sheet belongs on a standard page");
+        assert!(
+            doc.to_text().contains(&symbol),
+            "the seated symbol was rewritten:\n{}",
+            doc.to_text()
+        );
+        let bbox = doc.content_bbox().expect("content");
+        assert!(
+            bbox.min_x >= PAGE_MARGIN - 1.27 && bbox.min_y >= PAGE_MARGIN - 1.27,
+            "the new block is still off-page: {bbox:?}"
+        );
+        assert!(
+            fit.page[0] >= bbox.max_x && fit.page[1] >= bbox.max_y,
+            "the page does not hold the drawing: {fit:?} vs {bbox:?}"
+        );
+    }
+
+    #[test]
+    fn a_slide_that_would_tear_the_drawing_is_abandoned() {
+        let mut doc = SchDoc::parse(
+            "(kicad_sch\n\
+             \t(version 20250114)\n\
+             \t(paper \"A4\")\n\
+             \t(wire (pts (xy 5.08 40.64) (xy 25.4 40.64)) (uuid \"seated\"))\n\
+             \t(wire (pts (xy 5.08 40.64) (xy 5.08 60.96)) (uuid \"new\"))\n\
+             )\n",
+        )
+        .expect("parse");
+        let fit = doc
+            .refit_page(&BTreeSet::from(["seated".to_string()]))
+            .expect("content to fit");
+
+        assert_eq!(fit.shift, [0.0, 0.0], "the new wire was slid off the seated one");
+        let new = doc.wires().find(|w| w.uuid == "new").expect("the new wire");
+        assert_eq!(new.points[0], Point2::new(5.08, 40.64), "its junction moved");
     }
 
     #[test]
@@ -363,7 +565,7 @@ mod tests {
              )\n",
         )
         .expect("parse");
-        let fit = doc.refit_page().expect("content to fit");
+        let fit = doc.refit_page(&BTreeSet::new()).expect("content to fit");
         assert!(!fit.standard, "content this large has no standard page");
         assert!(fit.page[0] > 900.0 && fit.page[1] > 500.0);
     }

@@ -12,6 +12,8 @@
 //! be annotated on another. Nothing already in the target is touched, so its untouched
 //! items still write back from their original bytes.
 
+use std::collections::BTreeSet;
+
 use kicad::KicadInstallation;
 use sch_check::Design;
 use sch_doc::SchDoc;
@@ -98,15 +100,25 @@ pub fn to_doc(writer: SchematicWriter) -> sch_doc::Result<SchDoc> {
 ///
 /// The grafted block carries whatever coordinates the region search chose — it is placed
 /// BESIDE what is already there, so it may reach outside the frame — and adoption changes
-/// what the sheet as a whole spans. [`sch_doc::SchDoc::refit_page`] settles both: it shifts
-/// the merged drawing back to the page margin and re-picks the smallest standard page.
+/// what the sheet as a whole spans. [`sch_doc::SchDoc::refit_page`] settles both, moving
+/// only the block just adopted: the sheet's own parts are the caller's, and a graft that
+/// slid them would be an edit nobody asked for.
 pub fn graft(doc: &mut SchDoc, writer: SchematicWriter) -> sch_doc::Result<Vec<String>> {
     let sheet = to_doc(writer)?;
     replace_frames(doc, &sheet);
+    let seated = seated_uuids(doc);
     let adopted = doc.adopt(&sheet)?;
-    doc.refit_page();
     debug_assert_unique_wire_segments(doc);
+    doc.refit_page(&seated);
     Ok(adopted)
+}
+
+/// The UUIDs of everything on the sheet right now — what a graft must leave untouched.
+fn seated_uuids(doc: &SchDoc) -> BTreeSet<String> {
+    doc.items()
+        .iter()
+        .filter_map(|item| item.uuid().map(String::from))
+        .collect()
 }
 
 /// Drop the block frames `sheet` is about to redraw: every rectangle it overlaps, and the
@@ -143,13 +155,18 @@ fn replace_frames(doc: &mut SchDoc, sheet: &SchDoc) {
 pub fn graft_drawing(doc: &mut SchDoc, writer: SchematicWriter) -> sch_doc::Result<()> {
     let sheet = to_doc(writer)?;
     replace_frames(doc, &sheet);
+    let seated = seated_uuids(doc);
     doc.adopt_drawing(&sheet)?;
-    doc.refit_page();
     debug_assert_unique_wire_segments(doc);
+    doc.refit_page(&seated);
     Ok(())
 }
 
 /// Assert in debug builds that the adopted sheet has unique unordered wire segments.
+///
+/// Checked on what adoption produced, before the page fit: the fit slides the new block
+/// away from the sheet's own drawing, which would pull a duplicate pair apart and hide
+/// the defect this catches.
 fn debug_assert_unique_wire_segments(_doc: &SchDoc) {
     #[cfg(debug_assertions)]
     {
@@ -184,4 +201,36 @@ mod tests {
 
         let _ = graft(&mut doc, second);
     }
+
+    /// A block whose natural landing is off the page must not drag the sheet under it.
+    #[test]
+    fn graft_slides_only_the_new_block_onto_the_page() {
+        let mut seated = SchematicWriter::new();
+        seated.add_wire_on_net([101.6, 101.6], [127.0, 101.6], "SEATED");
+        let mut doc = to_doc(seated).unwrap();
+        doc.refit_page(&Default::default());
+        let before: Vec<geom::Point2> = doc.wires().flat_map(|w| w.points.clone()).collect();
+
+        let mut block = SchematicWriter::new();
+        block.add_wire_on_net([-25.4, -12.7], [-25.4, 12.7], "NEW");
+        graft(&mut doc, block).unwrap();
+
+        let after: Vec<geom::Point2> = doc
+            .wires()
+            .filter(|w| w.points.iter().any(|p| p.y == 101.6))
+            .flat_map(|w| w.points.clone())
+            .collect();
+        assert_eq!(before, after, "the seated wire moved");
+        let bbox = doc.content_bbox().unwrap();
+        assert!(
+            bbox.min_x >= sch_doc::PAGE_MARGIN && bbox.min_y >= sch_doc::PAGE_MARGIN,
+            "the block is still off the page: {bbox:?}"
+        );
+        let page = doc.page().expect("a page");
+        assert!(
+            page[0] >= bbox.max_x && page[1] >= bbox.max_y,
+            "the page does not hold the drawing: {page:?} vs {bbox:?}"
+        );
+    }
 }
+
