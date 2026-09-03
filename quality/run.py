@@ -46,7 +46,7 @@ KICAD_DEMOS = Path(
 )
 VALIDATED_KICAD_CLIS = set()
 CAPPED_SCORE = 3
-CLEAN_RENDER_DENSITY = "600"
+CLEAN_RENDER_DENSITY = "200"
 CLEAN_RENDER_SIZE = "1600x900"
 PCB_CLEAN_LAYERS = {
     "front": "F.Cu,F.SilkS,F.Mask,Edge.Cuts",
@@ -1297,8 +1297,9 @@ TURN_STARTED = re.compile(r"^turn (?P<turn>\d+): (?P<prompt>.*)$")
 TURN_DONE = re.compile(r"^turn (?P<turn>\d+) done:")
 ASSISTANT_TEXT = re.compile(r"^assistant:\s*(.+)$", re.M)
 BUDGET_STOP = re.compile(
-    r"^Stopped after (?:the turn spent its \d+s wall-clock budget|"
+    r"^(?:Stopped after (?:the turn spent its \d+s wall-clock budget|"
     r"the model exhausted the per-turn request safety limit)\b"
+    r"|## Partial state\b)"
 )
 
 
