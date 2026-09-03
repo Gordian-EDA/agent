@@ -278,3 +278,6 @@ re-place." Quality first; time later via parallel subagents; schematic too.
 - sch-refusals-4 gated green and merged locally (1c799794). pcb-seed-shorts: codex's version did not
   reach the dispatched tool paths (its own new tests fail with the old messages) → Opus agent
   finishing it. Push waits on graft-additive + pcb-seed-shorts; then round 7.
+- Text-collision measurement (scratchpad/textcol): lint measures a disjoint universe from the render
+  (recall 0/103, 16 FPs); one validated as-drawn box model would take 0.353 → ~0.055 collisions/part
+  → lane/text-box-model (Opus). Running: graft-additive (Opus), pcb-seed-shorts (Opus), text-box-model.
