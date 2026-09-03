@@ -310,14 +310,11 @@ pub fn search_footprints_by_name(
 ) -> Result<Vec<FootprintNameHit>> {
     let catalog = ctx.footprint_catalog()?;
     let matcher = SkimMatcherV2::default().ignore_case();
-    let explicit_library = query
-        .split_once(':')
-        .map(|(library, name)| (library, name))
-        .filter(|(library, _)| {
-            catalog
-                .libraries()
-                .any(|candidate| candidate.id().as_str() == *library)
-        });
+    let explicit_library = query.split_once(':').filter(|(library, _)| {
+        catalog
+            .libraries()
+            .any(|candidate| candidate.id().as_str() == *library)
+    });
     let needle = explicit_library.map_or(query, |(_, name)| name);
     let mut hits = catalog
         .entries()
