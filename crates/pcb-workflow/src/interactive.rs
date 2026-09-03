@@ -58,7 +58,7 @@ pub fn move_parts(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         &crate::place::courtyard_extents(&snapshot, ctx),
         &back_side_references(&snapshot),
     );
-    let plan = match resolve_move_parts(&input, &mut board) {
+    let mut plan = match resolve_move_parts(&input, &mut board) {
         Ok(plan) => plan,
         Err(err) => return Ok(json!({ "error": err })),
     };
@@ -71,6 +71,7 @@ pub fn move_parts(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     if !locked.is_empty() {
         return Ok(crate::locks::locked_refusal("move_parts", &locked));
     }
+    nudge_overlaps(&mut board, &mut plan, snapshot.problem.clearance);
     if let Some(refusal) = overlap_error(&board, &plan, snapshot.problem.clearance) {
         return Ok(refusal);
     }
@@ -152,7 +153,8 @@ fn overlap_error(board: &MoveBoard, plan: &MovePlan, clearance: f64) -> Option<V
             let gap = -ox.min(oy);
             return Some(json!({
                 "error": format!(
-                    "move_parts refused: {} at [{:.3}, {:.3}] would leave {gap:.3} mm to {} — \
+                    "move_parts could not find a free legal spot for {} within 5 mm of \
+                     [{:.3}, {:.3}]; the requested pose would leave {gap:.3} mm to {} and \
                      their courtyards need {clearance:.3} mm between them",
                     position.reference, position.at.x, position.at.y, reference,
                 ),
@@ -163,6 +165,13 @@ fn overlap_error(board: &MoveBoard, plan: &MovePlan, clearance: f64) -> Option<V
                 "blocked_by": { "reference": reference, "courtyard_mm": rect(&other_courtyard) },
                 "gap_mm": gap,
                 "required_clearance_mm": clearance,
+                "searched_mm": 5.0,
+                "search_extents_mm": [
+                    position.at.x - 5.0,
+                    position.at.y - 5.0,
+                    position.at.x + 5.0,
+                    position.at.y + 5.0,
+                ],
             }));
         }
     }
@@ -208,6 +217,8 @@ struct ResolvedPosition {
     reference: String,
     at: Point2,
     rotation: f64,
+    read_as: String,
+    nudged_from: Option<Point2>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -305,6 +316,8 @@ impl MovePlan {
                     "x": p.at.x,
                     "y": p.at.y,
                     "rotation": p.rotation,
+                    "read_as": p.read_as,
+                    "nudged_to": p.nudged_from.map(|_| [p.at.x, p.at.y]),
                 })
             })
             .collect();
@@ -353,11 +366,15 @@ fn resolve_move_parts(
         let obj = mv
             .as_object()
             .ok_or_else(|| format!("{ctx}: move must be an object"))?;
-        let reference = obj
-            .get("reference")
+        let (reference_key, reference_value) = if obj.contains_key("reference") {
+            ("reference", obj.get("reference"))
+        } else {
+            ("ref", obj.get("ref"))
+        };
+        let reference = reference_value
             .and_then(Value::as_str)
             .filter(|s| !s.is_empty())
-            .ok_or_else(|| format!("{ctx}: missing required string `reference`"))?
+            .ok_or_else(|| format!("{ctx}: missing required string `ref` or `reference`"))?
             .to_owned();
         if seen.insert(reference.clone()) {
             order.push(reference.clone());
@@ -369,7 +386,8 @@ fn resolve_move_parts(
             .cloned()
             .ok_or_else(|| format!("{ctx}: unknown footprint `{reference}`"))?;
 
-        let has_to = obj.contains_key("to");
+        let to_key = if obj.contains_key("to") { "to" } else { "at" };
+        let has_to = obj.contains_key(to_key);
         let has_by = obj.contains_key("by");
         let has_near = obj.contains_key("near");
         let has_edge = obj.contains_key("edge");
@@ -385,7 +403,12 @@ fn resolve_move_parts(
 
         let has_horizontal_offset = obj.contains_key("horizontal_offset");
         let has_vertical_offset = obj.contains_key("vertical_offset");
-        let rotation = optional_num(mv, "rotation", &ctx)?;
+        let rotation_key = if obj.contains_key("rotation") {
+            "rotation"
+        } else {
+            "rot"
+        };
+        let rotation = optional_num(mv, rotation_key, &ctx)?;
         if mode_count == 0 && rotation.is_none() && !has_horizontal_offset && !has_vertical_offset {
             return Err(format!(
                 "{ctx}: move needs a movement mode, `rotation`, or an offset"
@@ -393,7 +416,7 @@ fn resolve_move_parts(
         }
 
         let mut at = match (has_to, has_by, has_near, has_edge) {
-            (true, false, false, false) => parse_point(mv, "to", &ctx)?,
+            (true, false, false, false) => parse_point(mv, to_key, &ctx)?,
             (false, true, false, false) => {
                 let by = parse_point(mv, "by", &ctx)?;
                 Point2::new(current.at.x + by.x, current.at.y + by.y)
@@ -409,12 +432,12 @@ fn resolve_move_parts(
                     .get(target_ref)
                     .ok_or_else(|| format!("{ctx}: unknown `near` footprint `{target_ref}`"))?;
                 let side = parse_side(mv, "side", &ctx)?;
-                let gap = req_num(mv, "gap", &ctx)?;
+                let gap = optional_num(mv, "gap", &ctx)?.unwrap_or(0.2);
                 near_position(&current, target, side, gap)
             }
             (false, false, false, true) => {
                 let edge = parse_edge(mv, "edge", &ctx)?;
-                let gap = req_num(mv, "gap", &ctx)?;
+                let gap = optional_num(mv, "gap", &ctx)?.unwrap_or(0.2);
                 edge_position(&current, board.bounds, edge, gap)
             }
             (false, false, false, false) => current.at,
@@ -436,6 +459,22 @@ fn resolve_move_parts(
                 reference,
                 at,
                 rotation: final_rotation,
+                read_as: format!(
+                    "{reference_key} + {}{}",
+                    match (has_to, has_by, has_near, has_edge) {
+                        (true, _, _, _) => to_key,
+                        (_, true, _, _) => "by",
+                        (_, _, true, _) => "near",
+                        (_, _, _, true) => "edge",
+                        _ => "pose",
+                    },
+                    rotation.map_or("", |_| if rotation_key == "rot" {
+                        " + rot"
+                    } else {
+                        " + rotation"
+                    }),
+                ),
+                nudged_from: None,
             },
         );
     }
@@ -468,6 +507,76 @@ fn resolve_move_parts(
         placements,
         positions,
         changed,
+    })
+}
+
+fn nudge_overlaps(board: &mut MoveBoard, plan: &mut MovePlan, clearance: f64) {
+    let mut offsets = Vec::new();
+    for ix in -20_i32..=20 {
+        for iy in -20_i32..=20 {
+            if ix == 0 && iy == 0 {
+                continue;
+            }
+            let dx = f64::from(ix) * 0.25;
+            let dy = f64::from(iy) * 0.25;
+            if dx.hypot(dy) <= 5.0 + geom::EPS {
+                offsets.push((dx, dy));
+            }
+        }
+    }
+    offsets.sort_by(|a, b| {
+        a.0.hypot(a.1)
+            .total_cmp(&b.0.hypot(b.1))
+            .then_with(|| a.0.total_cmp(&b.0))
+            .then_with(|| a.1.total_cmp(&b.1))
+    });
+
+    for position in &mut plan.positions {
+        if legal_move_candidate(board, position, clearance) {
+            continue;
+        }
+        let requested = position.at;
+        let Some(candidate) = offsets.iter().find_map(|(dx, dy)| {
+            let mut candidate = position.clone();
+            candidate.at = Point2::new(requested.x + dx, requested.y + dy);
+            legal_move_candidate(board, &candidate, clearance).then_some(candidate.at)
+        }) else {
+            continue;
+        };
+        position.at = candidate;
+        position.nudged_from = Some(requested);
+        if let Some(part) = board.parts.get_mut(&position.reference) {
+            part.at = candidate;
+        }
+        if let Some(placement) = plan
+            .placements
+            .iter_mut()
+            .find(|placement| placement.reference == position.reference)
+        {
+            placement.at = candidate;
+        }
+    }
+}
+
+fn legal_move_candidate(board: &MoveBoard, position: &ResolvedPosition, clearance: f64) -> bool {
+    let Some(original) = board.parts.get(&position.reference) else {
+        return false;
+    };
+    let mut candidate = original.clone();
+    candidate.at = position.at;
+    candidate.rotation = position.rotation;
+    let courtyard = candidate.courtyard();
+    if !board.bounds.contains_rect_eps(&courtyard, geom::EPS) {
+        return false;
+    }
+    board.parts.iter().all(|(reference, other)| {
+        if reference == &position.reference {
+            return true;
+        }
+        let (ox, oy) = courtyard
+            .inflate(clearance / 2.0)
+            .axis_penetration(&other.courtyard().inflate(clearance / 2.0));
+        ox <= 0.0 || oy <= 0.0
     })
 }
 
@@ -506,10 +615,6 @@ fn optional_num(input: &Value, key: &str, ctx: &str) -> std::result::Result<Opti
                 .ok_or_else(|| format!("{ctx}: `{key}` must be numeric"))
         })
         .transpose()
-}
-
-fn req_num(input: &Value, key: &str, ctx: &str) -> std::result::Result<f64, String> {
-    optional_num(input, key, ctx)?.ok_or_else(|| format!("{ctx}: missing numeric `{key}`"))
 }
 
 fn parse_side(input: &Value, key: &str, ctx: &str) -> std::result::Result<Side, String> {
@@ -571,19 +676,23 @@ fn edge_position(part: &MovePart, bounds: Rect, edge: Edge, gap: f64) -> Point2 
 
 /// Route a single saved-board connection with grid-A* obstacle avoidance.
 pub fn route_track(input: Value, ctx: &AgentRuntime) -> Result<Value> {
-    let prepared = crate::active_board(ctx).and_then(|snapshot| {
-        let request =
-            parse_route_track_request(&input, &snapshot.problem, &snapshot.imported.parts)?;
-        let (problem, solution) = manual_route_solution(&snapshot.problem, &request)?;
-        Ok((problem, solution, request, snapshot.layer_names))
-    });
-    match prepared {
-        Ok((problem, solution, request, layer_names)) => {
+    let snapshot = match crate::active_board(ctx) {
+        Ok(snapshot) => snapshot,
+        Err(error) => return Ok(json!({ "error": error })),
+    };
+    let request =
+        match parse_route_track_request(&input, &snapshot.problem, &snapshot.imported.parts) {
+            Ok(request) => request,
+            Err(error) => return Ok(json!({ "error": error })),
+        };
+    match manual_route_solution(&snapshot.problem, &request) {
+        Ok((problem, solution)) => {
             let gate = match Guard::open(ctx, Edit::new("route_track", &[ctx.pcb_path()])) {
                 Ok(gate) => gate,
                 Err(refusal) => return Ok(refusal),
             };
-            if let Err(err) = super::route::write_route_file(ctx, &problem, &solution, &layer_names)
+            if let Err(err) =
+                super::route::write_route_file(ctx, &problem, &solution, &snapshot.layer_names)
             {
                 let error =
                     json!({ "error": format!("route_track could not write copper: {err}") });
@@ -591,7 +700,12 @@ pub fn route_track(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             }
             Ok(gate.commit(ctx, route_track_output(&problem, &solution, &request)))
         }
-        Err(err) => Ok(json!({ "error": err })),
+        Err(reason) => Ok(route_track_blocked_output(
+            &snapshot.problem,
+            &snapshot.imported.parts,
+            &request,
+            &reason,
+        )),
     }
 }
 
@@ -610,9 +724,31 @@ pub fn delete_copper(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         Ok(gate) => gate,
         Err(refusal) => return Ok(refusal),
     };
+    let open_before = crate::ratsnest::unrouted_connections(&snapshot);
     let deleted = delete_copper_file(ctx, &snapshot, &selection);
     match deleted {
-        Ok(hits) => Ok(gate.commit(ctx, delete_copper_output(&selection, &hits))),
+        Ok(hits) => {
+            let after = match crate::active_board(ctx) {
+                Ok(after) => after,
+                Err(error) => {
+                    return Ok(gate.rollback(
+                        ctx,
+                        json!({ "error": format!("delete_copper could not read the edited board: {error}") }),
+                    ));
+                }
+            };
+            let open_after = crate::ratsnest::unrouted_connections(&after);
+            let now_open = open_after
+                .difference(&open_before)
+                .cloned()
+                .collect::<Vec<_>>();
+            Ok(
+                gate.commit_copper_deletion(
+                    ctx,
+                    delete_copper_output(&selection, &hits, &now_open),
+                ),
+            )
+        }
         Err(error) => Ok(gate.rollback(ctx, json!({ "error": error }))),
     }
 }
@@ -869,6 +1005,7 @@ struct RouteTrackRequest {
     to_layer: LayerRef,
     width: f64,
     vias: Vec<RouteViaAnchor>,
+    notes: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -929,18 +1066,21 @@ fn parse_route_track_request(
         Some(layer) => parse_route_layer_ref(layer, problem.layer_count)?,
         None => to_pad_layer.unwrap_or_else(|| from_layer.clone()),
     };
-    let width = optional_num(input, "width", ctx)?.unwrap_or_else(|| problem.net_width(&net));
-    if width <= 0.0 {
+    let requested_width =
+        optional_num(input, "width", ctx)?.unwrap_or_else(|| problem.net_width(&net));
+    if requested_width <= 0.0 {
         return Err("route_track `width` must be positive".to_owned());
     }
-    if width + geom::EPS < problem.min_trace_width {
-        return Err(format!(
-            "route_track width {width} mm is below board minimum trace width {} mm",
+    let width = requested_width.max(problem.min_trace_width);
+    let mut notes = Vec::new();
+    if requested_width + geom::EPS < problem.min_trace_width {
+        notes.push(format!(
+            "width {requested_width} mm was raised to the board minimum {} mm",
             problem.min_trace_width
         ));
     }
 
-    let vias = input
+    let requested_vias = input
         .get("vias")
         .map(|v| {
             let array = v
@@ -963,6 +1103,19 @@ fn parse_route_track_request(
         })
         .transpose()?
         .unwrap_or_default();
+    let mut vias = Vec::new();
+    let mut current_layer = from_layer.clone();
+    for via in requested_vias {
+        if current_layer == via.to_layer {
+            notes.push(format!(
+                "explicit via at [{}, {}] was dropped because it does not change layers",
+                via.at.x, via.at.y
+            ));
+            continue;
+        }
+        current_layer = via.to_layer.clone();
+        vias.push(via);
+    }
 
     Ok(RouteTrackRequest {
         from,
@@ -972,6 +1125,7 @@ fn parse_route_track_request(
         to_layer,
         width,
         vias,
+        notes,
     })
 }
 
@@ -987,12 +1141,6 @@ fn manual_route_solution(
     let mut current_layer = request.from_layer.clone();
 
     for anchor in &request.vias {
-        if current_layer == anchor.to_layer {
-            return Err(format!(
-                "explicit via at [{}, {}] does not change layers",
-                anchor.at.x, anchor.at.y
-            ));
-        }
         let leg = route_leg(
             base,
             &request.net,
@@ -1279,11 +1427,87 @@ fn route_track_output(
         "width": request.width,
         "tracks": solution.traces.len(),
         "vias": solution.vias.len(),
+        "notes": request.notes,
         "metrics": {
             "wirelength": metrics.wirelength,
             "vias": metrics.via_count,
             "traces": metrics.trace_count,
         },
+    })
+}
+
+fn route_track_blocked_output(
+    problem: &RoutingView,
+    parts: &[ImportedPart],
+    request: &RouteTrackRequest,
+    reason: &str,
+) -> Value {
+    let path = geom::Segment::new(request.from, request.to);
+    let nearest = problem
+        .obstacles
+        .iter()
+        .filter(|obstacle| !obstacle.connected_to.iter().any(|net| net == &request.net))
+        .map(|obstacle| {
+            let bounds = Rect::from_center_half(
+                obstacle.center,
+                (obstacle.width / 2.0, obstacle.height / 2.0),
+            );
+            (path.dist_to_rect(&bounds), obstacle, bounds)
+        })
+        .min_by(|a, b| a.0.total_cmp(&b.0));
+    let blocker = nearest.map(|(gap, obstacle, _)| {
+        let kind = match obstacle.kind.as_str() {
+            kind if kind.starts_with("pad:") => "pad",
+            "track" | "route-trace" => "track",
+            "via" | "route-via" => "via",
+            "zone" => "zone",
+            _ => "courtyard",
+        };
+        let owner_ref = obstacle
+            .kind
+            .strip_prefix("pad:")
+            .filter(|reference| parts.iter().any(|part| part.reference == *reference));
+        json!({
+            "kind": kind,
+            "owner_ref": owner_ref,
+            "net": obstacle.connected_to.first(),
+            "layer": obstacle.layers.first().map(|layer| &layer.0),
+            "at": [obstacle.center.x, obstacle.center.y],
+            "gap_mm": gap.max(0.0),
+            "need_mm": problem.clearance + request.width / 2.0,
+        })
+    });
+    let waypoint = nearest.map(|(_, _, bounds)| {
+        let clearance = problem.clearance + request.width / 2.0;
+        let above = Point2::new(bounds.center().x, bounds.min_y - clearance);
+        let below = Point2::new(bounds.center().x, bounds.max_y + clearance);
+        let chosen = if path.dist_to_point(above) <= path.dist_to_point(below) {
+            above
+        } else {
+            below
+        };
+        [chosen.x, chosen.y]
+    });
+    let alternate_layer = (problem.layer_count > 1).then(|| {
+        if request.from_layer.index(problem.layer_count) == Some(0) {
+            "B.Cu"
+        } else {
+            "F.Cu"
+        }
+    });
+    json!({
+        "ok": true,
+        "routed": false,
+        "net": request.net,
+        "reason": reason,
+        "blocker": blocker,
+        "nearest_legal_alternative": {
+            "layer": alternate_layer,
+            "width": request.width,
+            "waypoint": waypoint,
+        },
+        "notes": request.notes,
+        "note": "no copper was written; try the suggested waypoint or layer switch, then inspect the returned blocker before moving placement",
     })
 }
 
@@ -1376,7 +1600,11 @@ fn parse_copper_kinds(input: &Value) -> std::result::Result<BTreeSet<CopperKind>
     Ok(out)
 }
 
-fn delete_copper_output(selection: &DeleteCopperSelection, hits: &[CopperHit]) -> Value {
+fn delete_copper_output(
+    selection: &DeleteCopperSelection,
+    hits: &[CopperHit],
+    now_open: &[String],
+) -> Value {
     let request = &selection.request;
     let matches: Vec<Value> = hits.iter().map(copper_hit_json).collect();
     json!({
@@ -1386,6 +1614,12 @@ fn delete_copper_output(selection: &DeleteCopperSelection, hits: &[CopperHit]) -
         "net": request.net,
         "bbox": selection.bbox,
         "matches": matches,
+        "now_open": now_open,
+        "note": if now_open.is_empty() {
+            "copper was removed; no additional board net became open"
+        } else {
+            "copper was removed; route only the nets listed in now_open to repair the intentional openings"
+        },
     })
 }
 
@@ -1672,6 +1906,35 @@ mod tests {
     }
 
     #[test]
+    fn move_aliases_are_read_and_reported() {
+        let plan = resolve(json!({
+            "moves": [{ "ref": "C1", "at": [12.0, 11.0], "rot": 90.0 }]
+        }));
+        let moved = pos(&plan, "C1");
+        assert_eq!(moved.at, Point2::new(12.0, 11.0));
+        assert_eq!(moved.rotation, 90.0);
+        assert_eq!(moved.read_as, "ref + at + rot");
+    }
+
+    #[test]
+    fn an_overlapping_move_is_nudged_to_the_nearest_legal_grid_point() {
+        let mut board = fixture_board();
+        let mut plan = resolve_move_parts(
+            &json!({ "moves": [{ "ref": "C1", "at": [20.0, 20.0] }] }),
+            &mut board,
+        )
+        .unwrap();
+        assert!(overlap_error(&board, &plan, 0.2).is_some());
+
+        nudge_overlaps(&mut board, &mut plan, 0.2);
+
+        let moved = pos(&plan, "C1");
+        assert_ne!(moved.at, Point2::new(20.0, 20.0));
+        assert_eq!(moved.nudged_from, Some(Point2::new(20.0, 20.0)));
+        assert_eq!(overlap_error(&board, &plan, 0.2), None);
+    }
+
+    #[test]
     fn reports_an_explicit_move_to_the_current_pose_as_unchanged() {
         let plan = resolve(json!({
             "moves": [{ "reference": "U1", "to": [50.0, 25.0], "rotation": 0.0 }]
@@ -1911,6 +2174,54 @@ mod tests {
             .find(|via| via.at.near_eq(Point2::new(5.0, 1.0), 1e-9))
             .expect("explicit via at requested coordinate");
         assert_eq!(via.span, ViaSpan::Through);
+    }
+
+    #[test]
+    fn manual_route_clamps_width_and_drops_a_same_layer_via() {
+        let mut problem = route_problem(vec![]);
+        problem.min_trace_width = 0.25;
+        let request = parse_route_track_request(
+            &json!({
+                "from": [1.0, 1.0],
+                "to": [9.0, 1.0],
+                "net": "SIG",
+                "width": 0.2,
+                "vias": [{ "at": [5.0, 1.0], "to_layer": "F.Cu" }]
+            }),
+            &problem,
+            &[],
+        )
+        .unwrap();
+
+        assert_eq!(request.width, 0.25);
+        assert!(request.vias.is_empty());
+        assert_eq!(request.notes.len(), 2);
+        assert!(request.notes[0].contains("raised to the board minimum"));
+        assert!(request.notes[1].contains("dropped"));
+    }
+
+    #[test]
+    fn manual_route_failure_returns_a_blocker_and_alternatives() {
+        let problem = route_problem(vec![obstacle(
+            Point2::new(5.0, 2.5),
+            0.8,
+            5.0,
+            vec![LayerRef::top(), LayerRef::bottom()],
+        )]);
+        let request = parse_route_track_request(
+            &json!({ "from": [1.0, 2.0], "to": [9.0, 2.0], "net": "SIG" }),
+            &problem,
+            &[],
+        )
+        .unwrap();
+        let reason = manual_route_solution(&problem, &request).unwrap_err();
+
+        let output = route_track_blocked_output(&problem, &[], &request, &reason);
+        assert_eq!(output["ok"], true);
+        assert_eq!(output["routed"], false);
+        assert_eq!(output["blocker"]["kind"], "courtyard");
+        assert_eq!(output["nearest_legal_alternative"]["layer"], "B.Cu");
+        assert!(output["nearest_legal_alternative"]["waypoint"].is_array());
     }
 
     #[test]

@@ -471,6 +471,55 @@ impl Guard {
         })
     }
 
+    /// Accept a copper-only deletion after proving it did not create a short.
+    ///
+    /// Removing track or via geometry can expose pre-existing geometry findings
+    /// to the lint's attribution, but it cannot create a clearance collision.
+    /// Open nets are the intended effect and belong in the tool result rather
+    /// than in the refusal path.
+    pub(crate) fn commit_copper_deletion(self, ctx: &AgentRuntime, result: Value) -> Value {
+        let Some(before) = self.before.as_ref() else {
+            self.phase.facts(None, None, Some(0));
+            return result;
+        };
+        let board = match crate::active_board(ctx) {
+            Ok(board) => board,
+            Err(error) => {
+                let tool = self.tool;
+                self.phase.facts(None, None, Some(1));
+                let restored = self.restore(ctx);
+                return json!({
+                    "ok": false,
+                    "error": format!("{tool}: the edited board could not be read back: {error}"),
+                    "code": "board_unreadable_after_edit",
+                    "restored": restored,
+                });
+            }
+        };
+        let (after, _) = Defects::of(&board);
+        let shorts = after
+            .shorts
+            .difference(&before.shorts)
+            .map(|(a, b)| json!({ "a": a, "b": b }))
+            .collect::<Vec<_>>();
+        if shorts.is_empty() {
+            self.phase.facts(None, None, Some(0));
+            return result;
+        }
+        self.phase.facts(None, None, Some(shorts.len()));
+        let restored = self.restore(ctx);
+        json!({
+            "ok": false,
+            "error": format!(
+                "{} refused: the edit would short net pairs the schematic keeps apart",
+                self.tool
+            ),
+            "code": "board_guard_refused",
+            "shorts": shorts,
+            "restored": restored,
+        })
+    }
+
     fn restore(&self, _ctx: &AgentRuntime) -> bool {
         self.original.iter().all(|(path, bytes)| match bytes {
             Some(bytes) => std::fs::write(path, bytes).is_ok(),
