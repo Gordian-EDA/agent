@@ -34,7 +34,7 @@ use crate::seed::{PourPadConnection, PourSpec};
 use crate::create::{
     BoardSeedSpec, MISSING_FOOTPRINT_ID, SeedPart, SeedRules, add_default_power_pours,
     apply_complexity_default_layer_count, emit_board_footprint, merge, parse_seed_bounds,
-    parse_seed_rules_over, plan_seed_board, write_seed_plan,
+    parse_seed_rules_over, plan_seed_board, rule_adjustments, write_seed_plan,
 };
 
 /// One schematic part as the exported netlist has it.
@@ -907,6 +907,7 @@ fn seed_board(
         Ok(rules) => rules,
         Err(e) => return json!({ "error": e }),
     };
+    let rule_adjustments = rule_adjustments(input.get("rules"), &rules);
     let seed = seed_parts(parts);
     if !rebuilding {
         apply_complexity_default_layer_count(&mut rules, input.get("rules"), seed.len());
@@ -988,6 +989,15 @@ fn seed_board(
                  then route_board, then check_board",
     });
     merge(&mut out, sizes);
+    if !rule_adjustments.is_empty() {
+        merge(
+            &mut out,
+            json!({
+                "rule_adjustments": rule_adjustments,
+                "rule_note": "Subminimum fabrication rules were raised to the nearest KiCad standard-fab values; the board was written with the applied values above.",
+            }),
+        );
+    }
     // The layout half of the intent is placement's to honour, not the seed's.
     // Hand it straight back so the next call carries it instead of losing it.
     if let Some(layout) = layout_intent(input) {
