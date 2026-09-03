@@ -179,6 +179,7 @@ fn the_board_is_built_incrementally_through_legal_partial_states() {
     // ── route a few nets on a board that is only half placed ────────────────
     // Only VIN joins two placed parts; every other net reaches the staging row.
     let routed = tool(&ctx, "route_board", json!({ "nets": ["VIN"] }));
+    let mut routed_so_far = routed["routed_connection_count"].as_u64().unwrap();
     let entries = routed["ratsnest"].as_array().unwrap();
     assert_eq!(
         entries.len() as u64,
@@ -198,16 +199,6 @@ fn the_board_is_built_incrementally_through_legal_partial_states() {
             );
         }
     }
-    let deleted = tool(&ctx, "delete_copper", json!({ "net": "VIN" }));
-    assert!(deleted["deleted"].as_u64().is_some_and(|count| count > 0));
-    assert!(
-        deleted["now_open"]
-            .as_array()
-            .is_some_and(|nets| nets.iter().any(|net| net == "VIN")),
-        "deleting copper reports the net it intentionally opened: {deleted:#}"
-    );
-    let rerouted = tool(&ctx, "route_board", json!({ "nets": ["VIN"] }));
-    let mut routed_so_far = rerouted["routed_connection_count"].as_u64().unwrap();
     // A net that reaches a part nobody has placed is open, and its way out is
     // to place that part — not to move copper that does not exist yet.
     let staged_now: Vec<String> =
@@ -355,6 +346,23 @@ fn the_board_is_built_incrementally_through_legal_partial_states() {
                     .all(|entry| entry.get("blocker").is_some_and(Value::is_object))),
         "the incremental route must end at DRC 0 or with every open net carrying a blocker: {checked:#}"
     );
+
+    let copper = tool(&ctx, "get_board", json!({ "include_copper": true }));
+    let routed_net = copper["board"]["copper"]["tracks"]
+        .as_array()
+        .and_then(|tracks| tracks.first())
+        .and_then(|track| track["net"].as_str())
+        .expect("a routed track to delete")
+        .to_owned();
+    let deleted = tool(&ctx, "delete_copper", json!({ "net": routed_net.clone() }));
+    assert!(deleted["deleted"].as_u64().is_some_and(|count| count > 0));
+    assert!(
+        deleted["now_open"]
+            .as_array()
+            .is_some_and(|nets| nets.iter().any(|net| net == &routed_net)),
+        "deleting copper reports the net it intentionally opened: {deleted:#}"
+    );
+    tool(&ctx, "route_board", json!({ "nets": [routed_net] }));
 }
 
 /// Sixty LED-array passives plus their connector are placed once, then routed
