@@ -637,6 +637,49 @@ mod tests {
         );
     }
 
+    #[test]
+    fn touching_tracks_on_two_nets_are_a_short_even_beside_staged_geometry() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("board.kicad_pcb");
+        std::fs::write(
+            &path,
+            r#"(kicad_pcb
+ (layers (0 "F.Cu" signal) (31 "B.Cu" signal) (44 "Edge.Cuts" user))
+ (net 0 "") (net 1 "A") (net 2 "B") (net 3 "C") (net 4 "D")
+ (gr_rect (start 0 0) (end 40 40) (layer "Edge.Cuts"))
+ (footprint "Test:Pad" (layer "F.Cu") (at 5 5)
+   (property "Reference" "R1")
+   (property "gordian:staged_reason" "unplaced" (at 0 0) (layer "F.Fab") (hide yes))
+   (pad "1" smd rect (at 0 0) (size 2 2) (layers "F.Cu") (net 1 "A")))
+ (footprint "Test:Pad" (layer "F.Cu") (at 5 5)
+   (property "Reference" "R2")
+   (pad "1" smd rect (at 0 0) (size 2 2) (layers "F.Cu") (net 2 "B")))
+ (footprint "Test:Pad" (layer "F.Cu") (at 20 10)
+   (property "Reference" "R3")
+   (pad "1" smd rect (at 0 0) (size 2 2) (layers "F.Cu") (net 3 "C")))
+ (footprint "Test:Pad" (layer "F.Cu") (at 20 30)
+   (property "Reference" "R4")
+   (pad "1" smd rect (at 0 0) (size 2 2) (layers "F.Cu") (net 4 "D")))
+ (segment (start 20 10) (end 30 10) (width 0.25) (layer "F.Cu") (net 3))
+ (segment (start 20 30) (end 30 10) (width 0.25) (layer "F.Cu") (net 4)))"#,
+        )
+        .unwrap();
+        let board = kicad_board::read_snapshot(&path).unwrap();
+        let defects = Defects::of(&board).0;
+
+        assert_eq!(
+            defects.shorts,
+            BTreeSet::from([("C".to_owned(), "D".to_owned())]),
+            "staged pads are excluded, but copper that genuinely touches is still a short"
+        );
+        let before = Defects::default();
+        assert_eq!(
+            introduced(&before, &defects, &[]).shorts,
+            [&("C".to_owned(), "D".to_owned())],
+            "the guard refuses an edit that introduces it"
+        );
+    }
+
     fn short(a: &str, b: &str) -> (String, String) {
         (a.to_owned(), b.to_owned())
     }
