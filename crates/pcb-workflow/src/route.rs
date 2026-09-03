@@ -312,6 +312,18 @@ fn route_live_board(
     bbox: Option<geom::Rect>,
 ) -> std::result::Result<Value, Value> {
     let board = crate::active_board(ctx).map_err(refusal)?;
+    let schematic_changes = crate::sync::schematic_net_changes(ctx, &board).map_err(refusal)?;
+    if !schematic_changes.is_empty() {
+        return Err(json!({
+            "error": format!(
+                "run sync_board first (schematic changed: nets {})",
+                schematic_changes.join(", ")
+            ),
+            "code": "board_net_table_stale",
+            "schematic_changed": { "nets": schematic_changes },
+            "next_tool": "sync_board",
+        }));
+    }
     // A partially placed board routes what it can. The nets that reach a part
     // still in the staging row are the exception: copper drawn into the seed
     // row would have to be ripped again the moment the part is placed, so those
@@ -388,7 +400,7 @@ fn route_live_board(
                 .collect();
             if let Some(unknown) = nets.iter().find(|n| !known.contains(n.as_str())) {
                 return Err(refusal(format!(
-                    "no net named {unknown} on this board; get_board lists the board's nets"
+                    "no net named {unknown} on this board; run sync_board first if the schematic changed, otherwise get_board lists the board's nets"
                 )));
             }
             let mut view = board.problem.clone();
@@ -492,7 +504,8 @@ fn route_live_board(
     // reads worse afterwards, so a surviving prune is already known clean.
     let pruned_spurs = prune_dangling_spurs_if_safe(&rp, &mut result);
     let plane_nets = rp.plane_nets.keys().cloned().collect();
-    let (dropped, final_violations) = make_route_honest_with_report(&rp, &mut result, &plane_nets);
+    let (dropped, final_violations) =
+        make_route_honest_with_report(&rp, &mut result, &plane_nets, &kept_nets);
     // The promise a LOCAL call makes is that copper it did not select is left
     // alone. The honesty pass answers a dirty net by dropping ALL of its copper,
     // and it judges the merged board — so it can delete a route this call never
@@ -525,7 +538,7 @@ fn route_live_board(
 
     replace_route_atomically(ctx, &rp, &result.solution, &board.layer_names, existing)
         .map_err(|e| refusal(format!("could not write route to the board: {e}")))?;
-    let fallback_plane_nets =
+    let plane_validation =
         validate_written_plane_routes(ctx, &solve_view, &rp, &board.layer_names, &mut result)?;
 
     // A connection can acquire more than one failure reason as the route is
@@ -602,9 +615,11 @@ fn route_live_board(
             &board.imported.parts,
             &rp,
             &result.solution,
-            &fallback_plane_nets,
+            &plane_validation.track_fallback,
+            &plane_validation.unreached_pads,
         ),
-        "plane_track_fallback": fallback_plane_nets,
+        "plane_track_fallback": plane_validation.track_fallback,
+        "plane_unreached": plane_validation.unreached,
         // What this call actually replaced. A scoped route rewrites only the
         // named nets' copper, so reporting the whole board's would say it threw
         // away work it in fact kept.
@@ -635,13 +650,20 @@ fn route_live_board(
     }))
 }
 
+#[derive(Debug, Default)]
+struct PlaneValidation {
+    track_fallback: BTreeSet<String>,
+    unreached: Vec<Value>,
+    unreached_pads: BTreeSet<String>,
+}
+
 fn validate_written_plane_routes(
     ctx: &AgentRuntime,
     solve_view: &RoutingView,
     full_view: &RoutingView,
     layer_names: &[String],
     result: &mut RouteResult,
-) -> std::result::Result<BTreeSet<String>, Value> {
+) -> std::result::Result<PlaneValidation, Value> {
     let routed_planes = solve_view
         .connections
         .iter()
@@ -649,7 +671,7 @@ fn validate_written_plane_routes(
         .map(|connection| connection.name.clone())
         .collect::<BTreeSet<_>>();
     if routed_planes.is_empty() {
-        return Ok(BTreeSet::new());
+        return Ok(PlaneValidation::default());
     }
     let path = ctx.pcb_path();
     crate::export::materialize_zones_for_drc(&path, ctx.env())
@@ -660,7 +682,7 @@ fn validate_written_plane_routes(
         .map_err(|error| refusal(format!("could not validate routed copper zones: {error}")))?;
     let rejected = physical_plane_defects(&report, routed_planes.iter());
     if rejected.is_empty() {
-        return Ok(BTreeSet::new());
+        return Ok(PlaneValidation::default());
     }
 
     let fallback = route_rejected_planes(solve_view, result, &rejected);
@@ -677,17 +699,63 @@ fn validate_written_plane_routes(
         ))
     })?;
     let remaining = physical_plane_defects(&report, rejected.iter());
-    if !remaining.is_empty() {
-        return Err(json!({
-            "error": format!(
-                "route_board could not prove connectivity for plane net(s) {} after refill and track fallback; no route was kept",
-                remaining.iter().cloned().collect::<Vec<_>>().join(", ")
-            ),
-            "code": "plane_connectivity_unproven",
-            "nets": remaining,
-        }));
+    let unsafe_fallback = physical_plane_rule_defects(&report, remaining.iter());
+    if !unsafe_fallback.is_empty() {
+        drop_solution_nets(&mut result.solution, &unsafe_fallback);
+        replace_route_atomically(ctx, full_view, &result.solution, layer_names, (1, 0))
+            .map_err(|error| refusal(format!("could not remove unsafe plane fallback: {error}")))?;
+        crate::export::materialize_zones_for_drc(&path, ctx.env()).map_err(|error| {
+            refusal(format!(
+                "could not refill zones after removing unsafe plane fallback: {error}"
+            ))
+        })?;
     }
-    Ok(fallback)
+    for net in &remaining {
+        append_failed(
+            result,
+            net,
+            "the copper pour reaches only part of this plane net after refill; clean connected pads were kept and unreached pads remain in the ratsnest",
+        );
+    }
+    let written = crate::active_board(ctx).map_err(refusal)?;
+    let mut unreached_pads = BTreeSet::new();
+    let mut unreached = Vec::new();
+    for violation in &report.unconnected_items {
+        for item in &violation.items {
+            let Some((pad, net, at)) =
+                crate::diagnose::pad_handle(&written.imported.parts, &item.description)
+            else {
+                continue;
+            };
+            if !remaining.contains(&net) || !unreached_pads.insert(pad.clone()) {
+                continue;
+            }
+            unreached.push(json!({
+                "net": net,
+                "pad": pad,
+                "status": "blocked",
+                "blocker": {
+                    "kind": "zone",
+                    "owner_ref": Value::Null,
+                    "net": net,
+                    "layer": written.problem.plane_nets.get(&net)
+                        .and_then(|layer| written.layer_names.get(*layer as usize)),
+                    "at": [at.x, at.y],
+                    "gap_mm": 0.0,
+                    "need_mm": written.problem.clearance,
+                },
+                "escapes": [
+                    format!("route_track a short fanout from {pad} to a legal stitching via"),
+                    format!("move_parts to open copper-pour access around {pad}, then refill_zones"),
+                ],
+            }));
+        }
+    }
+    Ok(PlaneValidation {
+        track_fallback: fallback.difference(&remaining).cloned().collect(),
+        unreached,
+        unreached_pads,
+    })
 }
 
 fn physical_plane_defects<'a>(
@@ -704,6 +772,27 @@ fn physical_plane_defects<'a>(
                 .iter()
                 .filter(|violation| !crate::export::is_non_copper(violation)),
         )
+        .flat_map(|violation| {
+            violation.items.iter().flat_map(|item| {
+                item.description
+                    .split('[')
+                    .skip(1)
+                    .filter_map(|tail| tail.split_once(']').map(|(net, _)| net.to_owned()))
+            })
+        })
+        .filter(|net| planes.contains(net))
+        .collect()
+}
+
+fn physical_plane_rule_defects<'a>(
+    report: &kicad::DrcReport,
+    plane_nets: impl IntoIterator<Item = &'a String>,
+) -> BTreeSet<String> {
+    let planes = plane_nets.into_iter().cloned().collect::<BTreeSet<_>>();
+    report
+        .violations
+        .iter()
+        .filter(|violation| !crate::export::is_non_copper(violation))
         .flat_map(|violation| {
             violation.items.iter().flat_map(|item| {
                 item.description
@@ -771,6 +860,7 @@ fn plane_pad_report(
     problem: &RoutingView,
     solution: &RouteSolution,
     fallback: &BTreeSet<String>,
+    unreached: &BTreeSet<String>,
 ) -> Vec<Value> {
     parts
         .iter()
@@ -800,6 +890,11 @@ fn plane_pad_report(
                     "net": net,
                     "at": [pad.at.x, pad.at.y],
                     "via_pour": via_pour,
+                    "status": if unreached.contains(&format!("{}.{}", part.reference, pad.number)) {
+                        "unreached"
+                    } else {
+                        "reached"
+                    },
                 }))
             })
         })
@@ -896,16 +991,21 @@ fn make_route_honest_with_report(
     rp: &RoutingView,
     result: &mut RouteResult,
     plane_nets: &BTreeSet<String>,
+    protected_nets: &BTreeSet<String>,
 ) -> (Vec<String>, Vec<DrcViolation>) {
     let mut dropped = Vec::new();
     let mut violations = lint(rp, &result.solution);
     // Each round drops at least one net that still has copper, and copper never
     // comes back, so the net count bounds the loop.
     for _ in 0..=rp.connections.len() {
-        let disconnected = defective_nets(&violations, plane_nets);
+        let disconnected = defective_nets(&violations, plane_nets)
+            .difference(protected_nets)
+            .cloned()
+            .collect::<BTreeSet<_>>();
         let violating: BTreeSet<String> = violations
             .iter()
             .flat_map(geometry_violation_nets)
+            .filter(|net| !protected_nets.contains(net))
             .collect();
         let reason = |net: &String| {
             if violating.contains(net) {
@@ -929,7 +1029,11 @@ fn make_route_honest_with_report(
         }
         violations = lint(rp, &result.solution);
     }
-    for net in defective_nets(&violations, plane_nets) {
+    for net in defective_nets(&violations, plane_nets)
+        .difference(protected_nets)
+        .cloned()
+        .collect::<Vec<_>>()
+    {
         append_failed(
             result,
             &net,
@@ -947,7 +1051,7 @@ fn make_route_honest(
     result: &mut RouteResult,
     plane_nets: &BTreeSet<String>,
 ) -> Vec<String> {
-    make_route_honest_with_report(rp, result, plane_nets).0
+    make_route_honest_with_report(rp, result, plane_nets, &BTreeSet::new()).0
 }
 
 /// The nets whose copper the connectivity oracle says must go.
@@ -3960,12 +4064,69 @@ mod escape_bottleneck_tests {
             "OUT_OF_SCOPE",
             "not in this call's `nets`, and it had no copper to keep",
         );
-        let (_, remaining) = make_route_honest_with_report(&problem, &mut result, &planes);
+        let (_, remaining) =
+            make_route_honest_with_report(&problem, &mut result, &planes, &BTreeSet::new());
         let split = lint_summary_from_violations(&remaining, &result.failed, &planes);
 
         assert_eq!(split.real, 0, "{remaining:?}");
         assert_eq!(split.expected_gaps, 1);
         assert_eq!(result.solution.traces.len(), 1, "the routed net is kept");
+    }
+
+    #[test]
+    fn local_route_honesty_never_drops_protected_partial_copper() {
+        let point = |x| pcb_model::RoutePoint {
+            x,
+            y: 1.0,
+            layer: LayerRef::top(),
+        };
+        let problem = RoutingView {
+            layer_count: 2,
+            min_trace_width: 0.2,
+            obstacles: vec![],
+            connections: vec![pcb_model::Connection {
+                name: "GND".to_owned(),
+                points_to_connect: vec![point(1.0), point(5.0), point(9.0)],
+            }],
+            bounds: pcb_model::Rect::new(0.0, 0.0, 10.0, 4.0),
+            clearance: 0.2,
+            via_diameter: 0.6,
+            via_drill: 0.3,
+            net_widths: Default::default(),
+            outline: None,
+            escape_layers: Default::default(),
+            plane_nets: Default::default(),
+            fixed_copper: Default::default(),
+            nets: None,
+        };
+        let mut result = RouteResult {
+            engine: "test".to_owned(),
+            failed: vec![],
+            solution: RouteSolution {
+                traces: vec![Trace {
+                    connection: "GND".to_owned(),
+                    layer: LayerRef::top(),
+                    width: 0.2,
+                    path: vec![Point2::new(1.0, 1.0), Point2::new(5.0, 1.0)],
+                }],
+                vias: vec![],
+            },
+        };
+
+        let (_, remaining) = make_route_honest_with_report(
+            &problem,
+            &mut result,
+            &BTreeSet::new(),
+            &BTreeSet::from(["GND".to_owned()]),
+        );
+
+        assert!(has_copper(&result.solution, "GND"));
+        assert!(remaining.iter().any(|finding| matches!(
+            finding,
+            DrcViolation::Connectivity {
+                violation: ConnViolation::Unconnected { connection, .. },
+            } if connection == "GND"
+        )));
     }
 
     /// `route_board{nets}` is the repair loop after a `move_parts`, so the
@@ -4058,7 +4219,8 @@ mod escape_bottleneck_tests {
         };
         let planes = BTreeSet::new();
 
-        let (dropped, remaining) = make_route_honest_with_report(&problem, &mut result, &planes);
+        let (dropped, remaining) =
+            make_route_honest_with_report(&problem, &mut result, &planes, &BTreeSet::new());
 
         assert_eq!(dropped, vec!["A", "B", "C"]);
         assert!(result.solution.traces.is_empty());
@@ -4116,7 +4278,8 @@ mod escape_bottleneck_tests {
             }
         )));
 
-        let (dropped, remaining) = make_route_honest_with_report(&problem, &mut result, &planes);
+        let (dropped, remaining) =
+            make_route_honest_with_report(&problem, &mut result, &planes, &BTreeSet::new());
         assert_eq!(
             dropped,
             vec!["V3V3".to_string()],

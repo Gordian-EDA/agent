@@ -65,6 +65,18 @@ impl BoardIntent {
         hints.groups.extend(self.hints.groups);
         hints.keep_near.extend(self.hints.keep_near);
     }
+
+    /// Drop references that are not on the current board while preserving the
+    /// usable portion of a model-authored intent.
+    pub(crate) fn retain_references(&mut self, known: &BTreeSet<String>) {
+        self.hints
+            .keep_near
+            .retain(|pair| pair.iter().all(|reference| known.contains(reference)));
+        for group in &mut self.hints.groups {
+            group.members.retain(|reference| known.contains(reference));
+        }
+        self.hints.groups.retain(|group| !group.members.is_empty());
+    }
 }
 
 /// Read the `intent` field of a tool input. Absent intent is empty intent.
