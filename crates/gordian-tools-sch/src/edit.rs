@@ -14,6 +14,129 @@ use crate::refs;
 use crate::session::{Allow, Edit, symbol_source};
 use crate::wiring::{spot_beside, spot_near};
 
+#[derive(Debug)]
+enum FootprintRepair {
+    Keep,
+    Resolve {
+        from: String,
+        to: String,
+    },
+    Clear {
+        requested: String,
+        did_you_mean: Vec<String>,
+    },
+}
+
+#[derive(Debug, Serialize)]
+struct ResolvedFootprint {
+    #[serde(rename = "ref")]
+    refdes: String,
+    from: String,
+    to: String,
+}
+
+#[derive(Debug, Serialize)]
+struct UnresolvedFootprint {
+    #[serde(rename = "ref")]
+    refdes: String,
+    requested: String,
+    did_you_mean: Vec<String>,
+}
+
+/// Turn footprint lookup and pad compatibility into repairable metadata.
+fn footprint_repair(
+    ctx: &AgentRuntime,
+    reference: &str,
+    symbol: &str,
+    requested: &str,
+) -> Result<FootprintRepair> {
+    if let Some(did_you_mean) =
+        gordian_runtime::footprint_compat::unresolved_footprint_suggestions(ctx, symbol, requested)?
+    {
+        let requested_library = requested.split_once(':').map(|(library, _)| library);
+        let mut compatible = did_you_mean
+            .iter()
+            .filter(|candidate| {
+                requested_library.is_some_and(|library| {
+                    candidate
+                        .split_once(':')
+                        .is_some_and(|(candidate_library, _)| candidate_library == library)
+                })
+            })
+            .filter(|candidate| {
+                gordian_runtime::footprint_compat::footprint_compatibility(ctx, symbol, candidate)
+                    .is_ok_and(|verdict| verdict.compatible)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        compatible.sort();
+        compatible.dedup();
+        if compatible.len() == 1 {
+            return Ok(FootprintRepair::Resolve {
+                from: requested.to_owned(),
+                to: compatible.remove(0),
+            });
+        }
+        return Ok(FootprintRepair::Clear {
+            requested: requested.to_owned(),
+            did_you_mean,
+        });
+    }
+
+    let Some(mismatch) = gordian_runtime::footprint_compat::assignment_pin_mismatch(
+        ctx, reference, symbol, requested,
+    )?
+    else {
+        return Ok(FootprintRepair::Keep);
+    };
+    if mismatch.suggestion_compatible
+        && let Some(to) = mismatch.suggestion
+    {
+        return Ok(FootprintRepair::Resolve {
+            from: requested.to_owned(),
+            to,
+        });
+    }
+    Ok(FootprintRepair::Clear {
+        requested: requested.to_owned(),
+        did_you_mean: mismatch.suggestion.into_iter().collect(),
+    })
+}
+
+fn attach_footprint_repairs(
+    value: &mut Value,
+    resolved: &[ResolvedFootprint],
+    unresolved: &[UnresolvedFootprint],
+) {
+    match resolved {
+        [] => {}
+        [resolution] => {
+            value["footprint_resolved"] = json!({
+                "from": resolution.from,
+                "to": resolution.to,
+            });
+        }
+        resolutions => value["footprints_resolved"] = json!(resolutions),
+    }
+    if unresolved.is_empty() {
+        return;
+    }
+    value["footprints_unresolved"] = json!(unresolved);
+    value["gaps"] = json!(
+        unresolved
+            .iter()
+            .map(|issue| json!({
+                "kind": "footprint_unresolved",
+                "refdes": issue.refdes,
+                "suggestion": format!(
+                    "assign a compatible footprint to {} with assign_footprints",
+                    issue.refdes
+                ),
+            }))
+            .collect::<Vec<_>>()
+    );
+}
+
 /// The next unused designator with this prefix, e.g. `R` → `R7`.
 /// The lowest free designator with `prefix`, stepping over both the sheet's own
 /// references and every one `reserve_refs` promised another caller.
@@ -589,7 +712,7 @@ fn place_one(
 
 /// Place a block of new parts in one transaction, each clear of the last.
 pub fn add_symbols(input: Value, ctx: &AgentRuntime) -> Result<Value> {
-    let specs: Vec<Value> = input
+    let mut specs: Vec<Value> = input
         .get("parts")
         .and_then(Value::as_array)
         .cloned()
@@ -597,8 +720,8 @@ pub fn add_symbols(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     if specs.is_empty() {
         return Ok(json!({ "error": "add_symbols needs a non-empty `parts` list" }));
     }
-    let mut footprint_mismatch = Vec::new();
-    for spec in &specs {
+    let mut footprint_repairs = Vec::new();
+    for (index, spec) in specs.iter_mut().enumerate() {
         let Some(symbol) = spec.get("lib_id").and_then(Value::as_str) else {
             continue;
         };
@@ -606,19 +729,19 @@ pub fn add_symbols(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             continue;
         };
         let reference = spec.get("ref").and_then(Value::as_str).unwrap_or(symbol);
-        if let Some(mismatch) = gordian_runtime::footprint_compat::assignment_pin_mismatch(
-            ctx, reference, symbol, footprint,
-        )? {
-            footprint_mismatch.push(mismatch.payload());
+        let repair = footprint_repair(ctx, reference, symbol, footprint)?;
+        match &repair {
+            FootprintRepair::Keep => {}
+            FootprintRepair::Resolve { to, .. } => {
+                spec["footprint"] = json!(to);
+            }
+            FootprintRepair::Clear { .. } => {
+                spec.as_object_mut()
+                    .expect("an add_symbols part is an object")
+                    .remove("footprint");
+            }
         }
-    }
-    if !footprint_mismatch.is_empty() {
-        return Ok(json!({
-            "ok": false,
-            "code": "invalid_payload",
-            "footprint_mismatch": footprint_mismatch,
-            "note": "symbol/footprint compatibility is checked before symbols are added; suggestions preserve the requested footprint library and package family",
-        }));
+        footprint_repairs.push((index, repair));
     }
     let mut edit = Edit::open(ctx)?;
     let source = symbol_source(ctx);
@@ -649,6 +772,29 @@ pub fn add_symbols(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             refs.clone(),
             &format!("ADDED  {}", refs.join(" ")),
         )?;
+        let mut resolved = Vec::new();
+        let mut unresolved = Vec::new();
+        for (index, repair) in footprint_repairs {
+            let refdes = placed[index]["ref"]
+                .as_str()
+                .expect("a placed symbol has a reference")
+                .to_owned();
+            match repair {
+                FootprintRepair::Keep => {}
+                FootprintRepair::Resolve { from, to } => {
+                    resolved.push(ResolvedFootprint { refdes, from, to });
+                }
+                FootprintRepair::Clear {
+                    requested,
+                    did_you_mean,
+                } => unresolved.push(UnresolvedFootprint {
+                    refdes,
+                    requested,
+                    did_you_mean,
+                }),
+            }
+        }
+        attach_footprint_repairs(&mut result, &resolved, &unresolved);
     }
     Ok(result)
 }
@@ -1980,31 +2126,23 @@ pub fn swap_symbol(input: Value, ctx: &AgentRuntime) -> Result<Value> {
                     .filter(|footprint| !footprint.is_empty())
             })
         });
-    if let Some(footprint) = selected_footprint {
-        match gordian_runtime::footprint_compat::assignment_pin_mismatch(
-            ctx, refdes, lib_id, &footprint,
-        ) {
-            Ok(Some(mismatch)) => {
-                return Ok(json!({
-                    "error": "symbol/footprint mismatch; nothing was written",
-                    "code": "invalid_payload",
-                    "footprint_mismatch": [mismatch.payload()],
-                }));
-            }
-            Ok(None) => {}
-            Err(error) if input.get("footprint").is_some() => {
-                return Ok(json!({
-                    "error": format!("{refdes}: footprint `{footprint}` could not be used: {error}"),
-                }));
-            }
-            Err(_) => {}
+    let footprint_repair = selected_footprint
+        .as_deref()
+        .map(|footprint| footprint_repair(ctx, refdes, lib_id, footprint))
+        .transpose()?;
+    if let Some(text) = input.get("value").and_then(Value::as_str) {
+        for (_, uuid) in &units {
+            edit.doc.set_field(uuid, "Value", text)?;
         }
     }
-    for (key, field) in [("value", "Value"), ("footprint", "Footprint")] {
-        if let Some(text) = input.get(key).and_then(Value::as_str) {
-            for (_, uuid) in &units {
-                edit.doc.set_field(uuid, field, text)?;
-            }
+    if let Some(repair) = &footprint_repair {
+        let footprint = match repair {
+            FootprintRepair::Keep => selected_footprint.as_deref().unwrap_or_default(),
+            FootprintRepair::Resolve { to, .. } => to,
+            FootprintRepair::Clear { .. } => "",
+        };
+        for (_, uuid) in &units {
+            edit.doc.set_field(uuid, "Footprint", footprint)?;
         }
     }
 
@@ -2122,6 +2260,27 @@ pub fn swap_symbol(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             [refdes],
             &format!("SWAPPED  {refdes} → {lib_id}"),
         )?;
+        let mut resolved = Vec::new();
+        let mut unresolved = Vec::new();
+        match footprint_repair {
+            Some(FootprintRepair::Resolve { from, to }) => {
+                resolved.push(ResolvedFootprint {
+                    refdes: refdes.to_owned(),
+                    from,
+                    to,
+                });
+            }
+            Some(FootprintRepair::Clear {
+                requested,
+                did_you_mean,
+            }) => unresolved.push(UnresolvedFootprint {
+                refdes: refdes.to_owned(),
+                requested,
+                did_you_mean,
+            }),
+            Some(FootprintRepair::Keep) | None => {}
+        }
+        attach_footprint_repairs(&mut result, &resolved, &unresolved);
     }
     Ok(result)
 }
