@@ -904,8 +904,9 @@ ERC, DRC, or connectivity claims from pixels."""
         payload["choices"][0]["message"].get("content") or ""
     )
     score = verdict.get("score")
-    worst = verdict.get("worst_three")
-    changes = verdict.get("what_a_human_would_change")
+    # A judge with nothing to add answers `null`, which is an empty list.
+    worst = verdict.get("worst_three") or []
+    changes = verdict.get("what_a_human_would_change") or []
     if not isinstance(score, int) or isinstance(score, bool) or not 1 <= score <= 10:
         raise ValueError(f"invalid human-look score: {score!r}")
     if not isinstance(worst, list) or not all(isinstance(item, str) for item in worst):
