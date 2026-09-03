@@ -2,17 +2,21 @@
 //!
 //! A board is built incrementally, so a legal board has parts nobody has placed
 //! yet. They live in the seed row `sync_board` writes above the outline — the
-//! row IS the staging area, there is no second flag — and this module reads
-//! that row back as facts the tools report: who is staged, why, and who is
-//! placed or locked.
+//! existing staging-reason annotation records row membership and explains why
+//! each part remains there. This module reads that state back as facts the
+//! tools report: who is staged, why, and who is placed or locked.
 //!
 //! Staged parts are excluded from the DRC verdict and from fabrication export:
 //! copper that does not exist yet is work outstanding, not a violation.
 
 use std::collections::BTreeSet;
 
+use geom::Point2;
 use kicad_board::{BoardSnapshot, ImportedPart};
 use serde_json::{Value, json};
+
+/// Clear space kept between provisional footprint envelopes.
+pub(crate) const STAGING_GAP_MM: f64 = 1.0;
 
 /// Why a part is still in the staging row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -96,17 +100,31 @@ pub(crate) fn rect_json(rect: geom::Rect) -> Value {
 
 /// Bounding box of a footprint's physical courtyard or pads at its saved pose.
 pub(crate) fn part_extent(part: &ImportedPart) -> Option<geom::Rect> {
-    if let Some(local) = part.courtyard {
-        return Some(crate::place::courtyard_at(
+    part_local_extent(part).map(|local| {
+        crate::place::courtyard_at(
             local,
             part.at,
             f64::from(part.rotation),
             part.side == kicad_board::BoardSide::Back,
-        ));
+        )
+    })
+}
+
+/// A footprint's courtyard-or-pad envelope in its own unrotated coordinates.
+pub(crate) fn part_local_extent(part: &ImportedPart) -> Option<geom::Rect> {
+    if let Some(local) = part.courtyard {
+        return Some(local);
     }
+    let back = part.side == kicad_board::BoardSide::Back;
     part.pads.iter().fold(None, |extent, pad| {
-        let half = (pad.size.x / 2.0, pad.size.y / 2.0);
-        let pad = geom::Rect::from_center_half(pad.at, half);
+        let mut local = Point2::new(pad.at.x - part.at.x, pad.at.y - part.at.y)
+            .rotate(-f64::from(part.rotation));
+        if back {
+            local.x = -local.x;
+        }
+        let half = Point2::new(pad.size.x / 2.0, pad.size.y / 2.0)
+            .rotated_half_extents(f64::from(part.rotation));
+        let pad = geom::Rect::from_center_half(local, (half.x, half.y));
         Some(match extent {
             None => pad,
             Some(current) => geom::Rect::new(
@@ -146,24 +164,19 @@ pub(crate) fn outside_json(
 
 /// Every part still in the staging row, with the reason it is there.
 ///
-/// Membership is the seed row or a still-live staging annotation. The
-/// annotation keeps a partial state recognizable when an auto outline grows
-/// past its original minimum coordinate; placement clears it when the part
-/// leaves staging.
+/// The staging-reason annotation is membership as well as explanation, so
+/// resizing an auto outline cannot accidentally turn staged geometry into
+/// placed geometry. Placement clears the annotation when the part leaves the
+/// row.
 pub(crate) fn staged(board: &BoardSnapshot) -> Vec<StagedPart> {
-    let row: BTreeSet<String> = kicad_board::seed_row_references(&board.imported)
-        .into_iter()
-        .collect();
     board
         .imported
         .parts
         .iter()
         .filter(|part| {
-            row.contains(&part.reference)
-                || part
-                    .property(kicad_board::STAGED_REASON)
-                    .and_then(StagedReason::parse)
-                    .is_some()
+            part.property(kicad_board::STAGED_REASON)
+                .and_then(StagedReason::parse)
+                .is_some()
         })
         .map(|part| StagedPart {
             reference: part.reference.clone(),
@@ -276,14 +289,13 @@ mod tests {
     use super::*;
 
     fn board_with(annotations: &[kicad_board::Annotation]) -> BoardSnapshot {
-        let row_y = kicad_board::seed_row_y(0.0);
         let mut text = String::from(
             "(kicad_pcb\n\t(layers\n\t\t(0 \"F.Cu\" signal)\n\t\t(2 \"B.Cu\" signal)\n\t\t(44 \"Edge.Cuts\" user)\n\t)\n\t(gr_rect\n\t\t(start 0 0)\n\t\t(end 40 40)\n\t\t(layer \"Edge.Cuts\")\n\t)\n",
         );
         for (index, reference) in ["R1", "R2"].iter().enumerate() {
-            let x = kicad_board::seed_row_x(0.0, index);
+            let x = 2.0 + index as f64 * 4.0;
             text.push_str(&format!(
-                "\t(footprint \"L:R\"\n\t\t(layer \"F.Cu\")\n\t\t(at {x} {row_y})\n\t\t(property \"Reference\" \"{reference}\"\n\t\t\t(at 0 0 0)\n\t\t)\n\t)\n"
+                "\t(footprint \"L:R\"\n\t\t(layer \"F.Cu\")\n\t\t(at {x} -2)\n\t\t(property \"Reference\" \"{reference}\"\n\t\t\t(at 0 0 0)\n\t\t)\n\t)\n"
             ));
         }
         // A part nothing staged: laid out in the middle of the board.
@@ -298,10 +310,13 @@ mod tests {
     }
 
     #[test]
-    fn the_seed_row_is_the_staging_area_and_carries_its_reason() {
-        let board = board_with(&[kicad_board::Annotation::new("R2")
-            .set(kicad_board::STAGED_REASON, "footprint_mismatch")
-            .set(kicad_board::STAGED_DETAIL, "pin 3 has no pad")]);
+    fn staging_annotations_record_membership_and_reason() {
+        let board = board_with(&[
+            kicad_board::Annotation::new("R1").set(kicad_board::STAGED_REASON, "unplaced"),
+            kicad_board::Annotation::new("R2")
+                .set(kicad_board::STAGED_REASON, "footprint_mismatch")
+                .set(kicad_board::STAGED_DETAIL, "pin 3 has no pad"),
+        ]);
         let state = BoardState::of(&board);
 
         assert_eq!(state.staged_references(), ["R1", "R2"]);
@@ -319,7 +334,10 @@ mod tests {
             kicad_board::Annotation::new("U1")
                 .locked(true)
                 .set(kicad_board::LOCKED_REASON, "mechanical"),
-            kicad_board::Annotation::new("R1").locked(true),
+            kicad_board::Annotation::new("R1")
+                .locked(true)
+                .set(kicad_board::STAGED_REASON, "unplaced"),
+            kicad_board::Annotation::new("R2").set(kicad_board::STAGED_REASON, "unplaced"),
         ]);
         let state = BoardState::of(&board);
 

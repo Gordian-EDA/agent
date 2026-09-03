@@ -26,7 +26,7 @@ use serde_json::{Value, json};
 use gordian_runtime::AgentRuntime;
 use kicad_board::BoardSnapshot;
 use pcb_model::Finding as DrcViolation;
-use pcb_model::{Point2, Polygon, Violation};
+use pcb_model::{Connection, LayerRef, Point2, Polygon, RoutePoint, Violation};
 
 use crate::diagnose::{Fault, FaultKey, faults};
 
@@ -53,7 +53,7 @@ impl Defects {
         // geometry in `copper`, and once as the bounding boxes KiCAD hands over
         // as router keep-outs. Lint the geometry; a diagonal trace's bounding
         // box swallows foreign pads and would read as a short that is not there.
-        let mut problem = board.problem.clone();
+        let mut problem = problem_without_staged_geometry(board);
         crate::route::remove_existing_copper_obstacles(&mut problem);
         let violations = pcb_engine::check(&problem, &board.copper);
         let mut defects = Defects::default();
@@ -82,6 +82,48 @@ impl Defects {
         defects.copper_outside_outline = containment.copper_outside_keys;
         (defects, explained)
     }
+}
+
+/// Remove provisional footprints from the connectivity oracle's geometry.
+fn problem_without_staged_geometry(board: &BoardSnapshot) -> pcb_model::RoutingView {
+    let staged = crate::staging::staged_references(board);
+    if staged.is_empty() {
+        return board.problem.clone();
+    }
+    let mut problem = board.problem.clone();
+    problem.obstacles.retain(|obstacle| {
+        obstacle
+            .kind
+            .strip_prefix("pad:")
+            .is_none_or(|reference| !staged.contains(reference))
+    });
+    let mut points = BTreeMap::<String, Vec<RoutePoint>>::new();
+    for part in board
+        .imported
+        .parts
+        .iter()
+        .filter(|part| !staged.contains(&part.reference))
+    {
+        for pad in &part.pads {
+            let Some(net) = pad.net.as_ref() else {
+                continue;
+            };
+            points.entry(net.clone()).or_default().push(RoutePoint {
+                x: pad.at.x,
+                y: pad.at.y,
+                layer: pad.layers.first().cloned().unwrap_or_else(LayerRef::top),
+            });
+        }
+    }
+    problem.connections = points
+        .into_iter()
+        .filter(|(_, points)| points.len() >= 2)
+        .map(|(name, points_to_connect)| Connection {
+            name,
+            points_to_connect,
+        })
+        .collect();
+    problem
 }
 
 /// Physical geometry that crosses a board outline.
@@ -559,6 +601,40 @@ mod tests {
         )
         .unwrap();
         kicad_board::read_snapshot(&path).unwrap()
+    }
+
+    #[test]
+    fn staged_pads_are_excluded_while_placed_pad_shorts_remain_guarded() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("board.kicad_pcb");
+        std::fs::write(
+            &path,
+            r#"(kicad_pcb
+ (layers (0 "F.Cu" signal) (31 "B.Cu" signal) (44 "Edge.Cuts" user))
+ (net 0 "") (net 1 "A") (net 2 "B") (net 3 "C") (net 4 "D")
+ (gr_rect (start 0 0) (end 30 30) (layer "Edge.Cuts"))
+ (footprint "Test:Pad" (layer "F.Cu") (at 5 5)
+   (property "Reference" "R1")
+   (property "gordian:staged_reason" "unplaced" (at 0 0) (layer "F.Fab") (hide yes))
+   (pad "1" smd rect (at 0 0) (size 2 2) (layers "F.Cu") (net 1 "A")))
+ (footprint "Test:Pad" (layer "F.Cu") (at 5 5)
+   (property "Reference" "R2")
+   (pad "1" smd rect (at 0 0) (size 2 2) (layers "F.Cu") (net 2 "B")))
+ (footprint "Test:Pad" (layer "F.Cu") (at 15 15)
+   (property "Reference" "R3")
+   (pad "1" smd rect (at 0 0) (size 2 2) (layers "F.Cu") (net 3 "C")))
+ (footprint "Test:Pad" (layer "F.Cu") (at 15 15)
+   (property "Reference" "R4")
+   (pad "1" smd rect (at 0 0) (size 2 2) (layers "F.Cu") (net 4 "D"))))"#,
+        )
+        .unwrap();
+        let board = kicad_board::read_snapshot(&path).unwrap();
+        let defects = Defects::of(&board).0;
+
+        assert_eq!(
+            defects.shorts,
+            BTreeSet::from([("C".to_owned(), "D".to_owned())])
+        );
     }
 
     fn short(a: &str, b: &str) -> (String, String) {

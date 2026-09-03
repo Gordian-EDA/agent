@@ -218,21 +218,25 @@ pub(super) fn plan_seed_board(
         },
         SeedBounds::Auto => Point2 { x: 0.0, y: 0.0 },
     };
-    let mut x = kicad_board::seed_row_x(seed_origin.x, 0);
-    let y = kicad_board::seed_row_y(seed_origin.y);
+    let mut right = seed_origin.x;
     for dp in &spec.parts {
         let source = footprint_source(&dp.reference, &dp.footprint, catalog)?;
+        let local = staging_envelope(&dp.footprint, &source);
+        let (staged_at, next_right) = next_staging_pose(local, right, seed_origin.y);
         parts.push(SeedFootprint {
             reference: dp.reference.clone(),
             value: dp.value.clone(),
             lib_id: dp.footprint.clone(),
             source,
             pad_nets: dp.pad_nets.clone(),
-            at: dp.locked.as_ref().map(|l| l.at).unwrap_or(Point2 { x, y }),
+            at: dp.locked.as_ref().map(|l| l.at).unwrap_or(staged_at),
             rotation: dp.locked.as_ref().map(|l| l.rotation).unwrap_or(0.0),
             locked: dp.locked.is_some(),
+            staged: dp.locked.is_none(),
         });
-        x += kicad_board::SEED_ROW_PITCH;
+        if dp.locked.is_none() {
+            right = next_right;
+        }
     }
     let (effective_rules, rule_notes) = effective_seed_rules(&spec.rules, &parts);
     let sizing = crate::sizing::size_board(
@@ -391,6 +395,7 @@ struct SeedFootprint {
     at: Point2,
     rotation: f64,
     locked: bool,
+    staged: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -799,6 +804,7 @@ pub(super) fn emit_board_footprint(
     at: Point2,
     rotation: f64,
     locked: bool,
+    staged: bool,
     catalog: &FootprintCatalog,
     net_codes: &BTreeMap<String, i32>,
 ) -> std::result::Result<String, String> {
@@ -812,8 +818,35 @@ pub(super) fn emit_board_footprint(
         at,
         rotation,
         locked,
+        staged,
     };
     emit_seed_footprint(&seed, net_codes).map_err(|e| format!("part {}: {e}", part.reference))
+}
+
+/// Place one newly added footprint after the current staging-row right edge.
+pub(super) fn staging_pose(
+    part: &SeedPart,
+    catalog: &FootprintCatalog,
+    right: f64,
+    outline_top: f64,
+) -> std::result::Result<(Point2, f64), String> {
+    let source = footprint_source(&part.reference, &part.footprint, catalog)?;
+    let local = staging_envelope(&part.footprint, &source);
+    Ok(next_staging_pose(local, right, outline_top))
+}
+
+fn staging_envelope(lib_id: &str, source: &str) -> Rect {
+    kicad_footprint::Footprint::parse_str(lib_id, source)
+        .map(|footprint| crate::place::placement_envelope(&footprint))
+        .unwrap_or(Rect::new(-1.25, -1.25, 1.25, 1.25))
+}
+
+fn next_staging_pose(local: Rect, right: f64, outline_top: f64) -> (Point2, f64) {
+    let at = Point2::new(
+        right + crate::staging::STAGING_GAP_MM - local.min_x,
+        outline_top - crate::staging::STAGING_GAP_MM - local.max_y,
+    );
+    (at, at.x + local.max_x)
 }
 
 fn is_817_family(part: &SeedFootprint) -> bool {
@@ -904,6 +937,15 @@ fn emit_seed_footprint(
             fmt_num(part.at.x),
             fmt_num(part.at.y),
             rot
+        );
+    }
+    if part.staged {
+        out.push_str(
+            "\t\t(property \"gordian:staged_reason\" \"unplaced\"\n\
+             \t\t\t(at 0 0 0)\n\
+             \t\t\t(layer \"F.Fab\")\n\
+             \t\t\t(hide yes)\n\
+             \t\t)\n",
         );
     }
 
@@ -1881,6 +1923,7 @@ mod tests {
             Point2::new(2.0, 2.25),
             0.0,
             false,
+            true,
             &catalog,
             &BTreeMap::new(),
         )
@@ -2004,6 +2047,7 @@ mod tests {
             at: Point2 { x: 5.0, y: 5.0 },
             rotation: 0.0,
             locked: false,
+            staged: false,
         }];
         let bounds = Rect {
             min_x: 0.0,
@@ -2029,6 +2073,30 @@ mod tests {
         assert!(board.contains("(xy 0 0) (xy 20 0) (xy 20 10) (xy 0 10)"));
     }
 
+    #[test]
+    fn staging_uses_real_envelopes_outside_the_outline() {
+        let first = Rect::new(-12.0, -3.0, 5.0, 4.0);
+        let second = Rect::new(-2.0, -8.0, 18.0, 6.0);
+        let (first_at, first_right) = next_staging_pose(first, 0.0, 0.0);
+        let (second_at, _) = next_staging_pose(second, first_right, 0.0);
+        let first_world = Rect::new(
+            first.min_x + first_at.x,
+            first.min_y + first_at.y,
+            first.max_x + first_at.x,
+            first.max_y + first_at.y,
+        );
+        let second_world = Rect::new(
+            second.min_x + second_at.x,
+            second.min_y + second_at.y,
+            second.max_x + second_at.x,
+            second.max_y + second_at.y,
+        );
+
+        assert!(first_world.max_y < 0.0);
+        assert!(second_world.max_y < 0.0);
+        assert!(second_world.min_x - first_world.max_x >= crate::staging::STAGING_GAP_MM);
+    }
+
     fn clearance_fixture(source: &str) -> SeedFootprint {
         SeedFootprint {
             reference: "U1".to_string(),
@@ -2039,6 +2107,7 @@ mod tests {
             at: Point2 { x: 5.0, y: 5.0 },
             rotation: 0.0,
             locked: false,
+            staged: false,
         }
     }
 
@@ -2129,6 +2198,7 @@ mod tests {
                 at: Point2 { x: 0.0, y: 0.0 },
                 rotation: 0.0,
                 locked: false,
+                staged: false,
             })
             .collect();
         let bounds = Rect::new(0.0, 0.0, 90.0, 58.0);
@@ -2164,6 +2234,7 @@ mod tests {
                 at: Point2 { x: 0.0, y: 0.0 },
                 rotation: 0.0,
                 locked: false,
+                staged: false,
             })
             .collect();
         let bounds = Rect::new(0.0, 0.0, 90.0, 58.0);
@@ -2193,6 +2264,7 @@ mod tests {
             at: Point2 { x: 5.0, y: 5.0 },
             rotation: 0.0,
             locked: false,
+            staged: false,
         }];
         let bounds = Rect::new(0.0, 0.0, 20.0, 10.0);
         let rules = SeedRules {
@@ -2328,6 +2400,7 @@ mod tests {
             at: Point2 { x: 5.0, y: 5.0 },
             rotation: 90.0,
             locked: false,
+            staged: false,
         };
         let board = SeedBoardWriter::new(
             &[part],
@@ -2374,6 +2447,7 @@ mod tests {
             at: Point2 { x: 0.0, y: 0.0 },
             rotation: 0.0,
             locked: false,
+            staged: false,
         };
         assert!(connector_function_property(inner, &part).is_none());
 

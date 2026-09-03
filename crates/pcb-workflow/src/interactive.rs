@@ -561,6 +561,81 @@ fn nudge_overlaps(board: &mut MoveBoard, plan: &mut MovePlan, clearance: f64) {
     }
 }
 
+/// Recheck placer output against exact saved-footprint envelopes and nudge collisions.
+pub(super) fn nudge_placement_overlaps(
+    snapshot: &BoardSnapshot,
+    ctx: &AgentRuntime,
+    placements: Vec<FootprintPlacement>,
+    bounds: Rect,
+    outline: Option<&Polygon>,
+) -> std::result::Result<(Vec<FootprintPlacement>, Vec<Value>, Vec<Value>), String> {
+    let mut board = MoveBoard::from_snapshot(
+        snapshot,
+        &crate::place::courtyard_extents(snapshot, ctx),
+        &back_side_references(snapshot),
+    );
+    let moving = placements
+        .iter()
+        .map(|placement| placement.reference.as_str())
+        .collect::<BTreeSet<_>>();
+    board.bounds = bounds;
+    board.outline = outline.cloned();
+    let originals = board.parts.clone();
+    board
+        .parts
+        .retain(|reference, _| !moving.contains(reference.as_str()));
+
+    let mut accepted = Vec::new();
+    let mut nudged = Vec::new();
+    let mut unplaced = Vec::new();
+    for placement in placements {
+        let reference = placement.reference.clone();
+        let Some(mut part) = originals.get(&placement.reference).cloned() else {
+            unplaced.push(json!({
+                "ref": placement.reference,
+                "reason": "footprint extent was unavailable for exact placement validation",
+            }));
+            continue;
+        };
+        let requested = placement.at;
+        let rotation = placement.rotation_deg.unwrap_or(part.rotation);
+        part.at = requested;
+        part.rotation = rotation;
+        board.parts.insert(placement.reference.clone(), part);
+        let mut plan = MovePlan {
+            placements: vec![placement],
+            positions: vec![ResolvedPosition {
+                reference,
+                at: requested,
+                rotation,
+                read_as: "placement intent".to_owned(),
+                nudged_from: None,
+            }],
+            changed: 1,
+        };
+        nudge_overlaps(&mut board, &mut plan, snapshot.problem.clearance);
+        if illegal_move_error(&board, &plan, snapshot.problem.clearance).is_some() {
+            board.parts.remove(&plan.positions[0].reference);
+            unplaced.push(json!({
+                "ref": plan.positions[0].reference,
+                "requested_at": [requested.x, requested.y],
+                "reason": "no non-overlapping pad/courtyard position fit inside the outline",
+            }));
+            continue;
+        }
+        if let Some(from) = plan.positions[0].nudged_from {
+            nudged.push(json!({
+                "ref": plan.positions[0].reference,
+                "from": [from.x, from.y],
+                "to": [plan.positions[0].at.x, plan.positions[0].at.y],
+                "distance_mm": from.dist(plan.positions[0].at),
+            }));
+        }
+        accepted.push(plan.placements.remove(0));
+    }
+    Ok((accepted, nudged, unplaced))
+}
+
 const MOVE_SEARCH_GRID_MM: f64 = 0.25;
 
 fn nearest_legal_in_ring(

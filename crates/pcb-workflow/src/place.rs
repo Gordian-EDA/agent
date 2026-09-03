@@ -3171,6 +3171,7 @@ pub fn place_board(mut input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let outline_refit_skipped = auto_outline && routed_board;
     let mut outline_target = (auto_outline && !routed_board).then_some(problem.bounds);
     let mut applied_refs = Vec::new();
+    let mut placement_nudges = Vec::new();
     // A subset placement answers only for the parts it may move.
     let legal = match &refs {
         Some(_) => subset_is_legal(&problem, &result, &free),
@@ -3237,6 +3238,36 @@ pub fn place_board(mut input: Value, ctx: &AgentRuntime) -> Result<Value> {
                 }
                 fits
             });
+        }
+        let (nudged_moves, nudges, exact_unplaced) =
+            match crate::interactive::nudge_placement_overlaps(
+                &board,
+                ctx,
+                moves,
+                problem.bounds,
+                problem.outline.as_ref(),
+            ) {
+                Ok(validated) => validated,
+                Err(error) => {
+                    return Ok(json!({
+                        "error": format!(
+                            "could not validate intent placement against saved footprints: {error}"
+                        )
+                    }));
+                }
+            };
+        moves = nudged_moves;
+        placement_nudges = nudges;
+        placement_unplaced.extend(exact_unplaced);
+        for movement in &moves {
+            if let Some(placement) = result
+                .placements
+                .iter_mut()
+                .find(|placement| placement.reference == movement.reference)
+            {
+                placement.at = movement.at;
+                placement.rotation = movement.rotation_deg.unwrap_or(placement.rotation);
+            }
         }
         if auto_outline {
             outline_target = Some(bounds_containing_placement(
@@ -3450,6 +3481,9 @@ pub fn place_board(mut input: Value, ctx: &AgentRuntime) -> Result<Value> {
             "placed every selected footprint that fit; the reported remainder stays staged. \
              Repair missing footprints or apply suggested_bounds, then place those references again."
         );
+    }
+    if !placement_nudges.is_empty() {
+        out["placement_nudges"] = json!(placement_nudges);
     }
     if let Some(refs) = &refs {
         out["placed_refs"] = json!(applied_refs);
