@@ -292,24 +292,31 @@ fn drawing_bbox(placed: &[measure::Placed], parts: &[Part]) -> Rect {
 fn pack(sizes: &[(f64, f64)], pages: &[[f64; 2]]) -> Vec<Point2> {
     pages
         .iter()
-        .find_map(|page| fills(sizes, *page))
+        .find_map(|page| fills(sizes, *page, true))
+        .or_else(|| pages.last().and_then(|page| fills(sizes, *page, false)))
         .unwrap_or_else(|| loose(sizes))
 }
 
 /// Pack `sizes` into `page` (a usable box), returning the arrangement whose proportions
-/// best match the page's — or `None` when nothing fits inside it.
+/// best match the page's.
+///
+/// `strict` demands the arrangement fit inside the page, and gives `None` when none does.
+/// The largest page is then packed again without it, so a drawing no page holds still
+/// comes out with a page's proportions instead of as a ribbon several sheets wide.
 ///
 /// The author's block order is the sheet's signal flow, so it is tried first and kept
 /// whenever it fits; a reordering is only ever allowed to rescue a page the given order
 /// could not fill, never to shave an aspect error.
-fn fills(sizes: &[(f64, f64)], page: [f64; 2]) -> Option<Vec<Point2>> {
+fn fills(sizes: &[(f64, f64)], page: [f64; 2], strict: bool) -> Option<Vec<Point2>> {
     let target = page[0] / page[1].max(1.0);
     let room = [page[0] - ROUTING_ROOM, page[1] - ROUTING_ROOM];
     orders(sizes).into_iter().find_map(|order| {
         limits(sizes, room[0])
             .into_iter()
             .map(|limit| corner_pack(sizes, &order, limit))
-            .filter(|(_, w, h)| *w <= room[0] + geom::EPS && *h <= room[1] + geom::EPS)
+            .filter(|(_, w, h)| {
+                !strict || (*w <= room[0] + geom::EPS && *h <= room[1] + geom::EPS)
+            })
             .min_by(|a, b| aspect_error(a.1, a.2, target).total_cmp(&aspect_error(b.1, b.2, target)))
             .map(|(origins, ..)| origins)
     })
@@ -447,7 +454,7 @@ mod tests {
         let a4 = [271.6, 151.6];
         let a3 = [394.6, 238.6];
         let blocks = [(180.0, 100.0), (180.0, 100.0), (150.0, 100.0)];
-        assert!(fills(&blocks, a4).is_none(), "nothing this size fits A4");
+        assert!(fills(&blocks, a4, true).is_none(), "nothing this size fits A4");
         let origins = pack(&blocks, &[a4, a3]);
         let shelves: BTreeSet<i64> = origins.iter().map(|o| (o.y * 100.0) as i64).collect();
         assert_eq!(shelves.len(), 2, "three blocks on two shelves, not a column");
