@@ -376,7 +376,7 @@ impl SchematicWriter {
     /// adjacent rails never merge their names. `None` for `power:PWR_FLAG`,
     /// whose Value is hidden and has nothing to place.
     fn power_value_movable(&self, i: usize) -> Option<(sch_model::text::Movable, Apply)> {
-        use sch_model::text::{Movable, text_width};
+        use sch_model::text::Movable;
         let r2 = |v: f64| (v * 100.0).round() / 100.0;
         let inst = &self.instances[i];
         if inst.lib_id == "power:PWR_FLAG" {
@@ -385,35 +385,20 @@ impl SchematicWriter {
         let h = inst.half_extents.rotated_half_extents(inst.angle);
         let (cx, cy) = (inst.at[0], inst.at[1]);
         let (minx, miny, maxx, maxy) = (cx - h[0], cy - h[1], cx + h[0], cy + h[1]);
-        let vw = text_width(&inst.value);
-        let above = (
-            TextPos {
-                at: [r2(cx), r2(miny - 0.64)],
-                justify: Justify::Center,
-            },
-            [cx - vw / 2.0, miny - 2.24, cx + vw / 2.0, miny - 0.64].into(),
-        );
-        let below = (
-            TextPos {
-                at: [r2(cx), r2(maxy + 2.24)],
-                justify: Justify::Center,
-            },
-            [cx - vw / 2.0, maxy + 0.64, cx + vw / 2.0, maxy + 2.24].into(),
-        );
-        let right = (
-            TextPos {
-                at: [r2(maxx + 0.64), r2(cy + 0.8)],
-                justify: Justify::Left,
-            },
-            [maxx + 0.64, cy - 0.8, maxx + 0.64 + vw, cy + 0.8].into(),
-        );
-        let left = (
-            TextPos {
-                at: [r2(minx - 0.64), r2(cy + 0.8)],
-                justify: Justify::Right,
-            },
-            [minx - 0.64 - vw, cy - 0.8, minx - 0.64, cy + 0.8].into(),
-        );
+        // Each candidate is the anchor the writer will emit, boxed by the model
+        // that measures what KiCAD then draws there — so a spot the solver
+        // approves is a spot the readability lint clears.
+        let seat = |at: [f64; 2], justify: Justify| {
+            let pos = TextPos {
+                at: [r2(at[0]), r2(at[1])],
+                justify,
+            };
+            (pos, field_box(pos.at, justify, &inst.value))
+        };
+        let above = seat([cx, miny - 0.64], Justify::Center);
+        let below = seat([cx, maxy + 2.24], Justify::Center);
+        let right = seat([maxx + 0.64, cy + 0.8], Justify::Left);
+        let left = seat([minx - 0.64, cy + 0.8], Justify::Right);
         // A 180-rotated power symbol points down (GND family): the
         // name goes below the graphic; otherwise above.
         let cands = if inst.angle == 180.0 {
@@ -442,130 +427,58 @@ impl SchematicWriter {
         let h = inst.half_extents.rotated_half_extents(inst.angle);
         let (cx, cy) = (inst.at[0], inst.at[1]);
         let (minx, miny, maxx, maxy) = (cx - h[0], cy - h[1], cx + h[0], cy + h[1]);
-        let vw = text_width(&inst.value);
-        let rw = text_width(&inst.refdes);
-        let wmax = rw.max(vw);
-        // Each candidate: (ref anchor, val anchor, union bbox). Text is
-        // bottom-anchored and 1.6 tall, so a line anchored at Y occupies
-        // [Y-1.6, Y].
-        let right = (
-            TextPos {
-                at: [r2(maxx + 1.27), r2(cy - 1.27)],
-                justify: Justify::Left,
-            },
-            TextPos {
-                at: [r2(maxx + 1.27), r2(cy + 1.27)],
-                justify: Justify::Left,
-            },
-            [maxx + 1.27, cy - 2.87, maxx + 1.27 + wmax, cy + 1.27].into(),
+        // Each candidate is the pair of anchors the writer will emit, boxed by
+        // the model that measures what KiCAD then draws there — so a spot the
+        // solver approves is a spot the readability lint clears.
+        let seat = |ref_at: [f64; 2], val_at: [f64; 2], justify: Justify| {
+            let (rp, vp) = (
+                TextPos {
+                    at: [r2(ref_at[0]), r2(ref_at[1])],
+                    justify,
+                },
+                TextPos {
+                    at: [r2(val_at[0]), r2(val_at[1])],
+                    justify,
+                },
+            );
+            let (a, b) = (
+                field_box(rp.at, justify, &inst.refdes),
+                field_box(vp.at, justify, &inst.value),
+            );
+            let union = Rect::new(
+                a.min_x.min(b.min_x),
+                a.min_y.min(b.min_y),
+                a.max_x.max(b.max_x),
+                a.max_y.max(b.max_y),
+            );
+            (rp, vp, union)
+        };
+        let right = seat(
+            [maxx + 1.27, cy - 1.27],
+            [maxx + 1.27, cy + 1.27],
+            Justify::Left,
         );
-        let left = (
-            TextPos {
-                at: [r2(minx - 1.27), r2(cy - 1.27)],
-                justify: Justify::Right,
-            },
-            TextPos {
-                at: [r2(minx - 1.27), r2(cy + 1.27)],
-                justify: Justify::Right,
-            },
-            [minx - 1.27 - wmax, cy - 2.87, minx - 1.27, cy + 1.27].into(),
+        let left = seat(
+            [minx - 1.27, cy - 1.27],
+            [minx - 1.27, cy + 1.27],
+            Justify::Right,
         );
-        let above = (
-            TextPos {
-                at: [r2(cx), r2(miny - 3.18)],
-                justify: Justify::Center,
-            },
-            TextPos {
-                at: [r2(cx), r2(miny - 0.64)],
-                justify: Justify::Center,
-            },
-            [cx - wmax / 2.0, miny - 4.78, cx + wmax / 2.0, miny - 0.64].into(),
-        );
-        let below = (
-            TextPos {
-                at: [r2(cx), r2(maxy + 2.24)],
-                justify: Justify::Center,
-            },
-            TextPos {
-                at: [r2(cx), r2(maxy + 4.78)],
-                justify: Justify::Center,
-            },
-            [cx - wmax / 2.0, maxy + 0.64, cx + wmax / 2.0, maxy + 4.78].into(),
-        );
+        let above = seat([cx, miny - 3.18], [cx, miny - 0.64], Justify::Center);
+        let below = seat([cx, maxy + 2.24], [cx, maxy + 4.78], Justify::Center);
         // Corner fallbacks for crowded symbols (an IC whose four sides all
         // carry labels/power): the field pair tucks against a body corner.
-        let above_left = (
-            TextPos {
-                at: [r2(minx), r2(miny - 3.18)],
-                justify: Justify::Left,
-            },
-            TextPos {
-                at: [r2(minx), r2(miny - 0.64)],
-                justify: Justify::Left,
-            },
-            [minx, miny - 4.78, minx + wmax, miny - 0.64].into(),
-        );
-        let above_right = (
-            TextPos {
-                at: [r2(maxx), r2(miny - 3.18)],
-                justify: Justify::Right,
-            },
-            TextPos {
-                at: [r2(maxx), r2(miny - 0.64)],
-                justify: Justify::Right,
-            },
-            [maxx - wmax, miny - 4.78, maxx, miny - 0.64].into(),
-        );
-        let below_left = (
-            TextPos {
-                at: [r2(minx), r2(maxy + 2.24)],
-                justify: Justify::Left,
-            },
-            TextPos {
-                at: [r2(minx), r2(maxy + 4.78)],
-                justify: Justify::Left,
-            },
-            [minx, maxy + 0.64, minx + wmax, maxy + 4.78].into(),
-        );
-        let below_right = (
-            TextPos {
-                at: [r2(maxx), r2(maxy + 2.24)],
-                justify: Justify::Right,
-            },
-            TextPos {
-                at: [r2(maxx), r2(maxy + 4.78)],
-                justify: Justify::Right,
-            },
-            [maxx - wmax, maxy + 0.64, maxx, maxy + 4.78].into(),
-        );
+        let above_left = seat([minx, miny - 3.18], [minx, miny - 0.64], Justify::Left);
+        let above_right = seat([maxx, miny - 3.18], [maxx, miny - 0.64], Justify::Right);
+        let below_left = seat([minx, maxy + 2.24], [minx, maxy + 4.78], Justify::Left);
+        let below_right = seat([maxx, maxy + 2.24], [maxx, maxy + 4.78], Justify::Right);
         // Last-resort FAR bands (pushed ~5 mm further out): when a body is
         // ringed by packed neighbours — a tight decoupling cluster on a dense
         // board — every near spot is blocked and the solver would fall onto a
         // sibling's label/field. A far band clears it (the text reads a touch
         // detached but never overlaps). Appended LAST for both ICs and passives,
         // so a part with any near free spot is unaffected.
-        let above_far = (
-            TextPos {
-                at: [r2(cx), r2(miny - 8.18)],
-                justify: Justify::Center,
-            },
-            TextPos {
-                at: [r2(cx), r2(miny - 5.64)],
-                justify: Justify::Center,
-            },
-            [cx - wmax / 2.0, miny - 9.78, cx + wmax / 2.0, miny - 5.64].into(),
-        );
-        let below_far = (
-            TextPos {
-                at: [r2(cx), r2(maxy + 5.64)],
-                justify: Justify::Center,
-            },
-            TextPos {
-                at: [r2(cx), r2(maxy + 8.18)],
-                justify: Justify::Center,
-            },
-            [cx - wmax / 2.0, maxy + 5.64, cx + wmax / 2.0, maxy + 9.78].into(),
-        );
+        let above_far = seat([cx, miny - 8.18], [cx, miny - 5.64], Justify::Center);
+        let below_far = seat([cx, maxy + 5.64], [cx, maxy + 8.18], Justify::Center);
         // Multi-pin parts (ICs) carry refdes+value on a HORIZONTAL band
         // (above/below the body), the reference convention — a long MPN
         // ("SN74LVC2T45DCUR") on a band clears the horizontal series
@@ -1198,11 +1111,13 @@ mod tests {
             first_after_near_bands.max_y < 80.0 || first_after_near_bands.min_y > 120.0,
             "ICs should try far above/below bands before side fields; got {first_after_near_bands:?}"
         );
+        // The body spans y 80..120; a field band may graze its edge by the
+        // stroke the glyphs are painted with, but never ride the pin text.
         assert!(
             movable
                 .candidates
                 .iter()
-                .all(|c| c.max_y < 80.0 || c.min_y > 120.0),
+                .all(|c| c.max_y < 80.1 || c.min_y > 119.9),
             "IC fields should never use side bands over pin text: {:?}",
             movable.candidates
         );
