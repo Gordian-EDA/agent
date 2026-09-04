@@ -141,10 +141,36 @@ fn replace_frames(doc: &mut SchDoc, sheet: &SchDoc) {
     if frames.is_empty() {
         return;
     }
+    // A block redrawn somewhere else leaves a frame that overlaps nothing, so overlap
+    // alone never catches it — which is how a sheet ends up with three captioned boxes
+    // and no parts in any of them. The caption identifies the block, so a rectangle
+    // wearing a caption this sheet is about to redraw goes with it, wherever it sits.
+    const LINE: f64 = 5.08;
+    let recaptioned: Vec<geom::Rect> = doc
+        .items()
+        .iter()
+        .filter_map(|item| match item {
+            sch_doc::Item::Text(t) if captions.contains(t.text.as_str()) => Some(t.at.point()),
+            _ => None,
+        })
+        .flat_map(|at| {
+            doc.items().iter().filter_map(move |item| match item {
+                sch_doc::Item::Rectangle(r) => {
+                    let f = geom::Rect::from_points(r.start, r.end);
+                    ((at.x - f.min_x).abs() <= LINE
+                        && at.y >= f.min_y - LINE
+                        && at.y <= f.max_y + LINE)
+                        .then_some(f)
+                }
+                _ => None,
+            })
+        })
+        .collect();
     doc.retain_drawing(|item| match item {
-        sch_doc::Item::Rectangle(r) => !frames
-            .iter()
-            .any(|f| f.overlaps(&geom::Rect::from_points(r.start, r.end))),
+        sch_doc::Item::Rectangle(r) => {
+            let f = geom::Rect::from_points(r.start, r.end);
+            !frames.iter().any(|n| n.overlaps(&f)) && !recaptioned.contains(&f)
+        }
         sch_doc::Item::Text(t) => !captions.contains(t.text.as_str()),
         _ => true,
     });
