@@ -23,21 +23,13 @@ use sch_model::item::{Incidence, Item};
 use sch_model::place::PlaceResult;
 
 use crate::floorplan::place::{RoutedEvaluator, RoutedSheetRealizer, incidence};
-use sch_model::geometry::body_rect;
-
-/// Space left between the content already on a sheet and a block placed beside it.
-const BLOCK_MARGIN: f64 = 10.0 * geom::GRID_50_MIL.pitch();
+use sch_flex::pack::{BLOCK_GAP, FRAME_PAD, landings};
+use sch_model::geometry::{body_rect, item_rect};
 
 /// The width-to-height ratio a sheet aims for: a landscape page's usable area.
 const SHEET_ASPECT: f64 = 1.5;
 /// Step of the legalisation walk (100 mil — two schematic grid steps).
 const WALK: f64 = 2.0 * geom::GRID_50_MIL.pitch();
-/// How far a whole BLOCK may be slid to find free sheet. A block legitimately travels the
-/// width of the sheet: it is being added beside content that is already there.
-const BLOCK_RINGS: i32 = 60;
-/// Step of the block slide. Coarser than [`WALK`] because a block is looking for a free
-/// REGION, not for a grid cell, and 60 rings of it reach 762 mm — past any page.
-const BLOCK_WALK: f64 = 10.0 * geom::GRID_50_MIL.pitch();
 /// How far a single part may be nudged once its block has landed. A local repair: a part
 /// walked further than this is no longer part of the block the engine arranged, and the
 /// islands that produced were the sheet's worst defect.
@@ -103,73 +95,146 @@ impl<'a> RegionProblem<'a> {
     }
 }
 
-/// The box `items` occupy, over their symbol bodies.
-fn content_bbox(items: &[Item]) -> Option<Rect> {
-    let pts: Vec<Point2> = items
-        .iter()
-        .flat_map(|it| {
-            let r = body_rect(it, it.at);
-            [Point2::new(r.min_x, r.min_y), Point2::new(r.max_x, r.max_y)]
-        })
-        .collect();
-    Rect::bounding(&pts)
-}
-
-/// What is left of each standard page once `there` and the gap beside it are taken —
-/// where [`beside_the_fixed`] is about to put the new blocks. Pages with no room left
-/// simply drop out, so the typesetter tries the next size up.
-fn beside_pages(there: Rect) -> Vec<[f64; 2]> {
-    /// A strip narrower than this share of its page is not a page to pack for — aiming at
-    /// it would only stack the new blocks into a column. Such a sheet is full, and the
-    /// graft falls back to packing for a page's proportions and letting the fit grow it.
-    const USABLE_SHARE: f64 = 1.0 / 3.0;
-    let taken = there.max_x + BLOCK_MARGIN - geom::PAGE_MARGIN;
-    crate::write::usable_pages()
-        .into_iter()
-        .map(|page| {
-            (
-                page,
-                [
-                    page[0] - taken,
-                    page[1] - (there.min_y - geom::PAGE_MARGIN).max(0.0),
-                ],
-            )
-        })
-        .filter(|(page, room)| room[0] >= page[0] * USABLE_SHARE && room[1] > 0.0)
-        .map(|(_, room)| room)
-        .collect()
-}
-
-/// Slide a freshly typeset block clear of the content already on the sheet, so it starts
-/// beside it rather than on top of it — or under it, when beside would make a ribbon.
+/// The FRAME an item claims: its body, the band its reference/value text is solved into,
+/// and the air the realiser's dashed rectangle needs around a block.
 ///
-/// A design arrives one block per call, and putting each new one to the right of
-/// everything turns five blocks into a row 613 mm wide on a sheet 173 mm tall. Every one
-/// of 28 measured agent sheets came out between three and six times wider than it was
-/// tall, against the 1.4 of the paper it lands on. So the two placements are compared on
-/// the proportions they leave behind, and the better one wins.
-fn beside_the_fixed(movable: &mut [Item], fixed: &[Item]) {
-    let (Some(here), Some(there)) = (content_bbox(movable), content_bbox(fixed)) else {
+/// Packing to bare bodies is what puts two blocks' label columns on top of each other, so
+/// what a graft packs is the same rectangle the typesetter measured its own blocks by.
+fn frame_of(it: &Item) -> Rect {
+    let r = item_rect(it, it.at);
+    Rect::new(
+        r.min_x - FRAME_PAD,
+        r.min_y - FRAME_PAD,
+        r.max_x + FRAME_PAD,
+        r.max_y + FRAME_PAD,
+    )
+}
+
+fn union(a: &Rect, b: &Rect) -> Rect {
+    Rect::new(
+        a.min_x.min(b.min_x),
+        a.min_y.min(b.min_y),
+        a.max_x.max(b.max_x),
+        a.max_y.max(b.max_y),
+    )
+}
+
+fn hull(rects: &[Rect]) -> Option<Rect> {
+    rects.split_first().map(|(a, rest)| rest.iter().fold(*a, |h, r| union(&h, r)))
+}
+
+/// What the sheet is already using, as one rect per BLOCK: every part's frame and every
+/// obstacle, with overlapping ones merged.
+///
+/// A block's parts sit close enough that their frames touch, so merging recovers the
+/// blocks without the sheet having to record them; two blocks that were drawn apart stay
+/// apart, and the hole between them is a hole a new block may land in. Seating against a
+/// single hull of all of it — what this used to do — is what cost a row or a column of
+/// sheet per block added, whatever the block's own size.
+fn occupied(fixed: &[Item], obstacles: &[Rect]) -> Vec<Rect> {
+    let mut rects: Vec<Rect> = fixed
+        .iter()
+        .map(frame_of)
+        .chain(obstacles.iter().copied())
+        .collect();
+    let mut merged = true;
+    while merged {
+        merged = false;
+        let mut out: Vec<Rect> = Vec::with_capacity(rects.len());
+        for r in rects {
+            match out.iter_mut().find(|o| o.overlaps(&r)) {
+                Some(o) => {
+                    *o = union(o, &r);
+                    merged = true;
+                }
+                None => out.push(r),
+            }
+        }
+        rects = out;
+    }
+    rects
+}
+
+/// The boxes the new blocks may be typeset for: on each standard page, the larger of the
+/// two free strips `there` leaves — beside it and under it — and then the whole pages.
+///
+/// The strips come first so a block shapes itself to the room actually left; the whole
+/// pages follow so the list is never empty. An empty list is what dropped the typesetter
+/// into its no-page fallback, which packs a fixed 260 mm column whatever the sheet looks
+/// like — and a column is exactly what a nearly full sheet must not be handed.
+fn beside_pages(there: Rect) -> Vec<[f64; 2]> {
+    let right = there.max_x + BLOCK_GAP - geom::PAGE_MARGIN;
+    let under = there.max_y + BLOCK_GAP - geom::PAGE_MARGIN;
+    let strips = crate::write::usable_pages().into_iter().filter_map(|page| {
+        let beside = [page[0] - right, page[1]];
+        let below = [page[0], page[1] - under];
+        let room = if beside[0] * beside[1] >= below[0] * below[1] {
+            beside
+        } else {
+            below
+        };
+        (room[0] > 0.0 && room[1] > 0.0).then_some(room)
+    });
+    strips.chain(crate::write::usable_pages()).collect()
+}
+
+/// Seat the freshly typeset blocks in the free sheet among what is already drawn.
+///
+/// The landing is chosen from the same corner lattice the typesetter packs an empty page
+/// with ([`sch_flex::pack::landings`]) — beside and under every block already down, one
+/// [`sch_flex::pack::BLOCK_GAP`] apart, the same air a whole-sheet pack leaves — and the
+/// one that leaves the SMALLEST sheet on the smallest page it fits wins. So a new block
+/// fills the hole a short neighbour leaves instead of starting a column beside everything,
+/// and a sheet built one call at a time lands where the same blocks would have landed had
+/// they been packed together.
+///
+/// Seating against the single bounding box of all the content, which is what this did,
+/// cost a whole row or column of sheet per block: a 28x20 mm block grew the sheet by
+/// 12,815 mm². Nine blocks came out 2.9x the area the same nine pack into, and the
+/// sparsest agent sheets were exactly the ones built from the most calls.
+fn seat_beside(movable: &mut [Item], taken: &[Rect], drawn: &[Rect]) {
+    let frames: Vec<Rect> = movable.iter().map(frame_of).collect();
+    let (Some(here), false) = (hull(&frames), taken.is_empty()) else {
         return;
     };
-    let beside = Point2::new(
-        geom::GRID_50_MIL.snap(there.max_x + BLOCK_MARGIN - here.min_x),
-        geom::GRID_50_MIL.snap(there.min_y - here.min_y),
-    );
-    let below = Point2::new(
-        geom::GRID_50_MIL.snap(there.min_x - here.min_x),
-        geom::GRID_50_MIL.snap(there.max_y + BLOCK_MARGIN - here.min_y),
-    );
-    let spread = |d: Point2| {
-        let w = (there.max_x).max(here.max_x + d.x) - there.min_x.min(here.min_x + d.x);
-        let h = (there.max_y).max(here.max_y + d.y) - there.min_y.min(here.min_y + d.y);
-        ((w / h.max(1.0)) / SHEET_ASPECT).ln().abs()
+    let size = (here.width(), here.height());
+    // The sheet is what is DRAWN on it. An obstacle is something to keep off, not sheet
+    // the drawing claims: pricing the label columns and wire keepouts into the extent
+    // made a strip beside them look free and stretched the sheet into a ribbon.
+    let sheet = |at: &Point2| {
+        let r = Rect::new(at.x, at.y, at.x + size.0, at.y + size.1);
+        drawn.iter().fold(r, |h, o| union(&h, o))
     };
-    let delta = if spread(below) < spread(beside) {
-        below
-    } else {
-        beside
+    // Area with the sheet's proportions as a tie-break: two landings that grow the sheet
+    // by the same amount are not equally good, and the one that leaves a ribbon reads
+    // worse. A landing that fills a hole changes neither term, so it still wins outright.
+    let cost = |r: &Rect| {
+        let aspect = ((r.width() / r.height().max(1.0)) / SHEET_ASPECT).ln().abs();
+        r.width() * r.height() * (1.0 + aspect)
     };
+    let best = |limit: f64, page: Option<[f64; 2]>| {
+        landings(taken, size, limit, BLOCK_GAP)
+            .into_iter()
+            .filter(|at| {
+                page.is_none_or(|p| {
+                    let s = sheet(at);
+                    s.max_x <= geom::PAGE_MARGIN + p[0] + geom::EPS
+                        && s.max_y <= geom::PAGE_MARGIN + p[1] + geom::EPS
+                })
+            })
+            .min_by(|a, b| cost(&sheet(a)).total_cmp(&cost(&sheet(b))))
+    };
+    let landed = crate::write::usable_pages()
+        .into_iter()
+        .find_map(|page| best(page[0], Some(page)))
+        .or_else(|| best(f64::INFINITY, None));
+    let Some(at) = landed else { return };
+    // ONE snapped delta for the whole group: snapping each part independently would move
+    // them by different amounts and break the arrangement the typesetter just computed.
+    let delta = Point2::new(
+        geom::GRID_50_MIL.snap(at.x - here.min_x),
+        geom::GRID_50_MIL.snap(at.y - here.min_y),
+    );
     for it in movable {
         it.at = Point2::new(it.at.x + delta.x, it.at.y + delta.y);
     }
@@ -189,30 +254,27 @@ fn ring_offsets(ring: i32) -> Vec<(i32, i32)> {
     out
 }
 
-/// Move the movable set off every obstacle and fixed neighbour — as a BLOCK first.
+/// Repair what is still overlapping once the group has been seated.
 ///
-/// The engine arranged these parts together; walking each one out on its own is what
-/// shreds a block into islands hundreds of millimetres apart, which is exactly how a
-/// grafted sheet ends up 1168 mm wide with 90% of its area empty. So the block slides
-/// rigidly, keeping its internal geometry bit-for-bit, until its bounding box clears
-/// everything already on the sheet. Only what still overlaps AFTER that — movable parts
-/// colliding with each other, the engine's own business — gets the local per-part nudge,
-/// bounded to [`WALK_RINGS`].
+/// [`seat_beside`] lands the group in free sheet, so this is only ever the engine's own
+/// business: movable parts colliding with each other, or with an obstacle whose frame the
+/// seat could not price. Each is nudged locally, bounded to [`WALK_RINGS`] — a part walked
+/// further than that is no longer part of the block the engine arranged, and the islands
+/// that produced were the sheet's worst defect.
 ///
-/// Clearance is measured on [`body_rect`], the space the drawing occupies. The text pad
-/// is a claim the field solver may abandon, and pricing it here made a 5 mm phantom touch
+/// Clearance is measured on [`body_rect`], the space the drawing occupies. The text pad is
+/// a claim the field solver may abandon, and pricing it here made a 5 mm phantom touch
 /// worth a sheet-width of travel.
 ///
-/// Returns how many parts are still overlapping something when it is done. Both passes
-/// give up rather than fling a part across the sheet, so this is how the caller learns
-/// the sheet it is about to commit has a collision on it.
+/// Returns how many parts are still overlapping something when it is done. The walk gives
+/// up rather than fling a part across the sheet, so this is how the caller learns the
+/// sheet it is about to commit has a collision on it.
 fn legalize(movable: &mut [Item], fixed: &[Item], obstacles: &[Rect]) -> usize {
     let blockers: Vec<Rect> = fixed
         .iter()
         .map(|it| body_rect(it, it.at))
         .chain(obstacles.iter().copied())
         .collect();
-    slide_block(movable, &blockers);
     nudge_parts(movable, fixed, obstacles);
     movable
         .iter()
@@ -226,77 +288,6 @@ fn legalize(movable: &mut [Item], fixed: &[Item], obstacles: &[Rect]) -> usize {
                     .any(|(j, other)| j != *i && r.overlaps(&body_rect(other, other.at)))
         })
         .count()
-}
-
-/// Slide the whole movable set to the nearest offset where its bounding box clears every
-/// blocker. A clear bbox means every member is clear, so this is one rect test per
-/// candidate offset; a block already in free sheet does not move.
-///
-/// Among the offsets that clear, the one that leaves the SMALLEST sheet wins over the
-/// merely nearest: a block flung 700 mm sideways clears everything and costs the sheet a
-/// page size, which is the same defect measured from the other end. The search widens ring
-/// by ring and keeps the best landing of the first ring that has one, so it still stops as
-/// soon as the block has somewhere to go.
-fn slide_block(movable: &mut [Item], blockers: &[Rect]) {
-    let corners = |it: &Item| {
-        let r = body_rect(it, it.at);
-        [Point2::new(r.min_x, r.min_y), Point2::new(r.max_x, r.max_y)]
-    };
-    let Some(bbox) = Rect::bounding(&movable.iter().flat_map(corners).collect::<Vec<_>>()) else {
-        return;
-    };
-    let shifted = |dx: f64, dy: f64| {
-        Rect::new(
-            bbox.min_x + dx,
-            bbox.min_y + dy,
-            bbox.max_x + dx,
-            bbox.max_y + dy,
-        )
-    };
-    let clear = |r: &Rect| !blockers.iter().any(|o| r.overlaps(o));
-    if clear(&bbox) {
-        return;
-    }
-    // How much sheet the landing costs: the extent of everything on it afterwards.
-    let sheet = blockers.iter().fold(bbox, |acc, o| {
-        Rect::new(
-            acc.min_x.min(o.min_x),
-            acc.min_y.min(o.min_y),
-            acc.max_x.max(o.max_x),
-            acc.max_y.max(o.max_y),
-        )
-    });
-    let cost = |r: &Rect| {
-        let w = sheet.max_x.max(r.max_x) - sheet.min_x.min(r.min_x);
-        let h = sheet.max_y.max(r.max_y) - sheet.min_y.min(r.min_y);
-        w + h
-    };
-    // There is no sheet to the left of the origin: a block slid to a negative coordinate
-    // is drawn outside the frame, and the page fitter can only rescue it by sliding the
-    // block back — which it refuses to do when the block touches what is already drawn.
-    // So the landing must be on the page; only if nothing on the page is free does an
-    // off-page landing beat leaving the block on top of something.
-    let on_page = |r: &Rect| r.min_x >= geom::PAGE_MARGIN && r.min_y >= geom::PAGE_MARGIN;
-    let search = |page_only: bool| {
-        (1..=BLOCK_RINGS).find_map(|ring| {
-            ring_offsets(ring)
-                .into_iter()
-                .map(|(dx, dy)| (dx as f64 * BLOCK_WALK, dy as f64 * BLOCK_WALK))
-                .filter(|&(dx, dy)| {
-                    let r = shifted(dx, dy);
-                    clear(&r) && (!page_only || on_page(&r))
-                })
-                .min_by(|a, b| cost(&shifted(a.0, a.1)).total_cmp(&cost(&shifted(b.0, b.1))))
-        })
-    };
-    let landed = search(true).or_else(|| search(false));
-    let Some((dx, dy)) = landed else { return };
-    // ONE snapped delta for the whole block: snapping each part independently would move
-    // them by different amounts and break the arrangement the engine just searched for.
-    let (dx, dy) = (geom::GRID_50_MIL.snap(dx), geom::GRID_50_MIL.snap(dy));
-    for it in movable.iter_mut() {
-        it.at = Point2::new(it.at[0] + dx, it.at[1] + dy);
-    }
 }
 
 /// Nudge each still-overlapping movable part to the nearest clear grid position.
@@ -358,25 +349,24 @@ pub fn arrange(problem: RegionProblem) -> RegionOutput {
         it.preseeded = true;
     }
 
-    // What the new blocks may fill. An empty sheet is the typesetter's whole page; a graft
-    // gets only what is left of each page beside the content already on it, because
-    // `beside_the_fixed` below is about to slide the group past that content. Packing a
-    // graft for a WHOLE page would push the sheet onto a custom one — the 985x646 blue
-    // pill — and packing it for no page at all leaves the 260 mm column that made it.
-    let pages = match content_bbox(&fixed) {
-        None if obstacles.is_empty() => crate::write::usable_pages(),
-        None => Vec::new(),
+    // What the sheet is already using, one rect per block — and, from it, what the new
+    // blocks may be typeset for: the whole page ladder on an empty sheet, the free strips
+    // of each page on a sheet that already carries a drawing.
+    let taken = occupied(&fixed, &obstacles);
+    let drawn = occupied(&fixed, &[]);
+    let pages = match hull(&taken) {
+        None => crate::write::usable_pages(),
         Some(there) => beside_pages(there),
     };
     let typeset = sch_flex::typeset(&mut all, &ir.trees, &pages);
     // The typesetter lays a block out from the origin: it draws the block, not the sheet.
-    // On a sheet that already has content that is on top of what is there, so the new
-    // block starts BESIDE it — the slide below only has to fine-tune from there.
-    beside_the_fixed(&mut all[..movable], &fixed);
+    // On a sheet that already has content, that is on top of what is there, so the group
+    // is seated in the free sheet among the blocks already down.
+    seat_beside(&mut all[..movable], &taken, &drawn);
 
     // With nothing to avoid, the typeset arrangement is authoritative — walking parts
     // apart here would only undo the alignment it just computed.
-    let stuck = if obstacles.is_empty() && fixed.is_empty() {
+    let stuck = if taken.is_empty() {
         0
     } else {
         let (moved, held) = all.split_at_mut(movable);
@@ -389,7 +379,7 @@ pub fn arrange(problem: RegionProblem) -> RegionOutput {
         PlaceResult {
             truthfulness_breaks: eval.truthfulness_breaks(&all),
             // A part legalisation could not clear is a readability defect like any other,
-            // and the realiser cannot see it: both passes give up rather than fling a part
+            // and the realiser cannot see it: the walk gives up rather than fling a part
             // across the sheet, so this is the only place it is counted.
             warnings: eval.warnings(&all) + stuck,
             crossings: eval.crossings(&all),

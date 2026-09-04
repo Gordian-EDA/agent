@@ -23,22 +23,18 @@
 
 mod measure;
 mod orient;
+pub mod pack;
 mod part;
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use geom::{PAGE_MARGIN as MARGIN, Point2, Rect};
+use geom::{Point2, Rect};
 use sch_model::item::Item;
-use sch_model::tree::{Align, Axis, Container, Tree, Trees, UNIT_MM};
+use sch_model::tree::{Align, Axis, Container, Tree, Trees};
 
 use measure::typeset_block;
+use pack::{BLOCK_GAP, FRAME_PAD, corner_pack};
 use part::Part;
-
-/// Space between two blocks on the sheet, over and above [`FRAME_PAD`].
-const BLOCK_GAP: f64 = 6.0 * UNIT_MM;
-/// Room each block keeps outside its parts for the dashed frame the realiser draws around
-/// it and the field text the solver seats along its edge.
-const FRAME_PAD: f64 = 4.0 * UNIT_MM;
 /// The width-to-height ratio a graft aims for when no page is named — a landscape page's
 /// usable area.
 pub(crate) const SHEET_ASPECT: f64 = 1.5;
@@ -370,50 +366,6 @@ fn limits(sizes: &[(f64, f64)], page_width: f64) -> Vec<f64> {
     widths
 }
 
-/// Bottom-left packing of `sizes`, visited in `order`, into a box `limit` wide and
-/// unbounded in height: each block takes the lowest, then left-most corner that clears the
-/// blocks already down. Row-major shelves leave a dead band under every short block; a
-/// corner pack lets the next block slide up into it.
-///
-/// Returns the origins in the ORIGINAL index order, plus the finished sheet's extent.
-fn corner_pack(sizes: &[(f64, f64)], order: &[usize], limit: f64) -> (Vec<Point2>, f64, f64) {
-    let mut placed: Vec<Rect> = Vec::with_capacity(order.len());
-    let mut origins = vec![Point2::new(MARGIN, MARGIN); sizes.len()];
-    let (mut used_w, mut used_h) = (0.0f64, 0.0f64);
-    for &i in order {
-        let (w, h) = sizes[i];
-        let mut corners = vec![Point2::new(MARGIN, MARGIN)];
-        for r in &placed {
-            corners.push(Point2::new(r.max_x + BLOCK_GAP, r.min_y));
-            corners.push(Point2::new(r.min_x, r.max_y + BLOCK_GAP));
-            corners.push(Point2::new(r.max_x + BLOCK_GAP, MARGIN));
-            corners.push(Point2::new(MARGIN, r.max_y + BLOCK_GAP));
-        }
-        corners.sort_by(|a, b| a.y.total_cmp(&b.y).then(a.x.total_cmp(&b.x)));
-        let at = corners
-            .into_iter()
-            .find(|c| {
-                let r = Rect::new(c.x, c.y, c.x + w, c.y + h);
-                // A run that exactly fills the limit must not be pushed off it by dust.
-                r.max_x <= MARGIN + limit + geom::EPS
-                    && !placed.iter().any(|p| gapped(p).overlaps(&r))
-            })
-            .unwrap_or(Point2::new(MARGIN, used_h + MARGIN + BLOCK_GAP));
-        placed.push(Rect::new(at.x, at.y, at.x + w, at.y + h));
-        origins[i] = at;
-        used_w = used_w.max(at.x + w - MARGIN);
-        used_h = used_h.max(at.y + h - MARGIN);
-    }
-    (origins, used_w, used_h)
-}
-
-/// A placed block's rect grown by half the inter-block gap on every side, so two blocks
-/// that merely respect the gap do not read as overlapping.
-fn gapped(r: &Rect) -> Rect {
-    let m = BLOCK_GAP / 2.0 - geom::EPS;
-    Rect::new(r.min_x - m, r.min_y - m, r.max_x + m, r.max_y + m)
-}
-
 /// How far a packed sheet of `w` x `h` is from proportions of `target`. Logarithmic, so
 /// half as wide and twice as wide are the same defect — the linear form punished a tall
 /// sheet far less than a wide one, which is how a drawing ends up in a column.
@@ -424,18 +376,7 @@ fn aspect_error(w: f64, h: f64, target: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// A third block tucks into the band a short second block leaves beside a tall first,
-    /// instead of starting a row below both — the dead page a shelf pack cannot use.
-    #[test]
-    fn a_short_block_does_not_strand_the_page_under_it() {
-        let blocks = [(140.0, 90.0), (100.0, 30.0), (90.0, 50.0)];
-        let (origins, _, height) = corner_pack(&blocks, &[0, 1, 2], 247.62);
-        assert_eq!(origins[1].y, origins[0].y, "the short block sits beside the tall one");
-        assert_eq!(origins[2].x, origins[1].x, "and the third tucks under it");
-        assert!(origins[2].y > origins[1].y);
-        assert_eq!(height, 90.0, "all three inside the tall block's own band");
-    }
+    use geom::PAGE_MARGIN as MARGIN;
 
     /// With no page to fill, a pack wider than a page grows the paper, so a run that
     /// overflows loses to a taller sheet even when its proportions are better.
