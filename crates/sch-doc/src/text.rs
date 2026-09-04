@@ -57,14 +57,20 @@ pub fn unescape(text: &str) -> String {
 ///
 /// The decode table above is larger because KiCAD accepts all of it; in a label
 /// KiCAD itself writes nothing else, and neither does this.
+///
+/// A `{` opening one of KiCAD's markup runs — `~{…}` overbar, `^{…}` superscript,
+/// `_{…}` subscript — is left alone: `~{RST}` is how a sheet says active-low RST,
+/// and escaping its brace turns the name into the literal `~{brace}RST}`.
 pub fn escape(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
+    let mut previous = None;
     for ch in text.chars() {
         match ch {
             '/' => out.push_str("{slash}"),
-            '{' => out.push_str("{brace}"),
+            '{' if !matches!(previous, Some('~' | '^' | '_')) => out.push_str("{brace}"),
             _ => out.push(ch),
         }
+        previous = Some(ch);
     }
     out
 }
@@ -85,6 +91,17 @@ mod tests {
         for plain in ["A/B", "A{B", "{slash}", "plain"] {
             assert_eq!(unescape(&escape(plain)), plain);
         }
+    }
+
+    /// An overbarred name is markup, not an escape: `~{RST}` is what a sheet
+    /// writes for active-low RST, and it has to survive being written out.
+    #[test]
+    fn keeps_kicads_own_markup_runs() {
+        assert_eq!(escape("~{RST}"), "~{RST}");
+        assert_eq!(escape("D_{0}"), "D_{0}");
+        assert_eq!(escape("X^{2}"), "X^{2}");
+        assert_eq!(unescape(&escape("~{RST}")), "~{RST}");
+        assert_eq!(escape("A{B"), "A{brace}B");
     }
 
     /// Everything KiCAD leaves alone in a label, this leaves alone too.
