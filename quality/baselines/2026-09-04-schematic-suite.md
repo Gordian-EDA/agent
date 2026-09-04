@@ -246,3 +246,28 @@ of a consistency gain, and consistency is what the goal depends on.
 
 Day's arc on this suite: 1/14 at the sprint baseline, 0/14 once the statistic was corrected
 to the lower median, now 2/14.
+
+
+## `connect` was drawing the worst wires on the sheet
+
+An Arduino sheet carried 268 wires, 28 of them past `LONG_SIMPLE_LEN_MM`, the longest
+**770 mm** — rectangular loops across the whole page. That run never moved a symbol; it
+called `connect` 36 times. `connect` routed and drew whatever it could reach with no length
+or shape test, so the wire-versus-label judgement the placer applies everywhere else did not
+exist on the tool the model uses most. That is why the netlist-drawn dataset cases improved
+all day while the prompt cases sat at 5 and 6: the former are drawn by the placer, the
+latter are wired by `connect`.
+
+Past the cap the ends are joined by NAME. Measured, two runs each:
+
+| | before | after |
+| --- | --- | --- |
+| Arduino longest wire | 770 mm | 53 mm |
+| Arduino wires over the cap | 28 | 0 |
+| Arduino critic | 5, 5 | **7, 7** |
+| Blue Pill critic | 6, 6 | 6, 5 |
+
+**ERC 0 and zero unconnected pins on all four sheets** — the join still happens, by name
+instead of by line, which was the risk worth checking before believing any of the above.
+
+Arduino up two points with both attempts equal, Blue Pill down one inside the noise.
