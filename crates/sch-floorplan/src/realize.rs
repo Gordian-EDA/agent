@@ -74,21 +74,32 @@ pub fn realize_block(
 /// functional block — it is everything the author did not divide up — so it gets no
 /// frame; the drawing frame and title block already delimit the sheet.
 fn draw_block_frames(writer: &mut SchematicWriter, design: &Design, items: &[Item]) {
-    for (name, block) in &design.blocks {
-        if sch_model::result::synthesized_block(name) {
-            continue;
-        }
-        let members: Vec<String> = items
-            .iter()
-            .filter(|it| &it.block == name)
-            .map(|it| it.refdes.clone())
-            .collect();
-        if members.is_empty() {
-            continue;
-        }
-        let title = block.title.as_deref().unwrap_or(name);
-        writer.add_block_frame(title, block.note.as_deref(), &members);
-    }
+    let members: Vec<(&String, Vec<String>)> = design
+        .blocks
+        .keys()
+        .filter(|name| !sch_model::result::synthesized_block(name))
+        .map(|name| {
+            let refs = items
+                .iter()
+                .filter(|it| &it.block == name)
+                .map(|it| it.refdes.clone())
+                .collect();
+            (name, refs)
+        })
+        .collect();
+    let frames: Vec<crate::write::BlockFrame<'_>> = members
+        .iter()
+        .filter(|(_, refs)| !refs.is_empty())
+        .map(|(name, refs)| {
+            let block = &design.blocks[*name];
+            crate::write::BlockFrame {
+                title: block.title.as_deref().unwrap_or(name),
+                note: block.note.as_deref(),
+                members: refs,
+            }
+        })
+        .collect();
+    writer.add_block_frames(&frames);
 }
 
 /// Render a finished writer as a standalone document.
@@ -126,14 +137,20 @@ fn seated_uuids(doc: &SchDoc) -> BTreeSet<String> {
 /// caption sits just outside its rectangle and a geometric test orphans it. A block
 /// extended by a later call gets a new frame around the parts it now has, and the stale
 /// one must not survive beside it. Frames are decoration the realiser owns.
+/// A caption's text with its line breaks undone, so a note recognises its own
+/// older self even though the frame it wrapped to has since changed width.
+fn unwrapped(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 fn replace_frames(doc: &mut SchDoc, sheet: &SchDoc) {
     let mut frames: Vec<geom::Rect> = Vec::new();
-    let mut captions: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+    let mut captions: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     for item in sheet.items() {
         match item {
             sch_doc::Item::Rectangle(r) => frames.push(geom::Rect::from_points(r.start, r.end)),
             sch_doc::Item::Text(t) => {
-                captions.insert(t.text.as_str());
+                captions.insert(unwrapped(&t.text));
             }
             _ => {}
         }
@@ -150,7 +167,7 @@ fn replace_frames(doc: &mut SchDoc, sheet: &SchDoc) {
         .items()
         .iter()
         .filter_map(|item| match item {
-            sch_doc::Item::Text(t) if captions.contains(t.text.as_str()) => Some(t.at.point()),
+            sch_doc::Item::Text(t) if captions.contains(&unwrapped(&t.text)) => Some(t.at.point()),
             _ => None,
         })
         .flat_map(|at| {
@@ -171,7 +188,7 @@ fn replace_frames(doc: &mut SchDoc, sheet: &SchDoc) {
             let f = geom::Rect::from_points(r.start, r.end);
             !frames.iter().any(|n| n.overlaps(&f)) && !recaptioned.contains(&f)
         }
-        sch_doc::Item::Text(t) => !captions.contains(t.text.as_str()),
+        sch_doc::Item::Text(t) => !captions.contains(&unwrapped(&t.text)),
         _ => true,
     });
 }

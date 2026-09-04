@@ -776,15 +776,7 @@ impl SchematicWriter {
             acc(nc.at[0], nc.at[1], nc.at[0], nc.at[1]);
         }
         for t in &self.texts {
-            // `emit::render_text` writes notes `(justify left bottom)`.
-            let b = sch_model::text::note_box(
-                &t.text,
-                t.size,
-                Justify::Left.hjust(),
-                sch_model::text::VJust::Bottom,
-                0.0,
-                t.at,
-            );
+            let b = super::sheet_text_box(t);
             acc(b.min_x, b.min_y, b.max_x, b.max_y);
         }
         for r in &self.rects {
@@ -855,8 +847,13 @@ impl SchematicWriter {
     }
 
     /// Would a net label anchored at `at` facing `dir` read CLEAR of every
-    /// symbol body, pin text, field, and existing label? `own_refdes` exempts
-    /// the label's own symbol (a stub label legitimately hugs its own pin).
+    /// symbol body, pin text, field, and existing label?
+    ///
+    /// `own_refdes` exempts only the label's own BODY — a stub label legitimately
+    /// hugs the pin it names, and the body's bbox is generous enough to swallow
+    /// the pin tip. Its own symbol's PIN TEXT is not exempt: a net label printed
+    /// over the pin number it is meant to explain is exactly what the lint
+    /// reports, and the caller has a ladder of longer stubs to reach past it.
     ///
     /// Boxed by the one as-drawn model, like the lint it must agree with: a
     /// landing this approves never trips `layout_warnings`.
@@ -870,19 +867,21 @@ impl SchematicWriter {
         use sch_model::text::{label_box, pin_text_boxes};
         let b = label_box(at, dir, net);
         for inst in &self.instances {
-            if inst.refdes.starts_with('#') || inst.refdes == own_refdes {
+            if inst.refdes.starts_with('#') {
                 continue;
             }
-            let h = inst.half_extents.rotated_half_extents(inst.angle);
-            let body: Rect = [
-                inst.at[0] - h[0],
-                inst.at[1] - h[1],
-                inst.at[0] + h[0],
-                inst.at[1] + h[1],
-            ]
-            .into();
-            if body.overlaps(&b) {
-                return false;
+            if inst.refdes != own_refdes {
+                let h = inst.half_extents.rotated_half_extents(inst.angle);
+                let body: Rect = [
+                    inst.at[0] - h[0],
+                    inst.at[1] - h[1],
+                    inst.at[0] + h[0],
+                    inst.at[1] + h[1],
+                ]
+                .into();
+                if body.overlaps(&b) {
+                    return false;
+                }
             }
             if let Some(pins) = self.sym_pins.get(&inst.lib_id) {
                 for pg in pins {
@@ -1009,7 +1008,33 @@ impl SchematicWriter {
                 Kind::Text,
             ));
         }
+        // Block captions (title/note) are decoration the realiser fully controls, so a
+        // caption over the drawing is a bug it can always avoid — lint it like any
+        // other text. Each owns a unique key so no exemption ever applies to it.
+        for t in &self.texts {
+            items.push((
+                format!("caption {:?}", t.text.lines().next().unwrap_or("")),
+                super::sheet_text_box(t),
+                format!("\0caption:{}", t.uuid_key),
+                Kind::Text,
+            ));
+        }
         let mut warnings = Vec::new();
+        // A caption over a wire is never legitimate — unlike a pin's own text, no
+        // wire has any business under one — so it is linted where other text is not.
+        for t in &self.texts {
+            let b = super::sheet_text_box(t);
+            if self
+                .wires
+                .iter()
+                .any(|w| b.overlaps(&sch_model::text::wire_box(w.a, w.b)))
+            {
+                warnings.push(format!(
+                    "caption {:?} crosses a wire",
+                    t.text.lines().next().unwrap_or("")
+                ));
+            }
+        }
         // Wire through an IC body: a wire segment running strictly inside a chip's
         // package box (the pin-tip bbox shrunk past the pin stubs onto the body
         // rectangle — the same geometry `count_ic_body_crossings` measures). This reads
