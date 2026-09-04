@@ -342,7 +342,7 @@ pub fn into_design(
     for (name, tree) in &input.layout {
         match design.blocks.get_mut(name) {
             Some(block) => {
-                for fault in tree_faults(name, tree, block, &dropped_refs) {
+                for fault in tree_faults(name, tree, block, &dropped_refs, &existing.refs) {
                     diags.push(fault);
                 }
                 block.layout = Some(tree.clone());
@@ -831,15 +831,24 @@ fn expand_decouple(
 /// A leaf naming a part the payload could not resolve at all (`dropped`) is the author's
 /// tree being right about a part that is not there: it is a warning, and the typesetter
 /// simply has one fewer leaf to draw.
+///
+/// A leaf naming a part already ON THE SHEET is not a fault at all. `place_parts` appends,
+/// so a follow-up call that adds two parts to a block still states that whole block's
+/// tree; the parts it already placed keep the poses they have and the tree says where the
+/// new ones go among them.
 fn tree_faults(
     name: &str,
     tree: &Tree,
     block: &Block,
     dropped: &BTreeSet<RefDes>,
+    on_sheet: &BTreeSet<RefDes>,
 ) -> Vec<Diagnostic> {
     let mut seen: BTreeSet<(String, u8)> = BTreeSet::new();
     let mut out = Vec::new();
     for (refdes, unit) in tree.keys() {
+        if on_sheet.contains(&refdes) {
+            continue;
+        }
         if dropped.contains(&refdes) {
             out.push(Diagnostic::warning(
                 "layout-unplaced-part",

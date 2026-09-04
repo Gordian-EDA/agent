@@ -173,11 +173,26 @@ fn align_line(node: &mut Node, parts: &[Part], axis: Axis) {
 }
 
 fn container_node(c: &Container, parts: &[Part], index: &dyn Fn(&str, u8) -> Option<usize>) -> Node {
+    // A leaf naming a part this call is not placing — one already on the sheet, or one the
+    // payload could not resolve — is dropped outright rather than measured as an empty
+    // box, which would leave a gap where nothing is drawn.
+    let kept: Vec<&Tree> = c
+        .children
+        .iter()
+        .filter(|child| !matches!(child, Tree::Leaf(l) if index(&l.part, l.unit.unwrap_or(1)).is_none()))
+        .collect();
+    let c = &Container {
+        children: kept.into_iter().cloned().collect(),
+        ..c.clone()
+    };
     let mut children: Vec<Node> = c
         .children
         .iter()
         .map(|child| measure(child, parts, index, c.axis))
         .collect();
+    if children.is_empty() {
+        return empty();
+    }
     if let Some(wrapped) = wrap(c, &children, parts) {
         return container_node(&wrapped, parts, index);
     }

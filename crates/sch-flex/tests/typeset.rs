@@ -193,3 +193,23 @@ fn a_block_too_big_for_any_page_still_terminates_with_every_part_placed() {
         .collect();
     assert_eq!(seats.len(), items.len(), "two parts share a seat");
 }
+
+/// `place_parts` appends, so a follow-up call states its block's whole tree while placing
+/// only the new parts. The leaves for parts already on the sheet must leave no gap where
+/// nothing is drawn.
+#[test]
+fn a_leaf_for_a_part_this_call_is_not_placing_leaves_no_hole() {
+    let tree = stack(
+        Axis::Row,
+        vec![leaf("R0"), leaf("R1"), leaf("R9"), leaf("R2")],
+    );
+    let mut both = vec![passive("R1", "A", "B"), passive("R2", "B", "C")];
+    sch_flex::typeset(&mut both, &trees(tree.clone()));
+    let mut only = vec![passive("R1", "A", "B"), passive("R2", "B", "C")];
+    sch_flex::typeset(&mut only, &trees(stack(Axis::Row, vec![leaf("R1"), leaf("R2")])));
+    assert_eq!(
+        (both[1].at.x - both[0].at.x, both[0].at),
+        (only[1].at.x - only[0].at.x, only[0].at),
+        "the absent leaves widened the row"
+    );
+}
