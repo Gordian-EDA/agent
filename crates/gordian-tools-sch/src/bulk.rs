@@ -90,6 +90,13 @@ pub(crate) fn place_parts(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         payload = %serde_json::to_string(&payload).unwrap_or_default(),
         "place_parts"
     );
+    if payload.strict {
+        let mut scope = ctx.request_scope();
+        scope.no_additions = true;
+        ctx.workspace()
+            .set_request_scope(&scope)
+            .context("recording the request's part-list constraint")?;
+    }
     let mut edit = if ctx.sch_path().is_file() {
         Edit::open(ctx).context("opening the existing schematic")?
     } else {

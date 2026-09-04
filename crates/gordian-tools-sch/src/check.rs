@@ -1,5 +1,5 @@
 //! `check_schematic`: the symbol-aware lints, deterministic electrical rules,
-//! completeness audit, and KiCad ERC over the live file.
+//! completeness audit, netlist fidelity, and KiCad ERC over the live file.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -920,6 +920,7 @@ struct Inspection {
     /// Symbols placed and wired but not laid out — progress, not a defect.
     bench: Vec<String>,
     gaps: Vec<sch_check::completeness::Gap>,
+    fidelity: Option<sch_check::Fidelity>,
     findings: Vec<Finding>,
     local_errors: usize,
     local_warnings: usize,
@@ -968,13 +969,28 @@ fn live_footprint_mismatches(
     Ok(mismatches)
 }
 
+/// The netlist the request pins the design to, `<project>/netlist.json`.
+///
+/// It is an input the user supplied, not something a tool writes, so anything
+/// unreadable or malformed simply means the project has no reference.
+fn reference_netlist(ctx: &AgentRuntime) -> Option<sch_check::ReferenceNetlist> {
+    let text = std::fs::read_to_string(ctx.project_dir().join("netlist.json")).ok()?;
+    sch_check::ReferenceNetlist::parse(&text).ok()
+}
+
 fn inspect_schematic(path: &Path, ctx: &AgentRuntime) -> Result<Inspection> {
     let doc = SchDoc::read(path).with_context(|| format!("reading {}", path.display()))?;
     let netlist = sch_doc::connect::extract(&doc);
     let bench = sch_floorplan::bench::benched(&doc);
     let design = design(&doc, &netlist);
     let locator = FindingLocator::new(&doc, &netlist);
-    let gaps = sch_check::completeness::audit(&design, ctx.provider());
+    let gaps = if ctx.request_scope().no_additions {
+        Vec::new()
+    } else {
+        sch_check::completeness::audit(&design, ctx.provider())
+    };
+    let fidelity =
+        reference_netlist(ctx).map(|reference| sch_check::reference::compare(&reference, &design));
     let mut findings = Vec::new();
 
     let lint = sch_check::lint::lint(&design, ctx.provider());
@@ -1161,6 +1177,7 @@ fn inspect_schematic(path: &Path, ctx: &AgentRuntime) -> Result<Inspection> {
         netlist,
         bench,
         gaps,
+        fidelity,
         findings,
         local_errors,
         local_warnings,
@@ -1171,6 +1188,7 @@ fn inspect_schematic(path: &Path, ctx: &AgentRuntime) -> Result<Inspection> {
 /// Lint and run ERC over the live schematic.
 pub fn check_schematic(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let detail = input.get("detail").and_then(Value::as_bool) == Some(true);
+    let strict = ctx.request_scope().no_additions;
     let mut inspection = inspect_schematic(ctx.sch_path(), ctx)?;
     let planner = FixPlanner::new(&inspection.doc, &inspection.netlist, ctx);
     for finding in &mut inspection.findings {
@@ -1204,8 +1222,12 @@ pub fn check_schematic(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         "completeness": {
             "warnings": inspection.gaps.len(),
             "gaps": inspection.gaps,
+            "strict": strict,
         },
     });
+    if let Some(fidelity) = &inspection.fidelity {
+        report["netlist_fidelity"] = json!(fidelity);
+    }
 
     match &inspection.erc {
         Ok(erc) => {
@@ -1220,7 +1242,15 @@ pub fn check_schematic(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             });
             report["erc_clean"] = json!(erc_errors == 0);
             if errors == 0 {
-                report["message"] = if inspection.gaps.is_empty() {
+                let unfaithful = inspection
+                    .fidelity
+                    .as_ref()
+                    .is_some_and(|fidelity| !fidelity.matches);
+                report["message"] = if unfaithful {
+                    json!(
+                        "schematic is electrically clean but does not reproduce the reference netlist; fix `netlist_fidelity`"
+                    )
+                } else if inspection.gaps.is_empty() {
                     json!(
                         "schematic is clean and complete by deterministic rules; placement is final"
                     )

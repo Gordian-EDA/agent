@@ -42,6 +42,10 @@ pub struct PlacePartsInput {
     pub blocks: BTreeMap<BlockName, BlockDoc>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub intent: Option<Intent>,
+    /// The request fixes the part list: nothing may be added beyond what it
+    /// names. Recorded on the project, so every later check honours it too.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub strict: bool,
 }
 
 /// What a region says about itself on the drawn sheet.
@@ -993,6 +997,13 @@ pub fn place_parts_input_schema() -> Value {
             "name": {
                 "type": "string",
                 "description": "Sheet title, drawn in the frame's title block."
+            },
+            "strict": {
+                "type": "boolean",
+                "description":
+                    "The request fixes the part list — a netlist to reproduce, or \"do not add \
+                     parts\". Suppresses every completeness gap, for this call and every later \
+                     check on this project."
             },
             "block": {
                 "type": "string",
