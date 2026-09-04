@@ -913,8 +913,11 @@ version = "0.1.0"
 dependencies = [
  "anneal-place",
  "anyhow",
+ "async-trait",
+ "base64",
  "circuit-graph",
  "cluster-place",
+ "futures",
  "fuzzy-matcher",
  "geom",
  "gordian-llm",
@@ -934,6 +937,7 @@ dependencies = [
  "serde_path_to_error",
  "spine-place",
  "tempfile",
+ "tokio",
  "tracing",
 ]
 

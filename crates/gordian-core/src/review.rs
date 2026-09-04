@@ -14,7 +14,9 @@
 
 use anyhow::Result;
 use futures::future::join_all;
-use gordian_llm::{Binary, ChatMessage, ContentPart, MessageContent, Provider, completed_text};
+use gordian_llm::{
+    Binary, ChatMessage, ContentPart, MessageContent, Provider, completed_text, verdict_json,
+};
 use serde_json::Value;
 
 /// One independent NETLIST review pass, generalized: the DOMAIN passes the review
@@ -114,7 +116,7 @@ async fn review_ensemble(
             let attempts = if retry_json { 2 } else { 1 };
             for _ in 0..attempts {
                 let end = client.complete(&lens_system, &msgs, &[]).await?;
-                if let Some(v) = extract_json(&completed_text(&end)) {
+                if let Some(v) = verdict_json(&completed_text(&end)) {
                     parsed = Some(v);
                     break;
                 }
@@ -158,41 +160,6 @@ pub fn same_defect(a: &str, b: &str) -> bool {
     };
     let (ra, rb) = (refdes(a), refdes(b));
     !ra.is_empty() && ra == rb
-}
-
-/// Pull the verdict JSON from a reasoning+JSON response (prefer the block after
-/// `FINAL_JSON:`, else the last balanced `{...}` object).
-fn extract_json(text: &str) -> Option<Value> {
-    let tail = text
-        .rsplit_once("FINAL_JSON:")
-        .map(|(_, b)| b)
-        .unwrap_or(text);
-    let cleaned = tail
-        .trim()
-        .trim_start_matches("```json")
-        .trim_start_matches("```")
-        .trim_end_matches("```")
-        .trim();
-    if let Ok(v) = serde_json::from_str::<Value>(cleaned) {
-        return Some(v);
-    }
-    let (mut depth, mut start, mut last) = (0i32, None, None);
-    for (i, b) in text.bytes().enumerate() {
-        if b == b'{' {
-            if depth == 0 {
-                start = Some(i);
-            }
-            depth += 1;
-        } else if b == b'}' {
-            depth -= 1;
-            if depth == 0
-                && let Some(s) = start
-            {
-                last = Some(&text[s..=i]);
-            }
-        }
-    }
-    last.and_then(|s| serde_json::from_str(s).ok())
 }
 
 const NO_ACTIONABLE_DEFECT_FLOOR: f64 = 8.0;
@@ -301,7 +268,7 @@ FINAL_JSON:
   {"severity":"minor","confidence":"high","refdes":"R1","issue":"c","why":"d"},
   {"severity":"major","confidence":"low","refdes":"C1","issue":"e","why":"f"}
 ]}"#;
-        let v = extract_json(text).unwrap();
+        let v = verdict_json(text).unwrap();
         let (score, defects) = parse_review(&v);
         assert_eq!(score, 6.0);
         assert_eq!(defects.len(), 1); // only the critical/high one
@@ -311,7 +278,7 @@ FINAL_JSON:
     #[test]
     fn last_balanced_object_when_no_marker() {
         let text = r#"{"score": 9, "defects": []}"#;
-        let (score, defects) = parse_review(&extract_json(text).unwrap());
+        let (score, defects) = parse_review(&verdict_json(text).unwrap());
         assert_eq!(score, 9.0);
         assert!(defects.is_empty());
     }
@@ -332,7 +299,7 @@ FINAL_JSON:
   {"severity":"major","confidence":"high","category":"spacing","location":"C1","description":"decoupling cap stranded far from U1's power pin"},
   {"severity":"minor","confidence":"high","category":"orientation","location":"R3","description":"vertical series part"}
 ]}"#;
-        let (score, defects) = parse_review(&extract_json(text).unwrap());
+        let (score, defects) = parse_review(&verdict_json(text).unwrap());
         assert_eq!(score, 5.0);
         assert_eq!(defects.len(), 1, "only the high-confidence major");
         assert!(
@@ -349,7 +316,7 @@ FINAL_JSON:
   {"severity":"minor","confidence":"high","refdes":"R1","issue":"cosmetic","why":"style"},
   {"severity":"major","confidence":"low","refdes":"C1","issue":"guess","why":"uncertain"}
 ]}"#;
-        let (score, defects) = parse_review(&extract_json(text).unwrap());
+        let (score, defects) = parse_review(&verdict_json(text).unwrap());
         assert!(
             defects.is_empty(),
             "minor/low-confidence issues are not actionable: {defects:?}"
@@ -366,7 +333,7 @@ FINAL_JSON:
 {"score": 3, "defects": [
   {"severity":"critical","confidence":"high","refdes":"U1","issue":"wrong rail","why":"VDD on 12V","evidence":"U1.pins.VDD = 12V"}
 ]}"#;
-        let (score, defects) = parse_review(&extract_json(text).unwrap());
+        let (score, defects) = parse_review(&verdict_json(text).unwrap());
         assert_eq!(score, 3.0);
         assert_eq!(defects.len(), 1);
     }
@@ -377,7 +344,7 @@ FINAL_JSON:
 {"score": 2, "defects": [
   {"severity":"major","confidence":"high","refdes":"U1","issue":"wrong/missing power pin wiring","why":"Only VDD pins appear partially assigned; pin 7 is NRST, but other required VDD/GND pins are not shown as tied consistently."}
 ]}"#;
-        let (score, defects) = parse_review(&extract_json(text).unwrap());
+        let (score, defects) = parse_review(&verdict_json(text).unwrap());
         assert!(
             defects.is_empty(),
             "netlist defects must cite exact netlist evidence, not visual inference: {defects:?}"
@@ -391,7 +358,7 @@ FINAL_JSON:
 {"score": 5, "defects": [
   {"severity":"major","confidence":"high","category":"text-overlap","location":"J1/upper-right input block","description":"Input block has cramped net/signal text packed tightly together, making associations harder to read at a glance.","verification":"5V,GND, VDD, GND, and J1 label are close together."}
 ]}"#;
-        let (score, defects) = parse_review(&extract_json(text).unwrap());
+        let (score, defects) = parse_review(&verdict_json(text).unwrap());
         assert!(
             defects.is_empty(),
             "cramped but non-colliding text is not an actionable overlap: {defects:?}"
@@ -405,7 +372,7 @@ FINAL_JSON:
 {"score": 5, "defects": [
   {"severity":"major","confidence":"high","category":"text-overlap","location":"R1/C1","description":"The GND label overlaps the R1 value text, merging the strings visually.","verification":"The GND characters collide with the 10k value text."}
 ]}"#;
-        let (score, defects) = parse_review(&extract_json(text).unwrap());
+        let (score, defects) = parse_review(&verdict_json(text).unwrap());
         assert_eq!(score, 5.0);
         assert_eq!(defects.len(), 1);
         assert!(defects[0].starts_with("- R1/C1:"));

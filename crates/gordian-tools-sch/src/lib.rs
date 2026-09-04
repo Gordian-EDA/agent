@@ -23,6 +23,8 @@ mod edit;
 mod place;
 mod query;
 mod refs;
+pub mod render;
+pub mod review;
 mod session;
 mod wiring;
 
@@ -69,6 +71,8 @@ fn tool_names() -> Vec<&'static str> {
         "get_net",
         "check_schematic",
         "search_footprints",
+        "render_schematic",
+        "review_schematic",
     ];
     names.extend(MUTATORS);
     names
@@ -154,6 +158,25 @@ pub fn tool_defs() -> Vec<Tool> {
                     "detail": {
                         "type": "boolean",
                         "description": "Return every finding instead of the compact forty-finding view."
+                    }
+                },
+                "additionalProperties": false
+            }),
+        ),
+        (
+            "render_schematic",
+            "Render the schematic to a PNG with mm axes to check the visual result; use it whenever you want to see what an edit did. Not a substitute for `check_schematic`.",
+            json!({ "type": "object", "properties": {} }),
+        ),
+        (
+            "review_schematic",
+            "An independent visual critic scores the rendered sheet 0-10 against a human-drawn reference sheet rated 9 (as good as it = 9, clearly better = 10) and returns the defects that cost it, each with `at_mm` sheet coordinates, the `refs` involved and a concrete `fix`. Call it once `check_schematic` is clean; below 9, re-lay-out the blocks the defects name and review again.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "anchor": {
+                        "type": "string",
+                        "description": "Path to a different reference PNG to calibrate against."
                     }
                 },
                 "additionalProperties": false
@@ -493,6 +516,12 @@ pub fn run(name: &str, input: Value, ctx: &AgentRuntime) -> Option<Result<Value>
         "get_net" => query::get_net(input, ctx),
         "search_footprints" => query::search_footprints(input, ctx),
         "check_schematic" => check::check_schematic(input, ctx),
+        "render_schematic" => render::render_schematic(ctx),
+        // The critic is the model itself, so the agent loop serves this one; the
+        // name lives here so `handles` and `tool_defs` agree on the surface.
+        "review_schematic" => Ok(json!({
+            "error": "review_schematic is served by the agent loop, not by the tool registry",
+        })),
         "add_symbols" => edit::add_symbols(input, ctx),
         "remove_symbols" => edit::remove_symbols(input, ctx),
         "remove_region" => edit::remove_region(input, ctx),
@@ -509,4 +538,17 @@ pub fn run(name: &str, input: Value, ctx: &AgentRuntime) -> Option<Result<Value>
         "delete_labels" => wiring::delete_labels(input, ctx),
         _ => return None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_advertised_tool_is_one_this_crate_owns() {
+        for tool in tool_defs() {
+            let name = tool.name.to_string();
+            assert!(handles(&name), "`{name}` is advertised but not handled");
+        }
+    }
 }

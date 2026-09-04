@@ -16,11 +16,13 @@
 mod config;
 mod provider;
 mod seam;
+mod verdict;
 
 pub use config::{DEFAULT_MAX_TOKENS, LlmConfig, LlmConfigError, LlmReasoningEffort};
 
 pub use provider::{GenaiProvider, completed_text, is_transient, token_usage};
 pub use seam::{EventStream, Provider, drain_stream};
+pub use verdict::verdict_json;
 
 // The genai types the rest of the crate speaks. Re-exported so callers build on
 // `gordian_core::*` without taking a direct genai dependency.

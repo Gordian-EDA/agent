@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use gordian_core::{AgentRuntime, tools};
+use gordian_runtime::AgentRuntime;
 use kicad::KicadInstallation;
 use serde_json::json;
 
@@ -19,7 +19,7 @@ fn renders_fixture_with_visual_facts() {
     std::fs::copy(source, &schematic).expect("copy fixture schematic");
     let ctx = AgentRuntime::new(env, temp.path().to_path_buf(), schematic).expect("runtime");
 
-    let result = tools::run_tool("render_schematic", json!({}), &ctx).expect("render tool");
+    let result = gordian_tools_sch::run("render_schematic", json!({}), &ctx).expect("our tool").expect("render tool");
 
     assert_eq!(result["ok"], true);
     let png = result["png_path"].as_str().expect("PNG path");

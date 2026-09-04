@@ -1398,6 +1398,9 @@ USAGE_REQUEST = re.compile(
     r"latency=(?P<latency>[0-9.]+)s$"
 )
 TOTAL_REQUESTS = re.compile(r"\bprovider requests:\s*(\d+)\b")
+# The agent's `review_schematic` summary line: its own anchored critic's modal
+# score, so a run's self-review trajectory can be plotted against the harness's.
+REVIEW_SCORE = re.compile(r"^review ([0-9.]+)/10\b")
 USER_CAP = re.compile(r"MaxRequestsReached\s*\{\s*requests:\s*(\d+)\s*\}")
 REFUSAL = re.compile(r"\brefus(?:e|ed|al|ing)\b", re.IGNORECASE)
 TURN_STARTED = re.compile(r"^turn (?P<turn>\d+): (?P<prompt>.*)$")
@@ -1502,6 +1505,14 @@ def parse_agent_stderr(stderr):
             repeated.append({"tool": attempted[index], "count": end - index})
         index = end
 
+    review_scores = [
+        float(match.group(1))
+        for call in calls
+        if call["tool"] == "review_schematic"
+        for match in [REVIEW_SCORE.match(call["summary"])]
+        if match
+    ]
+
     cap = USER_CAP.search(text)
     assistant_messages = ASSISTANT_TEXT.findall(text)
     final_assistant = assistant_messages[-1].strip() if assistant_messages else ""
@@ -1517,6 +1528,8 @@ def parse_agent_stderr(stderr):
         "refusals": refusals,
         "errors": errors,
         "repeated_calls": repeated,
+        "review_scores": review_scores,
+        "review_final": review_scores[-1] if review_scores else None,
         "user_cap_hit": int(cap.group(1)) if cap else None,
         "final_assistant": final_assistant,
     }
@@ -1658,6 +1671,8 @@ def run_case(case, output_root):
         "refusals": parsed["refusals"],
         "errors": parsed["errors"],
         "repeated_calls": parsed["repeated_calls"],
+        "review_scores": parsed["review_scores"],
+        "review_final": parsed["review_final"],
         "user_cap_hit": parsed["user_cap_hit"],
         "final_assistant": parsed["final_assistant"],
         "transcript": parsed["transcript"],
@@ -2057,8 +2072,14 @@ def row(report):
 
 
 SCHEMATIC_COLUMNS = [
-    "case", "parts", "netlist", "erc e/w", "critic", "human look", "agent s",
+    "case", "parts", "netlist", "erc e/w", "critic", "review", "human look", "agent s",
 ]
+
+
+def review_trajectory(report):
+    """The agent's own `review_schematic` scores, in the order it took them."""
+    scores = report.get("review_scores") or []
+    return "-" if not scores else "→".join(f"{score:g}" for score in scores)
 
 
 def schematic_row(report):
@@ -2077,6 +2098,7 @@ def schematic_row(report):
         "-" if score is None else (
             f"{score:g}" + (f" {samples}" if samples and len(set(samples)) > 1 else "")
         ),
+        review_trajectory(report),
         human_look_score(report).split("/")[0],
         f"{report.get('agent_seconds', 0):.0f}s",
     ]
