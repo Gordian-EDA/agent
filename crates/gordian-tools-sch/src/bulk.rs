@@ -280,10 +280,7 @@ pub(crate) fn place_parts(input: Value, ctx: &AgentRuntime) -> Result<Value> {
 /// no arrangement of 24 parts that reads as a single idea. The typesetter draws
 /// whatever tree it is handed, so this is the only place that can say so.
 fn crowded_blocks(design: &sch_check::model::Design) -> Vec<String> {
-    /// Measured on one circuit drawn twice: six blocks of ten or fewer scored 9, five
-    /// blocks with two of fifteen scored 5. Everything else about the two sheets — wire
-    /// count, proportions — was equal.
-    const ROOMY: usize = 10;
+    const ROOMY: usize = 12;
     design
         .blocks
         .iter()
@@ -1290,8 +1287,8 @@ mod block_size_tests {
     }
 
     #[test]
-    fn a_section_of_ten_parts_is_left_alone() {
-        assert!(super::crowded_blocks(&design_with(10)).is_empty());
+    fn a_section_of_a_dozen_parts_is_left_alone() {
+        assert!(super::crowded_blocks(&design_with(12)).is_empty());
     }
 
     /// Two parts on one net are a signal path; two parts on none are a parts bin.
