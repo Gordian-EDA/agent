@@ -1,11 +1,20 @@
 //! One label scope per net, checked by `kicad-cli sch erc` rather than by the
 //! engine's own opinion of what it drew.
 //!
-//! A block that declares `intent.ports` gets a port pennant at each declared
-//! net's exit terminal AND a plain stub label on the same net at its pins. Two
-//! scopes for one name is KiCAD's `same_local_global_label`: the drawing claims
-//! a join the netlist does not make. A second block that reaches an existing net
-//! by name must not flip that net's scope either.
+//! A net drawn at its pins with a plain stub label AND at a port exit with a
+//! pennant is named twice over: KiCAD's `same_local_global_label`, a drawing
+//! that claims a join the netlist does not make. A second block reaching an
+//! existing net by name must not flip that net's scope either.
+//!
+//! The scope the engine settles on is PLAIN, ports included. On one sheet a
+//! local and a global label are electrically the same thing, so which glyph a
+//! declared port wears is a drawing decision, and the pennant is the worse
+//! drawing: roughly twice the ink of the text it carries, and a sheet that
+//! mixes the two has no clean text column. This suite therefore asserts the
+//! invariant that is electrical — never two scopes for one name — and, for the
+//! drawing, that a declared port is plain like everything else. (The engine
+//! emits no sub-sheets, so nothing here needs a cross-sheet scope; an authored
+//! global label the engine finds already on the sheet is still left global.)
 //!
 //! SKIPs cleanly without a KiCAD installation.
 
@@ -118,8 +127,8 @@ fn place(env: &KicadInstallation, doc: &mut SchDoc, input: &PlacePartsInput) {
     assert!(report.committed, "rolled back — {:?}", report.mismatch);
 }
 
-/// A block with declared ports draws each of its nets in one scope, and KiCAD
-/// agrees that nothing on the sheet is named twice over.
+/// A block with declared ports draws each of its nets in one scope — the plain
+/// one — and KiCAD agrees that nothing on the sheet is named twice over.
 #[test]
 fn a_ported_block_raises_no_same_local_global_label() {
     let Some(env) = KicadInstallation::detect() else {
@@ -140,7 +149,7 @@ fn a_ported_block_raises_no_same_local_global_label() {
     );
     for port in ["NRST", "SWDIO", "SWCLK", "USB_D+", "USB_D-", "BOOT0"] {
         if let Some(scope) = scopes.get(port) {
-            assert_eq!(*scope, "global", "declared port {port} is not global");
+            assert_eq!(*scope, "local", "declared port {port} is drawn as a pennant");
         }
     }
     let counts = erc_counts(&env, &path);

@@ -191,7 +191,6 @@ impl SchematicWriter {
                 // byte-identical to pre-stub label output.
                 dir: Dir::East,
                 anchor: Anchor::Fixed,
-                global: false,
             });
         }
         Ok(())
@@ -218,7 +217,7 @@ impl SchematicWriter {
         pin: &str,
         net: &str,
     ) -> io::Result<()> {
-        self.add_signal_label_stub(env, refdes, pin, net, 3.81)
+        self.add_signal_label_stub(env, refdes, pin, net, super::DEFAULT_STUB_MM)
     }
 
     /// [`add_signal_label`] with a caller-chosen stub length — the router
@@ -231,21 +230,7 @@ impl SchematicWriter {
         net: &str,
         stub_mm: f64,
     ) -> io::Result<()> {
-        self.add_signal_label_stub_scoped(env, refdes, pin, net, stub_mm, false)
-    }
-
-    /// Global-port variant of [`Self::add_signal_label_stub`]. The pin is resolved
-    /// before the label is recorded, so a port fallback can never leave a pennant
-    /// floating at a virtual exit the router failed to reach.
-    pub fn add_global_signal_label_stub(
-        &mut self,
-        env: &KicadInstallation,
-        refdes: &str,
-        pin: &str,
-        net: &str,
-        stub_mm: f64,
-    ) -> io::Result<()> {
-        self.add_signal_label_stub_scoped(env, refdes, pin, net, stub_mm, true)
+        self.add_signal_label_stub_scoped(env, refdes, pin, net, stub_mm)
     }
 
     fn add_signal_label_stub_scoped(
@@ -255,7 +240,6 @@ impl SchematicWriter {
         pin: &str,
         net: &str,
         stub_mm: f64,
-        global: bool,
     ) -> io::Result<()> {
         for (idx, (ep, dir)) in self.pin_dirs(env, refdes, pin)?.into_iter().enumerate() {
             let ep = GRID_50_MIL.snap_point(ep);
@@ -268,7 +252,6 @@ impl SchematicWriter {
                 uuid_key: format!("{refdes}:{pin}:{net}:{idx}"),
                 dir,
                 anchor: Anchor::Stub(ep),
-                global,
             });
         }
         Ok(())
@@ -368,7 +351,7 @@ impl SchematicWriter {
     /// joins to the rest of the sheet without per-pin label spam. The label is
     /// keyed on `cluster:{net}:{x}:{y}` (position-derived) and carries no stub —
     /// it sits directly on the cluster wire it labels.
-    pub fn add_cluster_label(&mut self, net: &str, at: impl Into<Point2>, dir: Dir, global: bool) {
+    pub fn add_cluster_label(&mut self, net: &str, at: impl Into<Point2>, dir: Dir) {
         let at = GRID_50_MIL.snap_point(at);
         self.labels.push(PinLabel {
             net: net.to_string(),
@@ -376,7 +359,6 @@ impl SchematicWriter {
             uuid_key: format!("cluster:{net}:{}:{}", at.x, at.y),
             dir,
             anchor: Anchor::Swivel(dir),
-            global,
         });
     }
 
@@ -615,7 +597,6 @@ impl SchematicWriter {
             uuid_key: format!("{refdes}:1:{net}:0"),
             dir: Dir::East,
             anchor: Anchor::Fixed,
-            global: false,
         });
         Ok(())
     }
@@ -851,11 +832,14 @@ impl SchematicWriter {
         out
     }
 
-    /// Count of plain (non-global) labels — i.e. signal-label fallbacks where the
-    /// router could not wire a net. Port pentagons are `global` and excluded, so
-    /// this is a direct "how many nets degraded to labels" signal.
+    /// Count of pin-mounted signal labels — the nets the router could not wire and
+    /// named instead. Port and orphan labels are welded to a tap rather than to a
+    /// pin, so they are excluded: this is a direct "how many nets degraded" signal.
     pub fn signal_label_count(&self) -> usize {
-        self.labels.iter().filter(|l| !l.global).count()
+        self.labels
+            .iter()
+            .filter(|l| !matches!(l.anchor, Anchor::Swivel(_)))
+            .count()
     }
 
     /// Every drawn wire segment with its net, for `place::score`'s truthfulness counts
@@ -1186,30 +1170,29 @@ mod tests {
     }
 
     #[test]
-    fn global_signal_fallback_requires_a_real_pin() {
+    fn a_signal_label_needs_a_real_pin() {
         let Some(env) = detect_env() else { return };
         let mut w = SchematicWriter::new();
         w.add_symbol(&env, "Device:R", "R1", "1k", [127.0, 63.5], 0.0)
             .unwrap();
 
-        w.add_global_signal_label_stub(&env, "R1", "1", "PORT", 3.81)
+        w.add_signal_label_stub(&env, "R1", "1", "PORT", 3.81)
             .unwrap();
         assert_eq!(w.labels.len(), 1);
-        assert!(w.labels[0].global);
         assert!(
             matches!(w.labels[0].anchor, Anchor::Stub(_)),
-            "the global label must be wired to its pin"
+            "the label must be wired to its pin"
         );
 
         let before = w.labels.len();
         assert!(
-            w.add_global_signal_label_stub(&env, "R1", "missing", "ORPHAN", 3.81)
+            w.add_signal_label_stub(&env, "R1", "missing", "ORPHAN", 3.81)
                 .is_err()
         );
         assert_eq!(
             w.labels.len(),
             before,
-            "a pin key that resolves to nothing must not emit a global label"
+            "a pin key that resolves to nothing must not emit a label"
         );
     }
 
@@ -1235,7 +1218,7 @@ mod tests {
         let mut w = SchematicWriter::new();
         w.add_wire_on_net([1.27, 2.54], [3.81, 2.54], "SIG");
         w.add_junction_on_net([3.81, 2.54], "SIG");
-        w.add_cluster_label("SIG", [3.81, 2.54], Dir::East, false);
+        w.add_cluster_label("SIG", [3.81, 2.54], Dir::East);
 
         w.translate(12.7, 25.4);
 

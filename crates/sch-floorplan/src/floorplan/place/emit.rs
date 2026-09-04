@@ -569,7 +569,7 @@ pub(crate) fn add_orphan_label_columns(w: &mut SchematicWriter, design: &Design,
             }
             scene.points.push((at.into(), net.clone()));
         }
-        w.add_cluster_label(net, at, Dir::East, true);
+        w.add_cluster_label(net, at, Dir::East);
     }
 }
 

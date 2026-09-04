@@ -27,6 +27,20 @@ fn swivel_poses(home: Dir) -> [Dir; 4] {
     [home, home.opposite(), a, b]
 }
 
+/// A grid-snapped point as an exact map key.
+fn bits(p: Point2) -> (u64, u64) {
+    let p = GRID_50_MIL.snap_point(p);
+    (p[0].to_bits(), p[1].to_bits())
+}
+
+/// The stub every pin label rides out of its pin unless something is in the way —
+/// long enough to read as a wire, short enough to keep the text beside its pin.
+pub(crate) const DEFAULT_STUB_MM: f64 = 3.81;
+
+/// Sentinel "net" for no-connect anchors: a stub on a no-connect pin is still a
+/// wrong attachment, so it counts as a foreign net.
+const NC: &str = "\0no_connect";
+
 enum Apply {
     /// labels[i]: candidate 1 retracts onto the pin endpoint.
     StubLabel(usize),
@@ -39,6 +53,162 @@ enum Apply {
 }
 
 impl SchematicWriter {
+    /// Every fixed connection point on the sheet keyed to the net(s) that own it,
+    /// and every wire segment tagged with the net it was drawn for.
+    ///
+    /// This is the one model of "what a label may not land on": power-symbol pin
+    /// origins, no-connect markers, each label's own anchor (a stub label's PIN
+    /// endpoint, not its retractable far end), wire endpoints, and the same from
+    /// the sheet a block is being drawn beside. A touch on the SAME net is a
+    /// deliberate join; a touch on another net is a short.
+    fn anchor_model(
+        &self,
+    ) -> (
+        BTreeMap<(u64, u64), std::collections::BTreeSet<String>>,
+        Vec<sch_model::route::NetSegment>,
+    ) {
+        let mut points: BTreeMap<(u64, u64), std::collections::BTreeSet<String>> = BTreeMap::new();
+        let mut add = |p: Point2, net: &str| {
+            points.entry(bits(p)).or_default().insert(net.to_string());
+        };
+        for inst in &self.instances {
+            if inst.lib_id.starts_with("power:") {
+                add(inst.at, &inst.value);
+            }
+        }
+        for nc in &self.no_connects {
+            add(nc.at, NC);
+        }
+        for label in &self.labels {
+            match label.anchor {
+                Anchor::Stub(pin_at) => add(pin_at, &label.net),
+                _ => add(label.at, &label.net),
+            }
+        }
+        let mut segments: Vec<sch_model::route::NetSegment> = Vec::new();
+        for w in &self.wires {
+            segments.push(sch_model::route::NetSegment::new(w.a, w.b, w.net.clone()));
+            add(w.a, &w.net);
+            add(w.b, &w.net);
+        }
+        for (p, net) in &self.beside.points {
+            add(*p, net);
+        }
+        segments.extend(self.beside.segments.iter().cloned());
+        (points, segments)
+    }
+
+    /// Seat every stub label leaving one symbol on one side at a SINGLE stub
+    /// length, so their text starts on one line: a connector's pin labels then
+    /// read as a datasheet column rather than a ragged fringe.
+    ///
+    /// The router picks each label's stub independently — the shortest rung of
+    /// its ladder that clears whatever that one pin faces — so a header's twenty
+    /// labels come out at four different offsets. This pass replaces the group's
+    /// lengths with ONE that seats every member of it clear of foreign anchors,
+    /// foreign wires and neighbouring ink: the same tests
+    /// [`Self::retract_colliding_stubs`] and [`Self::label_landing_clear`] apply,
+    /// so an aligned stub is never one retraction then drops. A group with no
+    /// such length keeps the lengths the router chose.
+    ///
+    /// Candidates are tried at [`DEFAULT_STUB_MM`] first and then outward-and-up,
+    /// because the length is a *drawing* choice, not a clearance minimum: a
+    /// column at the length everything else on the sheet uses is what makes the
+    /// stubs read as one gesture. Only when nothing from the default up seats the
+    /// whole group does it fall back to the shorter rungs.
+    ///
+    /// Idempotent: a second call re-derives the same group and re-picks the same
+    /// length, which the members already sit at.
+    fn align_stub_columns(&mut self) {
+        let (points, segments) = self.anchor_model();
+        let side = |dir: Dir| match dir {
+            Dir::East => 0u8,
+            Dir::West => 1,
+            Dir::North => 2,
+            Dir::South => 3,
+        };
+        let mut groups: BTreeMap<(String, u8), Vec<usize>> = BTreeMap::new();
+        for (i, label) in self.labels.iter().enumerate() {
+            if !matches!(label.anchor, Anchor::Stub(_)) {
+                continue;
+            }
+            let Some(refdes) = label.uuid_key.split(':').next() else {
+                continue;
+            };
+            groups
+                .entry((refdes.to_string(), side(label.dir)))
+                .or_default()
+                .push(i);
+        }
+        let pitch = GRID_50_MIL.pitch();
+        for ((refdes, _), members) in groups {
+            if members.len() < 2 {
+                continue;
+            }
+            let seat = |i: usize, len: f64| {
+                let label = &self.labels[i];
+                let Anchor::Stub(pin_at) = label.anchor else {
+                    unreachable!("grouped on Anchor::Stub")
+                };
+                let v = label.dir.vec();
+                let end =
+                    GRID_50_MIL.snap_point(Point2::new(pin_at.x + v.x * len, pin_at.y + v.y * len));
+                (pin_at, end)
+            };
+            let clear = |i: usize, len: f64| {
+                let label = &self.labels[i];
+                let (pin_at, end) = seat(i, len);
+                let net = label.net.as_str();
+                let foreign_at = |p: Point2| {
+                    points
+                        .get(&bits(p))
+                        .is_some_and(|nets| nets.iter().any(|n| n.as_str() != net))
+                };
+                if foreign_at(end) {
+                    return false;
+                }
+                if segments
+                    .iter()
+                    .any(|seg| seg.net != net && seg.segment.contains_point(end))
+                {
+                    return false;
+                }
+                let span = Segment::new(pin_at, end);
+                if points.iter().any(|(&(xb, yb), nets)| {
+                    let p = Point2::new(f64::from_bits(xb), f64::from_bits(yb));
+                    nets.iter().any(|n| n.as_str() != net) && span.contains_point(p)
+                }) {
+                    return false;
+                }
+                self.label_landing_clear_excluding(end, label.dir, net, &refdes, &members)
+            };
+            // Never shorter than a grid step, never past the longest rung the
+            // router itself would have tried.
+            let longest = members
+                .iter()
+                .map(|&i| {
+                    let (pin_at, _) = seat(i, 0.0);
+                    (self.labels[i].at.x - pin_at.x).abs() + (self.labels[i].at.y - pin_at.y).abs()
+                })
+                .fold(0.0f64, f64::max)
+                .max(11.0 * pitch);
+            let rungs = (longest / pitch).round().max(1.0) as usize;
+            let default = (DEFAULT_STUB_MM / pitch).round() as usize;
+            let Some(shared) = (default..=rungs.max(default))
+                .chain((1..default).rev())
+                .map(|k| k as f64 * pitch)
+                .find(|&len| members.iter().all(|&i| clear(i, len)))
+            else {
+                continue;
+            };
+            let seated: Vec<(usize, Point2)> =
+                members.iter().map(|&i| (i, seat(i, shared).1)).collect();
+            for (i, at) in seated {
+                self.labels[i].at = at;
+            }
+        }
+    }
+
     /// Retract any signal stub whose wire or far-end label would touch a *foreign*
     /// net's geometry, then emit the surviving stub wires.
     ///
@@ -81,54 +251,13 @@ impl SchematicWriter {
     /// geometry and the post-graft net audit refuses the inherently invalid
     /// placement.
     pub fn retract_colliding_stubs(&mut self) {
-        // Sentinel "net" for no-connect anchors: a stub on a no-connect pin is
-        // still a wrong attachment, so treat it as a foreign net.
-        const NC: &str = "\0no_connect";
-
-        let bits = |p: Point2| {
-            let p = GRID_50_MIL.snap_point(p);
-            (p[0].to_bits(), p[1].to_bits())
-        };
-
-        // Foreign points: net name(s) at each occupied point.
-        let mut points: BTreeMap<(u64, u64), std::collections::BTreeSet<String>> = BTreeMap::new();
+        let (mut points, mut segments) = self.anchor_model();
         let add_point =
             |p: Point2,
              net: &str,
              m: &mut BTreeMap<(u64, u64), std::collections::BTreeSet<String>>| {
                 m.entry(bits(p)).or_default().insert(net.to_string());
             };
-        let mut segments: Vec<sch_model::route::NetSegment> = Vec::new();
-
-        for inst in &self.instances {
-            // Power-symbol/flag pin origins (identified by `power:` lib_id) occupy
-            // the points that signal stubs must not be retracted onto.
-            if inst.lib_id.starts_with("power:") {
-                add_point(inst.at, &inst.value, &mut points);
-            }
-        }
-        for nc in &self.no_connects {
-            add_point(nc.at, NC, &mut points);
-        }
-        for label in &self.labels {
-            match label.anchor {
-                Anchor::Stub(pin_at) => add_point(pin_at, &label.net, &mut points),
-                _ => add_point(label.at, &label.net, &mut points),
-            }
-        }
-        // Every wire carries the net it was drawn for, so its endpoints are that
-        // net's anchors: a same-net stub landing on one is a deliberate join, a
-        // foreign one is a short and retracts.
-        for w in &self.wires {
-            segments.push(sch_model::route::NetSegment::new(w.a, w.b, w.net.clone()));
-            add_point(w.a, &w.net, &mut points);
-            add_point(w.b, &w.net, &mut points);
-        }
-        // The sheet this block is being added beside is foreign in exactly the same way.
-        for (p, net) in &self.beside.points {
-            add_point(*p, net, &mut points);
-        }
-        segments.extend(self.beside.segments.iter().cloned());
 
         // Deterministic processing order for stub labels.
         let mut order: Vec<usize> = (0..self.labels.len())
@@ -813,6 +942,9 @@ impl SchematicWriter {
                 ))
             });
         }
+        // Seat each symbol side's stub labels on one line before the collisions are
+        // resolved, so retraction judges the geometry the sheet will actually show.
+        self.align_stub_columns();
         // Resolve signal-stub collisions and materialize the surviving stub wires
         // before any rendering, so labels/wires below render the reconciled state.
         self.retract_colliding_stubs();
@@ -864,6 +996,20 @@ impl SchematicWriter {
         net: &str,
         own_refdes: &str,
     ) -> bool {
+        self.label_landing_clear_excluding(at, dir, net, own_refdes, &[])
+    }
+
+    /// [`Self::label_landing_clear`] blind to the labels at `moving` — the ones the
+    /// caller is about to re-seat, whose current positions are not the geometry the
+    /// landing has to live beside.
+    fn label_landing_clear_excluding(
+        &self,
+        at: geom::Point2,
+        dir: geom::Dir,
+        net: &str,
+        own_refdes: &str,
+        moving: &[usize],
+    ) -> bool {
         use sch_model::text::{label_box, pin_text_boxes};
         let b = label_box(at, dir, net);
         for inst in &self.instances {
@@ -893,8 +1039,8 @@ impl SchematicWriter {
                 }
             }
         }
-        for label in &self.labels {
-            if label.net == net {
+        for (i, label) in self.labels.iter().enumerate() {
+            if label.net == net || moving.contains(&i) {
                 continue;
             }
             let lb = label_rect(label, label.at, label.dir);
@@ -1244,7 +1390,6 @@ mod tests {
             uuid_key: "U1:1:SIG:0".into(),
             dir: Dir::East,
             anchor: Anchor::Stub(pin_at),
-            global: true,
         });
         w.add_wire_on_net([11.43, 10.16], pin_at, "SIG");
         w.add_wire_on_net([11.43, 8.89], [11.43, 10.16], "SIG");
@@ -1302,9 +1447,9 @@ mod tests {
         let Some(env) = detect_env() else { return };
         let mut existing = SchematicWriter::new();
         existing.add_wire_on_net([127.0, 54.61], [127.0, 60.96], "SIG");
-        existing.add_cluster_label("SIG", [127.0, 54.61], Dir::South, false);
+        existing.add_cluster_label("SIG", [127.0, 54.61], Dir::South);
         existing.add_wire_on_net([121.92, 59.69], [132.08, 59.69], "OTHER");
-        existing.add_cluster_label("OTHER", [121.92, 59.69], Dir::East, false);
+        existing.add_cluster_label("OTHER", [121.92, 59.69], Dir::East);
         let beside = existing.route_scene();
 
         let mut added = SchematicWriter::new();
@@ -1340,7 +1485,7 @@ mod tests {
         // (This is the fallback retracted-label shape the solver now avoids —
         // the lint must SEE it.)
         let (ep, _dir) = w.pin_dirs(&env, "U1", "2").unwrap()[0];
-        w.add_cluster_label("X", ep, Dir::East, false);
+        w.add_cluster_label("X", ep, Dir::East);
         let warnings = w.layout_warnings();
         assert!(
             warnings

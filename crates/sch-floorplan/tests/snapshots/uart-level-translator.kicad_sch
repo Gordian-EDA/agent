@@ -1354,14 +1354,13 @@
 		)
 		(uuid "996e622b-7f58-529c-97ac-efcbf32cb89d")
 	)
-	(global_label "RXD1"
-		(shape bidirectional)
+	(label "RXD1"
 		(at 175.26 33.02 0)
 		(effects
 			(font
 				(size 1.27 1.27)
 			)
-			(justify left)
+			(justify left bottom)
 		)
 		(uuid "ac3b51c9-1d99-5117-88d0-20bcd5d42ba2")
 	)
@@ -1425,14 +1424,13 @@
 		)
 		(uuid "ad42ca28-8dfd-548e-a50c-661c927349bb")
 	)
-	(global_label "TXD1"
-		(shape bidirectional)
+	(label "TXD1"
 		(at 177.8 33.02 0)
 		(effects
 			(font
 				(size 1.27 1.27)
 			)
-			(justify left)
+			(justify left bottom)
 		)
 		(uuid "68885047-7b95-557a-a570-aa17572a7cdb")
 	)

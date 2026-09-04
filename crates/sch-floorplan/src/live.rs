@@ -359,7 +359,7 @@ fn place_parts_inner(
             Ok(warnings)
         },
     )?;
-    enforce_label_scopes(doc, &declared, &was_global);
+    enforce_label_scopes(doc, &was_global);
 
     let mut mismatch = live_phase("verify", placed.len(), inc.len(), || {
         verify(doc, &design)
@@ -718,7 +718,7 @@ fn rearrange_inner(
     )?;
     // A re-wire declares no ports of its own, so every net keeps the scope the
     // sheet already gave it.
-    enforce_label_scopes(doc, &BTreeSet::new(), &was_global);
+    enforce_label_scopes(doc, &was_global);
 
     let mut mismatch = live_phase("verify", placed.len(), inc.len(), || Mismatch {
         disturbed: disturbed(&before, &connect::extract(doc)),
@@ -727,7 +727,7 @@ fn rearrange_inner(
     if !mismatch.is_empty() {
         doc.restore(snapshot)?;
         let fallback = label_selection_debits(doc, &before, &chosen);
-        enforce_label_scopes(doc, &BTreeSet::new(), &was_global);
+        enforce_label_scopes(doc, &was_global);
         mismatch = Mismatch {
             disturbed: disturbed(&before, &connect::extract(doc)),
             ..Default::default()
@@ -1110,18 +1110,14 @@ fn global_label_nets(doc: &SchDoc) -> BTreeSet<String> {
 
 /// Give every net one label scope on the sheet, returning how many labels changed.
 ///
-/// A block reaches an existing net by NAME, and the router draws that reach as a
-/// port pennant while the same net's own pins keep plain stub labels — two scopes
-/// for one name, which KiCAD reports as `same_local_global_label` and which do not
-/// actually merge. The scope is decided per net, not per label: a net the payload
-/// declared in `intent.ports` is board I/O and is global everywhere on the sheet;
-/// every other net keeps whatever scope the sheet already used for it, so joining
-/// by name from a later block can never promote a sheet-local net to a pennant.
-fn enforce_label_scopes(
-    doc: &mut SchDoc,
-    declared: &BTreeSet<&str>,
-    was_global: &BTreeSet<String>,
-) -> usize {
+/// Two scopes for one name is KiCAD's `same_local_global_label`: the drawing claims
+/// a join the netlist does not make. The scope is decided per net, not per label,
+/// and the engine draws every net it lays down with a plain label — a global pennant
+/// is twice the ink of the text it carries and buys nothing on a single sheet. So a
+/// net is global here only when the sheet ALREADY drew it that way (an authored
+/// pennant the engine did not put there), and a later block joining a net by name
+/// can neither promote nor demote what it finds.
+fn enforce_label_scopes(doc: &mut SchDoc, was_global: &BTreeSet<String>) -> usize {
     let mut scopes: BTreeMap<String, (bool, bool)> = BTreeMap::new();
     for label in doc.labels() {
         let seen = match label.kind {
@@ -1137,7 +1133,7 @@ fn enforce_label_scopes(
     }
     let mut changed = 0;
     for (net, (local, global)) in scopes {
-        let want = match declared.contains(net.as_str()) || was_global.contains(&net) {
+        let want = match was_global.contains(&net) {
             true => sch_doc::LabelKind::Global,
             false => sch_doc::LabelKind::Local,
         };
