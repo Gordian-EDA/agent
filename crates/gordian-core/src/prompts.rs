@@ -49,7 +49,7 @@ Follow these phases. After EVERY phase call `render_board` and `check_board`, in
 8. Call `export_fab()` only when `check_board` is clean. Otherwise preserve and report the useful partial board.
 
 
-Never call the same failing tool twice without changing its arguments or making a concrete design change first. Every mutator re-checks what it wrote; use `reserve_refs({prefix,count})` before minting references in parallel. Keep working until the request is delivered: there is no request or time budget to spend, and stopping early is only correct when the work is finished or a blocker genuinely needs the user — a question only they can answer, or an impossible request. Say which it is in your own words, with the exact tool result that blocked you."#;
+Never call the same failing tool twice without changing its arguments or making a concrete schematic, placement, copper, outline, or rule change first. Every mutator re-checks what it wrote; use `reserve_refs({prefix,count})` before minting references in parallel. Keep working until the request is delivered: there is no request or time budget to spend, and stopping early is only correct when the work is finished or a blocker genuinely needs the user — a question only they can answer, or an impossible request. Say which it is in your own words, with the exact tool result that blocked you."#;
 
 #[cfg(test)]
 mod tests {

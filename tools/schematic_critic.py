@@ -35,15 +35,23 @@ import argparse
 import base64
 import json
 import os
+import pathlib
 import re
 import sys
 import urllib.request
 
-# The rubric and the anchor calibration are shared verbatim with the agent's
-# `review_schematic` tool, which `include_str!`s these same two files.
-ASSETS = os.path.dirname(os.path.abspath(__file__))
-SYSTEM_PROMPT = open(os.path.join(ASSETS, "schematic_critic_system.txt")).read()
-ANCHOR_CALIBRATION = open(os.path.join(ASSETS, "schematic_critic_anchor.txt")).read().strip()
+# The rubric, the anchor calibration and the engine-clean ground truth are shared
+# verbatim with the agent's `review_schematic` tool, which `include_str!`s these files.
+ASSETS = pathlib.Path(__file__).resolve().parent
+
+
+def read_asset(name):
+    return (ASSETS / f"schematic_critic_{name}.txt").read_text(encoding="utf-8").strip()
+
+
+SYSTEM_PROMPT = read_asset("system")
+ANCHOR_CALIBRATION = read_asset("anchor")
+ENGINE_CLEAN = read_asset("engine_clean")
 
 
 def b64_image(path):
@@ -115,14 +123,7 @@ def main():
             ctx += (" The reference draws the SAME circuit as the sheet under review, so"
                     " compare how the two READ, not what they contain.")
     if args.engine_clean:
-        ctx += (" AUTHORITATIVE ENGINE GROUND TRUTH (exact geometric + netlist analysis of the"
-                " real coordinates): (1) ZERO wires pass through any component body — the"
-                " engine checks the perpendicular, collinear, AND parallel-offset-through-plate"
-                " cases, so a wire that merely looks close is NOT crossing; (2) the netlist is"
-                " COMPLETE — every pin is connected (to a wire, a power-symbol glyph at the pin,"
-                " or a labelled global net). Therefore report NO wire-through-body and NO"
-                " dangling-pin defect; any such claim is a confirmed false positive. Judge only"
-                " orientation, dog-legs, crossings, congestion, spacing, and text overlap.")
+        ctx += " " + ENGINE_CLEAN
 
     user_content = [{"type": "text", "text": ctx},
                     {"type": "image_url",

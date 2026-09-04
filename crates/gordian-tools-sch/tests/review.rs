@@ -6,6 +6,7 @@ use async_trait::async_trait;
 use gordian_llm::{ChatMessage, MessageContent, Provider, StreamEnd, Tool};
 use gordian_tools_sch::render::SheetPngs;
 use gordian_tools_sch::review::{SAMPLES, Subject, review, summary};
+use sch_floorplan::visual::VisualFacts;
 use std::sync::Mutex;
 
 /// Replies with one scripted verdict per call, in order.
@@ -35,6 +36,19 @@ impl Provider for ScriptedCritic {
     }
 }
 
+/// An engine measurement with nothing wrong in it — what the critic is told is
+/// impossible on this sheet.
+fn clean_geometry() -> VisualFacts {
+    VisualFacts {
+        sheet_extent: [0.0, 0.0, 210.0, 297.0],
+        body_overlaps: Vec::new(),
+        wires_through_bodies: Vec::new(),
+        text_collisions: Vec::new(),
+        off_grid_pins: Vec::new(),
+        dangling_wire_ends: Vec::new(),
+    }
+}
+
 fn subject() -> Subject {
     Subject::new(
         SheetPngs {
@@ -42,6 +56,7 @@ fn subject() -> Subject {
             annotated: b"annotated".to_vec(),
             annotated_path: "/tmp/render-001.png".into(),
             parts: "R1=10k, U1=STM32F103C8T6".into(),
+            visual: clean_geometry(),
         },
         b"anchor".to_vec(),
     )

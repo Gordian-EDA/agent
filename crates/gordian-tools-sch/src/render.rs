@@ -18,6 +18,9 @@ use serde_json::{Value, json};
 pub struct SheetPngs {
     pub clean: Vec<u8>,
     pub annotated: Vec<u8>,
+    /// The engine's exact geometric + netlist analysis of the same sheet — the
+    /// ground truth that settles the critic's false-positive-prone classes.
+    pub visual: sch_floorplan::visual::VisualFacts,
     /// Where `annotated` was saved, for the agent loop to attach as an image.
     pub annotated_path: PathBuf,
     /// `refdes=value` for every real part, as the review's circuit context.
@@ -84,6 +87,7 @@ pub fn sheet_pngs(ctx: &AgentRuntime) -> Result<SheetPngs> {
     Ok(SheetPngs {
         clean,
         annotated,
+        visual: sheet.visual,
         annotated_path,
         parts,
     })

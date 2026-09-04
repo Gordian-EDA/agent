@@ -666,9 +666,6 @@ pub fn run_tool(name: &str, input: Value, ctx: &AgentRuntime) -> Result<Value> {
         "search_symbols" => search_symbols(input, ctx),
         "get_symbol_info" => get_symbol_info(input, ctx),
         "project_info" => project_info(ctx),
-        // `review_schematic` needs the vision model, which lives in the agent loop;
-        // `Agent::run_tool_call` serves it before this synchronous registry is reached.
-        "review_schematic" => bail!("review_schematic is served by the agent loop, not by run_tool"),
         "reserve_refs" => reserve_refs(input, ctx),
         "get_footprint_info" => pcb_workflow::get_footprint_info(input, ctx),
         "sync_board" => match bench_refusal(ctx, "sync_board")? {

@@ -431,8 +431,6 @@ fn is_schematic_phase_tool(name: &str) -> bool {
             "search_symbols"
                 | "get_symbol_info"
                 | "project_info"
-                | "render_schematic"
-                | "review_schematic"
                 | "search_footprints"
                 | "get_footprint_info"
                 | "assign_footprints"
@@ -650,6 +648,45 @@ impl<P: Provider> Agent<P> {
             max_requests: None,
             settling: SettlingTools::default(),
             tool_seq: AtomicU64::new(0),
+        }
+    }
+
+    /// Serve `review_schematic`: render the sheet on the blocking pool, then grade
+    /// it with FRESH, history-free vision calls. The synchronous tool registry
+    /// cannot do this — the critic is the model itself. Both halves are deadlined
+    /// like any other tool; neither writes the design, so an expired render needs
+    /// no settling, unlike a mutation.
+    async fn review_schematic(&self, input: &Value) -> ToolOutcome {
+        if !self.client.vision() {
+            return into_outcome(Ok(json!({
+                "error": "this model has no vision input; review_schematic needs to see the render",
+            })));
+        }
+        let ctx = Arc::clone(&self.runtime);
+        let input = input.clone();
+        let render =
+            tokio::task::spawn_blocking(move || gordian_tools_sch::review::prepare(&input, &ctx));
+        let subject = match tokio::time::timeout(RENDER_TIMEOUT, render).await {
+            Err(_) => {
+                return into_outcome(Err(anyhow::anyhow!(tool_timeout_message(
+                    "review_schematic",
+                    RENDER_TIMEOUT
+                ))));
+            }
+            Ok(Err(e)) => return into_outcome(Err(anyhow::anyhow!("review render failed: {e}"))),
+            Ok(Ok(Err(e))) => return into_outcome(Err(e)),
+            Ok(Ok(Ok(Err(refusal)))) => return into_outcome(Ok(refusal)),
+            Ok(Ok(Ok(Ok(subject)))) => subject,
+        };
+        let graded = gordian_tools_sch::review::review(&self.client, &subject);
+        match tokio::time::timeout(CRITIC_TIMEOUT, graded).await {
+            Ok(result) => into_outcome(result),
+            Err(_) => into_outcome(Ok(json!({
+                "error": format!(
+                    "the visual critic did not answer within {}s; try review_schematic again",
+                    CRITIC_TIMEOUT.as_secs()
+                ),
+            }))),
         }
     }
 
@@ -1112,7 +1149,10 @@ impl<P: Provider> Agent<P> {
                     result
                 };
                 let parsed = parse_or_null(&content);
-                if dispatched && is_state_scoped_read(&call.fn_name) {
+                // Only a read that actually answered is spent: a failed one left
+                // the state unchanged and told the model to try again.
+                if dispatched && is_state_scoped_read(&call.fn_name) && parsed.get("error").is_none()
+                {
                     state_read_uses.insert(call.fn_name.clone(), tool_state_generation);
                 }
                 let prior_generation = tool_state_generation;
@@ -1267,31 +1307,6 @@ impl<P: Provider> Agent<P> {
             outcome.image_path,
             true,
         )
-    }
-}
-
-/// Serve `review_schematic`: render the sheet on the blocking pool, then grade it
-/// with a FRESH, history-free vision call. The synchronous tool registry cannot
-/// do this — the critic is the model itself.
-impl<P: Provider> Agent<P> {
-    async fn review_schematic(&self, input: &Value) -> ToolOutcome {
-        if !self.client.vision() {
-            return into_outcome(Ok(json!({
-                "error": "this model has no vision input; review_schematic needs to see the render",
-            })));
-        }
-        let ctx = Arc::clone(&self.runtime);
-        let input = input.clone();
-        let prepared =
-            tokio::task::spawn_blocking(move || gordian_tools_sch::review::prepare(&input, &ctx))
-                .await;
-        let subject = match prepared {
-            Err(e) => return into_outcome(Err(anyhow::anyhow!("review render task failed: {e}"))),
-            Ok(Err(e)) => return into_outcome(Err(e)),
-            Ok(Ok(Err(refusal))) => return into_outcome(Ok(refusal)),
-            Ok(Ok(Ok(subject))) => subject,
-        };
-        into_outcome(gordian_tools_sch::review::review(&self.client, &subject).await)
     }
 }
 
@@ -1952,6 +1967,12 @@ fn is_board_tool(name: &str) -> bool {
             | "update_board_outline"
     )
 }
+
+/// How long `review_schematic` waits for KiCAD to export and rasterise the sheet.
+const RENDER_TIMEOUT: Duration = Duration::from_secs(90);
+
+/// How long it then waits for the whole grading ensemble.
+const CRITIC_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// Margin over a self-deadlining tool's own budget. The budget covers the search and
 /// the gate; the payload audit before it and the atomic write plus the post-commit

@@ -20,17 +20,21 @@ use serde_json::{Value, json};
 use crate::render::{SheetPngs, sheet_pngs};
 
 /// The critic rubric, shared verbatim with `tools/schematic_critic.py`.
-pub const CRITIC_SYSTEM: &str = include_str!("../../../tools/schematic_critic_system.txt");
+const CRITIC_SYSTEM: &str = include_str!("../../../tools/schematic_critic_system.txt");
 
 /// The anchor framing, shared verbatim with `tools/schematic_critic.py`.
-pub const ANCHOR_CALIBRATION: &str = include_str!("../../../tools/schematic_critic_anchor.txt");
+const ANCHOR_CALIBRATION: &str = include_str!("../../../tools/schematic_critic_anchor.txt");
+
+/// What suppresses the two false-positive-prone defect classes when the engine's
+/// own geometry says they cannot be there. Shared verbatim with the same script.
+const ENGINE_CLEAN: &str = include_str!("../../../tools/schematic_critic_engine_clean.txt");
 
 /// The default anchor: the human sheet the harness calibrates every schematic
 /// score against. Embedded so the tool is anchored wherever the agent runs.
 const DEFAULT_ANCHOR: &[u8] = include_bytes!("../../../quality/anchor/schematic-9.png");
 
 /// How the reference is described back to the model.
-pub const REFERENCE: &str = "human sheet rated 9";
+const REFERENCE: &str = "human sheet rated 9";
 
 /// Grades per review. Enough to take a modal score out of a noisy grader.
 pub const SAMPLES: usize = 3;
@@ -59,9 +63,12 @@ impl Subject {
 /// Render the sheet and load the anchor. Blocking: KiCAD exports the SVG.
 /// `input` accepts `{anchor}` — a path to a different reference PNG.
 pub fn prepare(input: &Value, ctx: &AgentRuntime) -> Result<Result<Subject, Value>> {
-    if !ctx.sch_path().exists() {
+    if !ctx.sch_path().is_file() {
         return Ok(Err(json!({
-            "error": "no schematic yet — create one with place_parts first",
+            "error": format!(
+                "no schematic at {} yet — create one before reviewing it",
+                ctx.sch_path().display()
+            ),
         })));
     }
     let anchor = match input.get("anchor").and_then(Value::as_str) {
@@ -90,7 +97,7 @@ fn png(bytes: Vec<u8>) -> Binary {
 /// Grade the sheet [`SAMPLES`] times and report the modal run as the tool result.
 pub async fn review(client: &dyn Provider, subject: &Subject) -> Result<Value> {
     let messages = [ChatMessage::user(MessageContent::from_parts(vec![
-        ContentPart::from_text(user_prompt(&subject.sheet.parts)),
+        ContentPart::from_text(user_prompt(&subject.sheet)),
         ContentPart::Binary(png(subject.sheet.clean.clone())),
         ContentPart::Binary(subject.anchor.clone()),
         ContentPart::Binary(png(subject.sheet.annotated.clone())),
@@ -138,17 +145,57 @@ pub async fn review(client: &dyn Provider, subject: &Subject) -> Result<Value> {
 /// reused verbatim, so the image order it names — sheet first, reference second —
 /// is the order they are attached in; the annotated third image only carries the
 /// coordinates the agent needs to act on a defect.
-fn user_prompt(parts: &str) -> String {
+///
+/// The engine has already measured this exact geometry, so the answer to the two
+/// classes the rubric spends half its length warning about is stated as ground
+/// truth rather than left to the grader's eyes.
+fn user_prompt(sheet: &SheetPngs) -> String {
+    let parts = &sheet.parts;
     let calibration = ANCHOR_CALIBRATION.trim();
+    let ground_truth = engine_ground_truth(&sheet.visual);
     format!(
         "Audit this rendered schematic for layout quality. Reason first (trace every \
          wire-through-body and dangling-pin candidate to its endpoints), then emit the \
-         FINAL_JSON verdict. Parts on the sheet: {parts}.\n\n{calibration}\n\n\
+         FINAL_JSON verdict. Parts on the sheet: {parts}.\n\n{calibration}\n\n{ground_truth}\n\n\
          The THIRD attached image is the FIRST sheet again under a millimetre coordinate \
          overlay; read it only to locate defects. Add three fields to every defect: \
          \"at_mm\": [x, y] — where it is, in sheet millimetres off that overlay; \
          \"refs\": the reference designators involved; and \"fix\": the one concrete \
          re-layout that removes it."
+    )
+}
+
+/// The engine's verdict on the two false-positive-prone classes: either they are
+/// impossible on this sheet, or these are exactly the ones that are real.
+fn engine_ground_truth(visual: &sch_floorplan::visual::VisualFacts) -> String {
+    if visual.wires_through_bodies.is_empty() && visual.dangling_wire_ends.is_empty() {
+        return ENGINE_CLEAN.trim().to_string();
+    }
+    let crossings = visual
+        .wires_through_bodies
+        .iter()
+        .map(|c| c.reference.clone())
+        .collect::<Vec<_>>();
+    let dangling = visual
+        .dangling_wire_ends
+        .iter()
+        .map(|[x, y]| format!("({x}, {y})"))
+        .collect::<Vec<_>>();
+    format!(
+        "AUTHORITATIVE ENGINE GROUND TRUTH (exact geometric + netlist analysis of the real \
+         coordinates): the ONLY wires through a body are on {}; the ONLY bare wire ends are \
+         at {} mm. Report no other wire-through-body or dangling-pin defect — any such claim \
+         is a confirmed false positive.",
+        if crossings.is_empty() {
+            "no part".to_string()
+        } else {
+            crossings.join(", ")
+        },
+        if dangling.is_empty() {
+            "no point".to_string()
+        } else {
+            dangling.join(", ")
+        },
     )
 }
 
@@ -168,10 +215,20 @@ fn modal(mut runs: Vec<(f64, Value)>) -> (f64, Value) {
         let count = runs.iter().filter(|(s, _)| *s == score).count();
         (count, -(score - middle).abs())
     };
-    let best = runs
-        .iter()
-        .map(|(score, _)| *score)
-        .max_by(|a, b| rank(*a).partial_cmp(&rank(*b)).expect("finite ranks"))
+    let mut candidates: Vec<f64> = runs.iter().map(|(score, _)| *score).collect();
+    candidates.dedup();
+    let best = candidates
+        .into_iter()
+        .reduce(|best, score| {
+            match rank(score)
+                .partial_cmp(&rank(best))
+                .expect("finite ranks")
+                .then(best.total_cmp(&score))
+            {
+                std::cmp::Ordering::Greater => score,
+                _ => best,
+            }
+        })
         .expect("at least one run");
     runs.into_iter()
         .find(|(score, _)| *score == best)
