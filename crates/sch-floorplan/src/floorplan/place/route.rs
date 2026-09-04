@@ -209,6 +209,19 @@ pub(crate) fn wire(
 ///     corner with no detour. Humans do draw these; what they never draw is a long snake.
 ///   * beyond that, always a label.
 ///
+/// The LENGTH ladder measures a hop against the SHEET, so it only decides hops that cross
+/// one. A name earns its keep by sparing the reader a wire he would otherwise follow out
+/// of the sub-circuit he is reading; between two pins of the SAME block there is no such
+/// journey. So a within-block hop is judged as a LOCAL one however far apart its ends are
+/// — the converse of the cross-block rule at the call site.
+///
+/// The SHAPE gate does NOT lift with it, and that is the whole of the difference between
+/// this rule and "wire everything inside a block". Measured on the corpus, dropping the
+/// shape gate too draws 24 more hops and costs 17 more crossings, and a visual review of
+/// the sheets called the extra ones a loss: the ones that read well were the ones a clean
+/// shape was already available for. Shape is what the eye is reading; block membership
+/// only says whether a NAME would have been worth its ink.
+///
 /// Two riders. A hop shorter than [`CROSS_LABEL_LEN_MM`] keeps whatever legal route it has
 /// — a tight cluster must not fragment into label spam over one crossing. And an endpoint
 /// that could not seat a body-clear label has no label to degrade to, so its hop is judged
@@ -236,12 +249,13 @@ impl LabelPolicy {
     }
 
     /// The shape budget for a hop whose ends are `direct` mm apart, or `None` when no
-    /// wire is acceptable at that distance. A hop neither of whose ends could seat a
-    /// body-clear label has no label to degrade to, so the LENGTH gate lifts and it is
-    /// judged as a local hop however far it reaches; the SHAPE gate does not lift.
-    fn budget(&self, direct: f64, label_clear: bool) -> Option<f64> {
+    /// wire is acceptable at that distance. Two things lift the LENGTH gate, so that the
+    /// hop is judged as a local one however far it reaches: a hop within ONE block, and a
+    /// hop neither of whose ends could seat a body-clear label (which has no label to
+    /// degrade to). Neither lifts the SHAPE gate.
+    fn budget(&self, direct: f64, label_clear: bool, within_block: bool) -> Option<f64> {
         match direct {
-            d if d <= self.len_mm || !label_clear => Some(geom::SHAPE_GENERAL),
+            d if d <= self.len_mm || !label_clear || within_block => Some(geom::SHAPE_GENERAL),
             d if d <= self.long_simple_len_mm => Some(geom::SHAPE_SIMPLE),
             _ => None,
         }
@@ -259,6 +273,7 @@ impl LabelPolicy {
         path: &[::geom::Point2],
         crossings: usize,
         label_clear: bool,
+        within_block: bool,
     ) -> bool {
         let shape = geom::RouteShape::of(path, crossings);
         let direct = match (path.first(), path.last()) {
@@ -276,7 +291,7 @@ impl LabelPolicy {
             true => 0.0,
             false => geom::CROSSING_COST * crossings.min(1) as f64,
         };
-        self.budget(direct, label_clear)
+        self.budget(direct, label_clear, within_block)
             .is_some_and(|budget| shape.cost() - forgiven <= budget)
     }
 }
@@ -464,21 +479,25 @@ pub(crate) fn route_signal(
         }
         if let Some(p) = router.route_edge(a, da, b, net, scene) {
             let crossings = sch_model::route::path_crossings(&p, net, scene);
-            // A hop between two SECTIONS of the sheet is a bus wire, and thirty of them
-            // between one MCU and its headers is a braid nobody can follow. A person names
-            // those at both ends. A tool-invented name is worth nothing as a name, so it
-            // still takes the wire.
-            let across = !is_unnamed(net)
-                && match (&term_pin[i], &term_pin[j]) {
-                    (Some((a, _)), Some((b, _))) => items[*a].block != items[*b].block,
-                    _ => false,
-                };
+            // Which side of the block boundary a hop falls on decides it. BETWEEN blocks
+            // it is a bus wire — thirty of them from one MCU to its headers is a braid
+            // nobody can follow, and a person names those at both ends. WITHIN a block it
+            // is local ink a person draws. A tool-invented name is worth nothing as a
+            // name, so it takes the wire either way. `None` where a terminal is virtual:
+            // a port exit belongs to no block.
+            let same_block = match (&term_pin[i], &term_pin[j]) {
+                (Some((x, _)), Some((y, _))) => Some(items[*x].block == items[*y].block),
+                _ => None,
+            };
+            let within = same_block == Some(true);
+            let across = same_block == Some(false) && !is_unnamed(net);
             if across
                 || !label_policy.keeps(
                     net,
                     &p,
                     crossings,
                     term_label_clear[i] && term_label_clear[j],
+                    within,
                 )
             {
                 continue;
@@ -2431,5 +2450,33 @@ mod tests {
             55.88,
             &pins
         ));
+    }
+
+    /// Within a block the LENGTH gate lifts and the SHAPE gate does not: the same Z the
+    /// ladder names for being 70 mm long is drawn between two pins of one block, but a
+    /// shape SHAPE_GENERAL refuses is named wherever it sits.
+    #[test]
+    fn a_within_block_hop_lifts_the_length_gate_and_keeps_the_shape_gate() {
+        let policy = LabelPolicy::default();
+        // A 70 mm Z: past LABEL_LEN_MM, so the ladder judges it on SHAPE_SIMPLE.
+        let z = [
+            ::geom::Point2::new(0.0, 0.0),
+            ::geom::Point2::new(30.0, 0.0),
+            ::geom::Point2::new(30.0, 20.0),
+            ::geom::Point2::new(50.0, 20.0),
+        ];
+        assert!(!policy.keeps("SPI_CS", &z, 0, true, false));
+        assert!(policy.keeps("SPI_CS", &z, 0, true, true));
+        // A Z AND a crossing is more than a local hop may spend, block or no block.
+        assert!(!policy.keeps("SPI_CS", &z, 1, true, true));
+        // The same crossing on an otherwise direct run is within a local hop's means.
+        let straight = [::geom::Point2::new(0.0, 0.0), ::geom::Point2::new(60.0, 0.0)];
+        assert!(policy.keeps("SPI_CS", &straight, 1, true, true));
+        // Beyond what any wire may be drawn as, the block does not matter.
+        let sprawl = [
+            ::geom::Point2::new(0.0, 0.0),
+            ::geom::Point2::new(200.0, 0.0),
+        ];
+        assert!(!policy.keeps("SPI_CS", &sprawl, 0, true, true));
     }
 }

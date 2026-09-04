@@ -60,6 +60,22 @@ fn path_len(p: &[Point2]) -> f64 {
     p.windows(2).map(|w| w[0].manhattan(w[1])).sum()
 }
 
+/// Whether a simplified path ever REVERSES along its own axis.
+///
+/// [`Polyline::simplify`] merges only collinear runs going the same way, so a surviving
+/// collinear pair is a doubling-back: the wire retraces the segment it just drew, and —
+/// since the retrace starts at the pin — straight back through the pin's own body. It
+/// renders as one line whose electrical extent nobody can see, so it is not a path at
+/// all. [`elbow`] produces one whenever the pin faces AWAY from a partner on its own
+/// axis: the Z it falls back to has a zero-length middle leg and collapses.
+fn doubles_back(path: &[Point2]) -> bool {
+    path.windows(3).any(|w| {
+        let v1 = (w[1].x - w[0].x, w[1].y - w[0].y);
+        let v2 = (w[2].x - w[1].x, w[2].y - w[1].y);
+        (v1.0 * v2.1 - v1.1 * v2.0).abs() < EPS
+    })
+}
+
 /// Route one edge from `a` (a pin, leaving along `dir_a`) to `b` (any
 /// terminal). The plain elbow wins outright when it is legal and clean; a
 /// colliding OR CROSSING elbow sends the search into the canonical 3/4-segment
@@ -77,7 +93,10 @@ pub fn route_edge(
     scene: &RouteScene,
 ) -> Option<Vec<Point2>> {
     let quick = elbow(a, dir_a, b);
-    if path_ok(&quick, net, scene) && path_crossings(&quick, net, scene) == 0 {
+    if !doubles_back(&quick)
+        && path_ok(&quick, net, scene)
+        && path_crossings(&quick, net, scene) == 0
+    {
         return Some(quick);
     }
 
@@ -131,7 +150,7 @@ pub fn route_edge(
     let mut best: Option<Ranked> = None;
     let consider = |raw: Vec<Point2>, best: &mut Option<Ranked>| {
         let p = Polyline::new(raw).simplify().into_points();
-        if p.len() < 2 || !path_ok(&p, net, scene) {
+        if p.len() < 2 || doubles_back(&p) || !path_ok(&p, net, scene) {
             return;
         }
         let shape = RouteShape::of(&p, path_crossings(&p, net, scene));
@@ -492,6 +511,32 @@ mod tests {
             routed,
             elbow(Point2::new(0.0, 0.0), Dir::East, Point2::new(12.0, 0.0))
         );
+    }
+
+    #[test]
+    fn a_pin_facing_away_from_its_partner_never_doubles_back_over_itself() {
+        // Pin `a` faces WEST with its partner EAST of it on the same row: the elbow's
+        // fallback Z has a zero-length middle leg and collapses to a lead west and a run
+        // straight back over it, through the pin. Whatever the router answers, it is
+        // never that.
+        let s = scene(vec![], vec![], vec![]);
+        let p = route_edge(
+            Point2::new(0.0, 0.0),
+            Dir::West,
+            Point2::new(15.24, 0.0),
+            "A",
+            &s,
+        );
+        assert!(doubles_back(&elbow(
+            Point2::new(0.0, 0.0),
+            Dir::West,
+            Point2::new(15.24, 0.0)
+        )));
+        if let Some(p) = &p {
+            assert!(path_ok(p, "A", &s));
+            assert!(!doubles_back(p), "doubles back: {p:?}");
+            assert_axis_aligned(p);
+        }
     }
 
     #[test]
