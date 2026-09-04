@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 
 use geom::{EPS, GRID_50_MIL, Point2, Rect, Segment};
 
-use super::{Justify, SchematicWriter, TextPos, Wire, field_anchors, field_box};
+use super::{Justify, SchematicWriter, TextPos, Wire, field_anchors, field_box, label_rect};
 
 /// What [`SchematicWriter::solve_text_positions`] mutates once the greedy solver
 /// has picked a candidate for the parallel [`sch_model::text::Movable`].
@@ -265,7 +265,7 @@ impl SchematicWriter {
     /// for their own refdes), pin name/number text, wires, no-connect markers,
     /// and fixed (stub-less) labels.
     fn build_obstacles(&self) -> Vec<sch_model::text::Obstacle> {
-        use sch_model::text::{ObKind, Obstacle, label_box, pin_text_boxes, text_width, wire_box};
+        use sch_model::text::{ObKind, Obstacle, pin_text_boxes, wire_box};
         let mut obstacles: Vec<Obstacle> = Vec::new();
         for inst in &self.instances {
             let h = inst.half_extents.rotated_half_extents(inst.angle);
@@ -316,7 +316,7 @@ impl SchematicWriter {
         for l in &self.labels {
             if l.stub.is_none() {
                 obstacles.push(Obstacle {
-                    bbox: label_box(l.at, l.dir, text_width(&l.net)),
+                    bbox: label_rect(l, l.at),
                     kind: ObKind::Hard,
                 });
             }
@@ -329,7 +329,7 @@ impl SchematicWriter {
     /// onto the always-safe pin endpoint keeping the outward direction (the stub
     /// wire is dropped when retraction wins).
     fn stub_label_movables(&self) -> (Vec<sch_model::text::Movable>, Vec<Apply>) {
-        use sch_model::text::{Movable, label_box, text_width};
+        use sch_model::text::Movable;
         let mut movables: Vec<Movable> = Vec::new();
         let mut applies: Vec<Apply> = Vec::new();
         let mut stub_idx: Vec<usize> = (0..self.labels.len())
@@ -338,14 +338,10 @@ impl SchematicWriter {
         stub_idx.sort_by(|&a, &b| self.labels[a].uuid_key.cmp(&self.labels[b].uuid_key));
         for &i in &stub_idx {
             let l = &self.labels[i];
-            let wdt = text_width(&l.net);
             let owner = l.uuid_key.split(':').next().unwrap_or("").to_string();
             movables.push(Movable {
                 owner: Some(owner),
-                candidates: vec![
-                    label_box(l.at, l.dir, wdt),
-                    label_box(l.stub.unwrap().pin_at, l.dir, wdt),
-                ],
+                candidates: vec![label_rect(l, l.at), label_rect(l, l.stub.unwrap().pin_at)],
             });
             applies.push(Apply::StubLabel(i));
         }
@@ -380,7 +376,7 @@ impl SchematicWriter {
     /// adjacent rails never merge their names. `None` for `power:PWR_FLAG`,
     /// whose Value is hidden and has nothing to place.
     fn power_value_movable(&self, i: usize) -> Option<(sch_model::text::Movable, Apply)> {
-        use sch_model::text::{Movable, text_width};
+        use sch_model::text::Movable;
         let r2 = |v: f64| (v * 100.0).round() / 100.0;
         let inst = &self.instances[i];
         if inst.lib_id == "power:PWR_FLAG" {
@@ -389,35 +385,20 @@ impl SchematicWriter {
         let h = inst.half_extents.rotated_half_extents(inst.angle);
         let (cx, cy) = (inst.at[0], inst.at[1]);
         let (minx, miny, maxx, maxy) = (cx - h[0], cy - h[1], cx + h[0], cy + h[1]);
-        let vw = text_width(&inst.value);
-        let above = (
-            TextPos {
-                at: [r2(cx), r2(miny - 0.64)],
-                justify: Justify::Center,
-            },
-            [cx - vw / 2.0, miny - 2.24, cx + vw / 2.0, miny - 0.64].into(),
-        );
-        let below = (
-            TextPos {
-                at: [r2(cx), r2(maxy + 2.24)],
-                justify: Justify::Center,
-            },
-            [cx - vw / 2.0, maxy + 0.64, cx + vw / 2.0, maxy + 2.24].into(),
-        );
-        let right = (
-            TextPos {
-                at: [r2(maxx + 0.64), r2(cy + 0.8)],
-                justify: Justify::Left,
-            },
-            [maxx + 0.64, cy - 0.8, maxx + 0.64 + vw, cy + 0.8].into(),
-        );
-        let left = (
-            TextPos {
-                at: [r2(minx - 0.64), r2(cy + 0.8)],
-                justify: Justify::Right,
-            },
-            [minx - 0.64 - vw, cy - 0.8, minx - 0.64, cy + 0.8].into(),
-        );
+        // Each candidate is the anchor the writer will emit, boxed by the model
+        // that measures what KiCAD then draws there — so a spot the solver
+        // approves is a spot the readability lint clears.
+        let seat = |at: [f64; 2], justify: Justify| {
+            let pos = TextPos {
+                at: [r2(at[0]), r2(at[1])],
+                justify,
+            };
+            (pos, field_box(pos.at, justify, &inst.value))
+        };
+        let above = seat([cx, miny - 0.64], Justify::Center);
+        let below = seat([cx, maxy + 2.24], Justify::Center);
+        let right = seat([maxx + 0.64, cy + 0.8], Justify::Left);
+        let left = seat([minx - 0.64, cy + 0.8], Justify::Right);
         // A 180-rotated power symbol points down (GND family): the
         // name goes below the graphic; otherwise above.
         let cands = if inst.angle == 180.0 {
@@ -440,136 +421,64 @@ impl SchematicWriter {
     /// symbols. Wide (rotated passive) bodies prefer above/below; ICs carry the
     /// pair on the horizontal band least overlapping their own pin text.
     fn field_pair_movable(&self, i: usize) -> (sch_model::text::Movable, Apply) {
-        use sch_model::text::{Movable, pin_text_boxes, text_width};
+        use sch_model::text::{Movable, pin_text_boxes};
         let r2 = |v: f64| (v * 100.0).round() / 100.0;
         let inst = &self.instances[i];
         let h = inst.half_extents.rotated_half_extents(inst.angle);
         let (cx, cy) = (inst.at[0], inst.at[1]);
         let (minx, miny, maxx, maxy) = (cx - h[0], cy - h[1], cx + h[0], cy + h[1]);
-        let vw = text_width(&inst.value);
-        let rw = text_width(&inst.refdes);
-        let wmax = rw.max(vw);
-        // Each candidate: (ref anchor, val anchor, union bbox). Text is
-        // bottom-anchored and 1.6 tall, so a line anchored at Y occupies
-        // [Y-1.6, Y].
-        let right = (
-            TextPos {
-                at: [r2(maxx + 1.27), r2(cy - 1.27)],
-                justify: Justify::Left,
-            },
-            TextPos {
-                at: [r2(maxx + 1.27), r2(cy + 1.27)],
-                justify: Justify::Left,
-            },
-            [maxx + 1.27, cy - 2.87, maxx + 1.27 + wmax, cy + 1.27].into(),
+        // Each candidate is the pair of anchors the writer will emit, boxed by
+        // the model that measures what KiCAD then draws there — so a spot the
+        // solver approves is a spot the readability lint clears.
+        let seat = |ref_at: [f64; 2], val_at: [f64; 2], justify: Justify| {
+            let (rp, vp) = (
+                TextPos {
+                    at: [r2(ref_at[0]), r2(ref_at[1])],
+                    justify,
+                },
+                TextPos {
+                    at: [r2(val_at[0]), r2(val_at[1])],
+                    justify,
+                },
+            );
+            let (a, b) = (
+                field_box(rp.at, justify, &inst.refdes),
+                field_box(vp.at, justify, &inst.value),
+            );
+            let union = Rect::new(
+                a.min_x.min(b.min_x),
+                a.min_y.min(b.min_y),
+                a.max_x.max(b.max_x),
+                a.max_y.max(b.max_y),
+            );
+            (rp, vp, union)
+        };
+        let right = seat(
+            [maxx + 1.27, cy - 1.27],
+            [maxx + 1.27, cy + 1.27],
+            Justify::Left,
         );
-        let left = (
-            TextPos {
-                at: [r2(minx - 1.27), r2(cy - 1.27)],
-                justify: Justify::Right,
-            },
-            TextPos {
-                at: [r2(minx - 1.27), r2(cy + 1.27)],
-                justify: Justify::Right,
-            },
-            [minx - 1.27 - wmax, cy - 2.87, minx - 1.27, cy + 1.27].into(),
+        let left = seat(
+            [minx - 1.27, cy - 1.27],
+            [minx - 1.27, cy + 1.27],
+            Justify::Right,
         );
-        let above = (
-            TextPos {
-                at: [r2(cx), r2(miny - 3.18)],
-                justify: Justify::Center,
-            },
-            TextPos {
-                at: [r2(cx), r2(miny - 0.64)],
-                justify: Justify::Center,
-            },
-            [cx - wmax / 2.0, miny - 4.78, cx + wmax / 2.0, miny - 0.64].into(),
-        );
-        let below = (
-            TextPos {
-                at: [r2(cx), r2(maxy + 2.24)],
-                justify: Justify::Center,
-            },
-            TextPos {
-                at: [r2(cx), r2(maxy + 4.78)],
-                justify: Justify::Center,
-            },
-            [cx - wmax / 2.0, maxy + 0.64, cx + wmax / 2.0, maxy + 4.78].into(),
-        );
+        let above = seat([cx, miny - 3.18], [cx, miny - 0.64], Justify::Center);
+        let below = seat([cx, maxy + 2.24], [cx, maxy + 4.78], Justify::Center);
         // Corner fallbacks for crowded symbols (an IC whose four sides all
         // carry labels/power): the field pair tucks against a body corner.
-        let above_left = (
-            TextPos {
-                at: [r2(minx), r2(miny - 3.18)],
-                justify: Justify::Left,
-            },
-            TextPos {
-                at: [r2(minx), r2(miny - 0.64)],
-                justify: Justify::Left,
-            },
-            [minx, miny - 4.78, minx + wmax, miny - 0.64].into(),
-        );
-        let above_right = (
-            TextPos {
-                at: [r2(maxx), r2(miny - 3.18)],
-                justify: Justify::Right,
-            },
-            TextPos {
-                at: [r2(maxx), r2(miny - 0.64)],
-                justify: Justify::Right,
-            },
-            [maxx - wmax, miny - 4.78, maxx, miny - 0.64].into(),
-        );
-        let below_left = (
-            TextPos {
-                at: [r2(minx), r2(maxy + 2.24)],
-                justify: Justify::Left,
-            },
-            TextPos {
-                at: [r2(minx), r2(maxy + 4.78)],
-                justify: Justify::Left,
-            },
-            [minx, maxy + 0.64, minx + wmax, maxy + 4.78].into(),
-        );
-        let below_right = (
-            TextPos {
-                at: [r2(maxx), r2(maxy + 2.24)],
-                justify: Justify::Right,
-            },
-            TextPos {
-                at: [r2(maxx), r2(maxy + 4.78)],
-                justify: Justify::Right,
-            },
-            [maxx - wmax, maxy + 0.64, maxx, maxy + 4.78].into(),
-        );
+        let above_left = seat([minx, miny - 3.18], [minx, miny - 0.64], Justify::Left);
+        let above_right = seat([maxx, miny - 3.18], [maxx, miny - 0.64], Justify::Right);
+        let below_left = seat([minx, maxy + 2.24], [minx, maxy + 4.78], Justify::Left);
+        let below_right = seat([maxx, maxy + 2.24], [maxx, maxy + 4.78], Justify::Right);
         // Last-resort FAR bands (pushed ~5 mm further out): when a body is
         // ringed by packed neighbours — a tight decoupling cluster on a dense
         // board — every near spot is blocked and the solver would fall onto a
         // sibling's label/field. A far band clears it (the text reads a touch
         // detached but never overlaps). Appended LAST for both ICs and passives,
         // so a part with any near free spot is unaffected.
-        let above_far = (
-            TextPos {
-                at: [r2(cx), r2(miny - 8.18)],
-                justify: Justify::Center,
-            },
-            TextPos {
-                at: [r2(cx), r2(miny - 5.64)],
-                justify: Justify::Center,
-            },
-            [cx - wmax / 2.0, miny - 9.78, cx + wmax / 2.0, miny - 5.64].into(),
-        );
-        let below_far = (
-            TextPos {
-                at: [r2(cx), r2(maxy + 5.64)],
-                justify: Justify::Center,
-            },
-            TextPos {
-                at: [r2(cx), r2(maxy + 8.18)],
-                justify: Justify::Center,
-            },
-            [cx - wmax / 2.0, maxy + 5.64, cx + wmax / 2.0, maxy + 9.78].into(),
-        );
+        let above_far = seat([cx, miny - 8.18], [cx, miny - 5.64], Justify::Center);
+        let below_far = seat([cx, maxy + 5.64], [cx, maxy + 8.18], Justify::Center);
         // Multi-pin parts (ICs) carry refdes+value on a HORIZONTAL band
         // (above/below the body), the reference convention — a long MPN
         // ("SN74LVC2T45DCUR") on a band clears the horizontal series
@@ -732,51 +641,19 @@ impl SchematicWriter {
 
     /// Shift the whole drawing so its true minimum corner — including the rail
     /// power symbols, edge port labels, and solved field text that extend beyond
-    /// the symbol bodies — lands at the page margin. The floorplan's `normalize`
+    /// the symbol bodies — lands at the page margin. The corner is
+    /// [`Self::content_bbox`]'s, so the page the sheet is framed on and the page
+    /// it is sized for are measured the same way. The floorplan's `normalize`
     /// only shifts symbol bodies, and it runs *before* wiring adds those edge
     /// elements, so a left/top port label can otherwise sit at a negative
     /// coordinate and be clipped off the content-fit page. Run last, after text is
     /// solved, so field positions move with their symbols.
     fn reframe(&mut self) {
-        use sch_model::text::text_width;
         const M: f64 = 12.7;
-        let (mut minx, mut miny) = (f64::MAX, f64::MAX);
-        let mut lo = |x: f64, y: f64| {
-            minx = minx.min(x);
-            miny = miny.min(y);
-        };
-        for i in &self.instances {
-            let h = i.half_extents.rotated_half_extents(i.angle);
-            lo(i.at[0] - h[0], i.at[1] - h[1]);
-            for (p, text) in [(i.ref_pos, &i.refdes), (i.val_pos, &i.value)] {
-                let Some(p) = p else { continue };
-                lo(p.at[0] - text_width(text), p.at[1] - 1.6);
-            }
-        }
-        for w in &self.wires {
-            lo(w.a[0], w.a[1]);
-            lo(w.b[0], w.b[1]);
-        }
-        for l in &self.labels {
-            // A right-justified edge label (a left/top port) extends back toward
-            // smaller x by its text width; cover both directions conservatively.
-            lo(l.at[0] - text_width(&l.net), l.at[1] - 1.6);
-        }
-        for j in &self.junctions {
-            lo(j.at[0], j.at[1]);
-        }
-        for nc in &self.no_connects {
-            lo(nc.at[0], nc.at[1]);
-        }
-        for t in &self.texts {
-            lo(t.at[0], t.at[1] - t.size);
-        }
-        for r in &self.rects {
-            lo(r.start[0].min(r.end[0]), r.start[1].min(r.end[1]));
-        }
-        if minx == f64::MAX {
+        let Some(content) = self.content_bbox() else {
             return;
-        }
+        };
+        let (minx, miny) = (content.min_x, content.min_y);
         // Snap the shift to the grid: all wire/pin geometry is grid-aligned, so a
         // grid-multiple shift keeps it grid-aligned (KiCAD ERCs off-grid endpoints).
         // `minx`/`miny` include off-grid text extents, so an unsnapped shift would
@@ -798,7 +675,6 @@ impl SchematicWriter {
     /// a placement on its true post-text-solve extent, edge label-columns included). `None`
     /// for an empty sheet.
     pub fn content_bbox(&self) -> Option<geom::Rect> {
-        use sch_model::text::text_width;
         let (mut x0, mut y0, mut x1, mut y1) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
         let mut acc = |lx: f64, ly: f64, hx: f64, hy: f64| {
             x0 = x0.min(lx);
@@ -806,6 +682,7 @@ impl SchematicWriter {
             x1 = x1.max(hx);
             y1 = y1.max(hy);
         };
+
         for i in &self.instances {
             let h = i.half_extents.rotated_half_extents(i.angle);
             acc(
@@ -814,12 +691,12 @@ impl SchematicWriter {
                 i.at[0] + h[0],
                 i.at[1] + h[1],
             );
-            // Fields are boxed by the width they actually render at, both ways: a long
-            // MPN value overhangs a fixed allowance and then falls off the page.
+            // Fields are boxed exactly as they render: a long MPN value overhangs
+            // a fixed allowance and then falls off the page.
             for (p, text) in [(i.ref_pos, &i.refdes), (i.val_pos, &i.value)] {
                 let Some(p) = p else { continue };
-                let tw = text_width(text);
-                acc(p.at[0] - tw, p.at[1] - 1.6, p.at[0] + tw, p.at[1] + 1.6);
+                let b = super::field_box(p.at, p.justify, text);
+                acc(b.min_x, b.min_y, b.max_x, b.max_y);
             }
         }
         for w in &self.wires {
@@ -831,8 +708,8 @@ impl SchematicWriter {
             );
         }
         for l in &self.labels {
-            let tw = text_width(&l.net);
-            acc(l.at[0] - tw, l.at[1] - 1.6, l.at[0] + tw, l.at[1] + 1.6);
+            let b = label_rect(l, l.at);
+            acc(b.min_x, b.min_y, b.max_x, b.max_y);
         }
         for j in &self.junctions {
             acc(j.at[0], j.at[1], j.at[0], j.at[1]);
@@ -841,8 +718,16 @@ impl SchematicWriter {
             acc(nc.at[0], nc.at[1], nc.at[0], nc.at[1]);
         }
         for t in &self.texts {
-            let tw = text_width(&t.text) * t.size / 1.27;
-            acc(t.at[0], t.at[1] - t.size, t.at[0] + tw, t.at[1] + t.size);
+            // `emit::render_text` writes notes `(justify left bottom)`.
+            let b = sch_model::text::note_box(
+                &t.text,
+                t.size,
+                Justify::Left.hjust(),
+                sch_model::text::VJust::Bottom,
+                0.0,
+                t.at,
+            );
+            acc(b.min_x, b.min_y, b.max_x, b.max_y);
         }
         for r in &self.rects {
             acc(
@@ -912,10 +797,11 @@ impl SchematicWriter {
     }
 
     /// Would a net label anchored at `at` facing `dir` read CLEAR of every
-    /// symbol body, pin text, field, and existing label? EXACTLY the lint's
-    /// geometry (`label_box` vs the same item boxes `layout_warnings` builds),
-    /// so a placement this approves never trips the lint. `own_refdes` exempts
+    /// symbol body, pin text, field, and existing label? `own_refdes` exempts
     /// the label's own symbol (a stub label legitimately hugs its own pin).
+    ///
+    /// Boxed by the one as-drawn model, like the lint it must agree with: a
+    /// landing this approves never trips `layout_warnings`.
     pub fn label_landing_clear(
         &self,
         at: geom::Point2,
@@ -923,8 +809,8 @@ impl SchematicWriter {
         net: &str,
         own_refdes: &str,
     ) -> bool {
-        use sch_model::text::{label_box, pin_text_boxes, text_width};
-        let b = label_box(at, dir, text_width(net));
+        use sch_model::text::{label_box, pin_text_boxes};
+        let b = label_box(at, dir, net);
         for inst in &self.instances {
             if inst.refdes.starts_with('#') || inst.refdes == own_refdes {
                 continue;
@@ -954,7 +840,7 @@ impl SchematicWriter {
             if label.net == net {
                 continue;
             }
-            let lb = label_box(label.at, label.dir, text_width(&label.net));
+            let lb = label_rect(label, label.at);
             if lb.overlaps(&b) {
                 return false;
             }
@@ -977,7 +863,7 @@ impl SchematicWriter {
         &self,
         ignore_pairs: &std::collections::BTreeSet<(String, String)>,
     ) -> Vec<String> {
-        use sch_model::text::{label_box, pin_text_boxes, text_width};
+        use sch_model::text::pin_text_boxes;
 
         /// What an item is, for exemption decisions.
         #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1009,7 +895,7 @@ impl SchematicWriter {
                     let (_, vp) = field_anchors(inst);
                     items.push((
                         format!("value \"{}\" of {}", inst.value, inst.refdes),
-                        field_box(vp.at, vp.justify, text_width(&inst.value)),
+                        field_box(vp.at, vp.justify, &inst.value),
                         inst.refdes.clone(),
                         Kind::Text,
                     ));
@@ -1044,19 +930,19 @@ impl SchematicWriter {
             let (rp, vp) = field_anchors(inst);
             items.push((
                 format!("field \"{}\"", inst.refdes),
-                field_box(rp.at, rp.justify, text_width(&inst.refdes)),
+                field_box(rp.at, rp.justify, &inst.refdes),
                 inst.refdes.clone(),
                 Kind::Text,
             ));
             items.push((
                 format!("value \"{}\" of {}", inst.value, inst.refdes),
-                field_box(vp.at, vp.justify, text_width(&inst.value)),
+                field_box(vp.at, vp.justify, &inst.value),
                 inst.refdes.clone(),
                 Kind::Text,
             ));
         }
         for label in &self.labels {
-            let b = label_box(label.at, label.dir, text_width(&label.net));
+            let b = label_rect(label, label.at);
             let owner = label.uuid_key.split(':').next().unwrap_or("").to_string();
             items.push((
                 format!("label \"{}\" at {:?}", label.net, label.at),
@@ -1196,6 +1082,7 @@ mod tests {
                     angle: 0.0,
                     length: 2.54,
                     unit: 1,
+                    text: Default::default(),
                 },
                 PinGeom {
                     number: "2".into(),
@@ -1204,6 +1091,7 @@ mod tests {
                     angle: 180.0,
                     length: 2.54,
                     unit: 1,
+                    text: Default::default(),
                 },
                 PinGeom {
                     number: "3".into(),
@@ -1212,6 +1100,7 @@ mod tests {
                     angle: 270.0,
                     length: 2.54,
                     unit: 1,
+                    text: Default::default(),
                 },
             ],
         );
@@ -1223,11 +1112,13 @@ mod tests {
             first_after_near_bands.max_y < 80.0 || first_after_near_bands.min_y > 120.0,
             "ICs should try far above/below bands before side fields; got {first_after_near_bands:?}"
         );
+        // The body spans y 80..120; a field band may graze its edge by the
+        // stroke the glyphs are painted with, but never ride the pin text.
         assert!(
             movable
                 .candidates
                 .iter()
-                .all(|c| c.max_y < 80.0 || c.min_y > 120.0),
+                .all(|c| c.max_y < 80.1 || c.min_y > 119.9),
             "IC fields should never use side bands over pin text: {:?}",
             movable.candidates
         );

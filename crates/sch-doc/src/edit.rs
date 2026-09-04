@@ -80,10 +80,24 @@ fn free_reference(refdes: &str, taken: &std::collections::HashSet<String>) -> St
         .expect("an unbounded sequence has a free name")
 }
 
+/// Which way a label's text runs, given the angle it is drawn at.
+fn justify_for(rot: f64) -> &'static str {
+    match rot.rem_euclid(360.0) as i64 {
+        180 | 270 => "right",
+        _ => "left",
+    }
+}
+
 fn rename_generated(symbol: &mut SymbolInst, sheet_path: &str, refdes: &str) {
     let origin = symbol.at;
+    // KiCAD never draws a `#`-prefixed reference: `#PWR5` is bookkeeping for
+    // the netlister, and printing it puts a stray token on the drawing.
+    let generated = refdes.starts_with('#');
     match symbol.fields.get_mut("Reference") {
-        Some(field) => field.value = refdes.to_string(),
+        Some(field) => {
+            field.value = refdes.to_string();
+            field.hidden |= generated;
+        }
         None => {
             symbol.fields.insert(
                 "Reference".to_string(),
@@ -346,11 +360,14 @@ impl SchDoc {
             tagged("on_board", vec![yes_no(true)]),
             tagged("dnp", vec![yes_no(false)]),
             tagged("uuid", vec![quoted(uuid.clone())]),
+            // KiCAD never draws a `#`-prefixed reference: `#PWR5` is
+            // bookkeeping for the netlister, and printing it puts a stray
+            // token on the drawing beside the rail name.
             property_node(
                 "Reference",
                 refdes,
                 Pose::new(at.x, at.y - 2.54, 0.0),
-                false,
+                refdes.starts_with('#'),
             ),
             property_node("Value", value, Pose::new(at.x, at.y + 2.54, 0.0), false),
             property_node("Footprint", "", Pose::new(at.x, at.y, 0.0), true),
@@ -654,10 +671,15 @@ impl SchDoc {
             tagged("at", vec![num(at.x), num(at.y), num(at.rot)]),
             tagged(
                 "effects",
-                vec![tagged(
-                    "font",
-                    vec![tagged("size", vec![num(1.27), num(1.27)])],
-                )],
+                vec![
+                    tagged("font", vec![tagged("size", vec![num(1.27), num(1.27)])]),
+                    // KiCAD folds a label's angle into [0, 180) so the text
+                    // never reads upside down, which leaves the justification
+                    // as the only thing saying WHICH WAY it runs. Without it a
+                    // 180/270 label straddles its anchor and half the text
+                    // runs back over whatever it is naming.
+                    tagged("justify", vec![sym(justify_for(at.rot)), sym("bottom")]),
+                ],
             ),
             tagged("uuid", vec![quoted(uuid.clone())]),
         ]);

@@ -2043,6 +2043,21 @@ pub fn set_flags(input: Value, ctx: &AgentRuntime) -> Result<Value> {
 }
 
 /// Retarget a part at a different library symbol, keeping its connections.
+/// A label on `pin`, turned so its text reads AWAY from the symbol body.
+///
+/// KiCAD draws label text along the label's angle, so a label left at angle 0
+/// on a west-facing pin runs straight back over the part's own pin names.
+fn outward_label(pin: &sch_doc::PlacedPin) -> Pose {
+    let angle = if pin.out.x.abs() > pin.out.y.abs() {
+        if pin.out.x > 0.0 { 0.0 } else { 180.0 }
+    } else if pin.out.y < 0.0 {
+        90.0
+    } else {
+        270.0
+    };
+    Pose::new(pin.at.x, pin.at.y, angle)
+}
+
 pub fn swap_symbol(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let (Some(refdes), Some(lib_id)) = (
         input.get("ref").and_then(Value::as_str),
@@ -2276,8 +2291,7 @@ pub fn swap_symbol(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             continue;
         }
         let kind = crate::wiring::sheet_scope(&edit.doc, net).unwrap_or(LabelKind::Local);
-        edit.doc
-            .add_label(kind, net, Pose::new(pin.at.x, pin.at.y, 0.0));
+        edit.doc.add_label(kind, net, outward_label(pin));
         named.push(format!("{refdes}.{}={net}", pin.number));
     }
     let after = sch_doc::connect::extract(&edit.doc);
@@ -2299,8 +2313,7 @@ pub fn swap_symbol(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             continue;
         }
         let kind = crate::wiring::sheet_scope(&edit.doc, net).unwrap_or(LabelKind::Local);
-        edit.doc
-            .add_label(kind, net, Pose::new(pin.at.x, pin.at.y, 0.0));
+        edit.doc.add_label(kind, net, outward_label(pin));
         named.push(format!("{refdes}.{}={net}", pin.number));
     }
     redraw.labels_added += named.len();

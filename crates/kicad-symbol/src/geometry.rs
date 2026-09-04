@@ -65,6 +65,39 @@ pub struct PinGeom {
     /// folded to 1 (matching `symlib.rs::PinMeta`); direct (non-sub-block)
     /// pins are unit 1.
     pub unit: u8,
+    /// How KiCAD draws this pin's name and number.
+    #[serde(default)]
+    pub text: PinTextStyle,
+}
+
+/// The symbol-level settings that decide whether — and where — KiCAD draws a
+/// pin's name and number.
+///
+/// `name_offset` is the symbol's `(pin_names (offset …))`: a positive offset
+/// puts the name *inside* the body, that far past the pin's body end; zero puts
+/// it outside, centred on the pin line like the number but on the opposite side.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct PinTextStyle {
+    pub name_offset: f64,
+    pub names_hidden: bool,
+    pub numbers_hidden: bool,
+    /// This pin's own `hide` flag: a hidden pin draws neither name nor number.
+    pub pin_hidden: bool,
+    pub name_size: f64,
+    pub number_size: f64,
+}
+
+impl Default for PinTextStyle {
+    fn default() -> Self {
+        Self {
+            name_offset: 0.508,
+            names_hidden: false,
+            numbers_hidden: false,
+            pin_hidden: false,
+            name_size: 1.27,
+            number_size: 1.27,
+        }
+    }
 }
 
 /// Geometry plus the embeddable `(lib_symbols)` definition for one symbol.
@@ -134,7 +167,7 @@ impl SymbolGeometry {
         // `extends` while the current symbol has no pins of its own.
         let body = resolve_body(symbols, sym);
 
-        let pins = collect_pins(body);
+        let pins = collect_pins(body, sym);
 
         // Raw definition: the parent body's block, retargeted to `lib_id` and
         // (when derived) with nested sub-block prefixes rewritten.
@@ -172,7 +205,7 @@ impl SymbolGeometry {
             })?;
         Ok(SymbolGeometry {
             lib_id: lib_id.to_string(),
-            pins: collect_pins(resolve_body(&symbols, sym)),
+            pins: collect_pins(resolve_body(&symbols, sym), sym),
             raw_definition: definition.to_string(),
         })
     }
@@ -286,8 +319,22 @@ fn pins_of(sym: &Symbol) -> Vec<&SymPin> {
 ///
 /// Direct pins are unit 1; sub-block pins take the unit digit parsed from the
 /// `<NAME>_<unit>_<bodystyle>` block name (unit 0 / common folded to 1).
-fn collect_pins(sym: &Symbol) -> Vec<PinGeom> {
-    let mut out: Vec<PinGeom> = sym.pins.iter().filter_map(|p| pin_geom(p, 1)).collect();
+/// `body` owns the pin geometry; `style_from` is the symbol whose
+/// `pin_names`/`pin_numbers` settings apply (a derived symbol keeps its own).
+fn collect_pins(body: &Symbol, style_from: &Symbol) -> Vec<PinGeom> {
+    let style = |p: &SymPin| PinTextStyle {
+        name_offset: style_from.pin_names_offset.unwrap_or(0.508),
+        names_hidden: style_from.pin_names_hide,
+        numbers_hidden: style_from.pin_numbers_hide,
+        pin_hidden: p.hide,
+        ..PinTextStyle::default()
+    };
+    let sym = body;
+    let mut out: Vec<PinGeom> = sym
+        .pins
+        .iter()
+        .filter_map(|p| pin_geom(p, 1, style(p)))
+        .collect();
     for unit in &sym.units {
         let unit_no = unit
             .name
@@ -296,13 +343,17 @@ fn collect_pins(sym: &Symbol) -> Vec<PinGeom> {
             // Unit 0 holds graphics / pins common to all units; PinGeom units
             // are 1-based, so fold it into unit 1.
             .map_or(1, |u| u.max(1));
-        out.extend(unit.pins.iter().filter_map(|p| pin_geom(p, unit_no)));
+        out.extend(
+            unit.pins
+                .iter()
+                .filter_map(|p| pin_geom(p, unit_no, style(p))),
+        );
     }
     out
 }
 
 /// Build a single [`PinGeom`] for `unit`, dropping pins lacking number/at/length.
-fn pin_geom(p: &SymPin, unit: u8) -> Option<PinGeom> {
+fn pin_geom(p: &SymPin, unit: u8, text: PinTextStyle) -> Option<PinGeom> {
     Some(PinGeom {
         number: p.number.clone()?,
         name: p.name.clone().unwrap_or_default(),
@@ -310,6 +361,7 @@ fn pin_geom(p: &SymPin, unit: u8) -> Option<PinGeom> {
         angle: p.angle.unwrap_or(0.0),
         length: p.length?,
         unit,
+        text,
     })
 }
 

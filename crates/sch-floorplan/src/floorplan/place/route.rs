@@ -383,7 +383,7 @@ pub(crate) fn route_signal(
         ds.iter().all(|(ep, dir)| {
             let v = dir.vec();
             let end = [ep[0] + v[0] * STUB_MM, ep[1] + v[1] * STUB_MM];
-            let bx = sch_model::text::label_box(end, *dir, sch_model::text::text_width(net));
+            let bx = sch_model::text::label_box(end, *dir, net);
             !obstacles.iter().any(|r| bx.intersection(r).is_some())
         })
     };

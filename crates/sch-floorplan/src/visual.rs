@@ -5,6 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use geom::{EPS, GRID_50_MIL, Point2, Rect};
 use sch_doc::{Item as DocItem, SchDoc, connect, placed_pins};
 use sch_model::item::Item;
+use sch_model::text::TextKind;
 use serde::Serialize;
 
 use crate::floorplan::place::{
@@ -135,57 +136,85 @@ fn wire_body_collisions(
     found.into_iter().collect()
 }
 
+/// Everything the render shows as text touching something it should not.
+///
+/// The item set is [`sch_doc::drawn_texts`] — every field, label, port, note
+/// and pin name/number the sheet draws — boxed by the one as-drawn model, so a
+/// hit here is a hit the eye finds in the render. Pairs that are legitimate by
+/// construction are exempt: a text against its OWN symbol's body, and two pin
+/// texts of the same symbol (the library's intra-symbol layout, not ours).
+/// Bodies and wires are checked only against the text that has no business
+/// near them — a label rides its own wire by design, and pin text lies inside
+/// its own body.
 fn text_collisions(
     doc: &SchDoc,
     bodies: &BTreeMap<(String, u32), Rect>,
     wires: &[(DrawnSegment, String)],
 ) -> Vec<TextCollision> {
-    let mut found = BTreeSet::new();
-    for symbol in doc
+    let benched: BTreeSet<String> = doc
         .symbols()
-        .filter(|symbol| !symbol.refdes().is_empty() && !symbol.refdes().starts_with('#'))
-    {
-        for (field_name, field) in &symbol.fields {
-            let Some(at) = field
-                .at
-                .filter(|_| !field.hidden && !field.value.is_empty())
-            else {
+        .filter(|symbol| crate::bench::is_benched(symbol))
+        .map(|symbol| symbol.refdes().to_string())
+        .collect();
+    let texts: Vec<sch_model::text::DrawnText> = sch_doc::drawn_texts(doc)
+        .into_iter()
+        .filter(|text| !text.owner.as_ref().is_some_and(|r| benched.contains(r)))
+        .collect();
+    let mut found = BTreeSet::new();
+    for (i, a) in texts.iter().enumerate() {
+        for b in &texts[i + 1..] {
+            if !a.bbox.overlaps(&b.bbox) {
                 continue;
-            };
-            let field_rect = text_rect(&field.value, at.point(), at.rot, field.font_size);
-            for ((other_ref, _), body) in bodies {
-                if other_ref != symbol.refdes() && field_rect.overlaps(body) {
-                    found.insert(TextCollision {
-                        reference: symbol.refdes().to_string(),
-                        field: field_name.clone(),
-                        with: other_ref.clone(),
-                    });
-                }
             }
-            for (wire, net) in wires {
-                if wire.segment.dist_to_rect(&field_rect) <= EPS {
-                    found.insert(TextCollision {
-                        reference: symbol.refdes().to_string(),
-                        field: field_name.clone(),
-                        with: net.clone(),
-                    });
-                }
+            let same_owner = a.owner.is_some() && a.owner == b.owner;
+            if same_owner && a.kind.is_pin_text() && b.kind.is_pin_text() {
+                continue;
+            }
+            found.insert(TextCollision {
+                reference: a.owner.clone().unwrap_or_default(),
+                field: describe(a),
+                with: describe(b),
+            });
+        }
+        if a.kind.is_pin_text() {
+            continue;
+        }
+        for ((other, _), body) in bodies {
+            if a.owner.as_deref() != Some(other.as_str()) && a.bbox.overlaps(body) {
+                found.insert(TextCollision {
+                    reference: a.owner.clone().unwrap_or_default(),
+                    field: describe(a),
+                    with: other.clone(),
+                });
+            }
+        }
+        if matches!(a.kind, TextKind::Label | TextKind::PortLabel) {
+            continue;
+        }
+        for (wire, net) in wires {
+            if wire.segment.dist_to_rect(&a.bbox) <= EPS {
+                found.insert(TextCollision {
+                    reference: a.owner.clone().unwrap_or_default(),
+                    field: describe(a),
+                    with: net.clone(),
+                });
             }
         }
     }
     found.into_iter().collect()
 }
 
-fn text_rect(text: &str, at: Point2, rotation: f64, font_size: [f64; 2]) -> Rect {
-    let width = (sch_model::text::text_width(text) * font_size[0] / 1.27).max(font_size[0]);
-    let height = font_size[1].max(0.1);
-    let quarter = ((rotation / 90.0).round() as i64).rem_euclid(2) == 1;
-    let (width, height) = if quarter {
-        (height, width)
-    } else {
-        (width, height)
+/// How a drawn text names itself in a warning.
+fn describe(text: &sch_model::text::DrawnText) -> String {
+    let what = match text.kind {
+        TextKind::Field => "field",
+        TextKind::Label => "label",
+        TextKind::PortLabel => "port",
+        TextKind::FreeText => "text",
+        TextKind::PinName => "pin name",
+        TextKind::PinNumber => "pin",
     };
-    Rect::from_center_half(at, (width / 2.0, height / 2.0))
+    format!("{what} \"{}\"", text.text)
 }
 
 fn off_grid_pins(doc: &SchDoc) -> Vec<String> {
@@ -258,36 +287,17 @@ fn sheet_extent(doc: &SchDoc, bodies: &BTreeMap<(String, u32), Rect>) -> [f64; 4
     }
     for symbol in doc.symbols() {
         points.push(symbol.at.point());
-        for field in symbol.fields.values() {
-            if let Some(at) = field
-                .at
-                .filter(|_| !field.hidden && !field.value.is_empty())
-            {
-                extend_rect(
-                    &mut points,
-                    text_rect(&field.value, at.point(), at.rot, field.font_size),
-                );
-            }
-        }
+    }
+    for text in sch_doc::drawn_texts(doc) {
+        extend_rect(&mut points, text.bbox);
     }
     for item in doc.items() {
-        match item {
-            DocItem::Label(label) => extend_rect(
-                &mut points,
-                text_rect(&label.text, label.at.point(), label.at.rot, [1.27, 1.27]),
-            ),
-            DocItem::Text(text) => extend_rect(
-                &mut points,
-                text_rect(&text.text, text.at.point(), text.at.rot, [1.27, 1.27]),
-            ),
-            DocItem::Sheet(sheet) => {
-                points.push(sheet.at);
-                points.push(Point2::new(
-                    sheet.at.x + sheet.size.x,
-                    sheet.at.y + sheet.size.y,
-                ));
-            }
-            _ => {}
+        if let DocItem::Sheet(sheet) = item {
+            points.push(sheet.at);
+            points.push(Point2::new(
+                sheet.at.x + sheet.size.x,
+                sheet.at.y + sheet.size.y,
+            ));
         }
     }
     Rect::bounding(&points).map_or([0.0; 4], |rect| {

@@ -71,7 +71,19 @@ impl SchematicWriter {
     pub fn finish(mut self) -> String {
         self.prepare();
         self.debug_assert_unique_wire_segments();
+        self.render()
+    }
 
+    /// The same document [`Self::finish`] renders, without the shipped-sheet
+    /// assertion — for reading a CANDIDATE back (its netlist) during a search,
+    /// where a duplicate segment is a fact to measure rather than a contract
+    /// to trip over.
+    pub(crate) fn candidate_document(mut self) -> String {
+        self.prepare();
+        self.render()
+    }
+
+    fn render(self) -> String {
         let root_uuid = stable_uuid("sheet", ROOT_SHEET_KEY);
 
         let mut out = String::new();
@@ -349,6 +361,17 @@ fn render_instance(inst: &Instance, root_uuid: &str) -> String {
         90 => 270,
         270 => 90,
         _ => 0,
+    };
+    // A 180 symbol composes its field to 180, and `(mirror y)` reflects the
+    // sheet: either way KiCAD refuses to draw the text upside down and hangs
+    // it off the OTHER side of its anchor instead. The solver placed these
+    // boxes reading the way their `Justify` says, so emit the token that
+    // draws them that way.
+    let reversed = (inst.angle.rem_euclid(360.0) == 180.0) != inst.mirror;
+    let (ref_j, val_j) = if reversed {
+        (ref_j.flipped(), val_j.flipped())
+    } else {
+        (ref_j, val_j)
     };
 
     // Hide Reference for power/flag symbols whose refdes is `#`-prefixed
@@ -747,11 +770,17 @@ mod tests {
             "R2 label must retract to its pin endpoint (177.8, 59.69):\n{sch}"
         );
 
-        // R1's stub survived: its SIG label must NOT sit at R1's pin endpoint (127, 59.69).
-        // (It should be at the stub end (127, 55.88) instead.)
+        // R1's stub survived the retraction pass: its wire is still drawn from
+        // the pin endpoint out to the stub end. (Where the label itself ends up
+        // is the text solver's call — it may still pull the text back onto the
+        // pin while the wire stays.)
         assert!(
-            !sch.contains("(label \"SIG\"\n\t\t(at 127 59.69"),
-            "R1 label must NOT retract to pin endpoint (127, 59.69) — same-net wire should allow the stub to survive:\n{sch}"
+            sch.contains("(xy 127 59.69) (xy 127 55.88)"),
+            "R1's same-net stub wire must survive:\n{sch}"
+        );
+        assert!(
+            !sch.contains("(xy 177.8 59.69) (xy 177.8 55.88)"),
+            "R2's foreign-touching stub must retract, wire and all:\n{sch}"
         );
     }
 

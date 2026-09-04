@@ -68,6 +68,16 @@ pub fn item_rect(it: &Item, at: impl Into<::geom::Point2>) -> ::geom::Rect {
 /// column width for a claim the solver abandons the moment it is inconvenient made every
 /// passive column 4.6-6.8 mm wider than the drawing in it — a third of the gap between
 /// our part spacing and a human's.
+///
+/// The width is `RESERVE_PER_CHAR`, not the renderer's measured advance
+/// ([`crate::text::text_width`]), and deliberately so: this is the search's
+/// reservation policy, tuned jointly with the placement cost, not a statement
+/// about what KiCAD strokes. Widening it to the true advance re-shuffles the
+/// anneal into a placement that stacks two rail symbols on one point — a short
+/// the finished sheet's audit refuses but the search's own truthfulness measure
+/// cannot see. Reproduce with `cargo run -p sch-floorplan --example
+/// render_corpus -- OUT campaign-esp32-sensor-node`. Close that hole in the
+/// search before making this the drawn width.
 pub fn field_pad(it: &Item, w: f64, h: f64) -> [f64; 4] {
     const BAND: f64 = 2.24;
     if it.geom.pins.len() < 3 && w <= h {
@@ -170,6 +180,7 @@ mod tests {
             angle: 0.0,
             length: 2.54,
             unit: 1,
+            text: Default::default(),
         };
         Item {
             refdes: refdes.into(),

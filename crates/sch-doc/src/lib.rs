@@ -57,6 +57,7 @@
 pub mod body;
 pub mod connect;
 mod doc;
+mod drawn;
 mod edit;
 mod error;
 mod libsyms;
@@ -69,6 +70,7 @@ mod text;
 pub use body::{body_rect, body_rects};
 pub use connect::{Net, NetDelta, NetSource, Netlist, PinRef, Scene};
 pub use doc::{SchDoc, SnapshotId};
+pub use drawn::drawn_texts;
 pub use edit::{WireClip, is_drawing};
 pub use error::{Error, Result};
 pub use libsyms::SymbolSource;

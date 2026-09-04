@@ -2,6 +2,7 @@
 //! installed library — through the instance transform into sheet coordinates.
 
 use geom::Point2;
+use kicad_symbol::geometry::PinTextStyle;
 use kiutils_sexpr::Node;
 
 use crate::doc::SchDoc;
@@ -23,6 +24,36 @@ pub(crate) struct LibPin {
     pub unit: u32,
     /// Body style this pin belongs to; `0` means common to every style.
     pub style: u32,
+    /// Pin line length: the run from `at` into the body.
+    pub length: f64,
+    /// How KiCAD draws this pin's name and number.
+    pub text: PinTextStyle,
+}
+
+/// The `pin_names` / `pin_numbers` settings of a `lib_symbols` definition.
+pub(crate) fn definition_pin_text(def: &Node) -> PinTextStyle {
+    let hidden =
+        |node: &Node| sexpr::flag_present(node, "hide") || child_text(node, "hide") == Some("yes");
+    let names = child(def, "pin_names");
+    PinTextStyle {
+        name_offset: names
+            .and_then(|n| child(n, "offset"))
+            .and_then(|o| items(o).get(1).and_then(sexpr::number))
+            .unwrap_or(0.508),
+        names_hidden: names.is_some_and(hidden),
+        numbers_hidden: child(def, "pin_numbers").is_some_and(hidden),
+        ..PinTextStyle::default()
+    }
+}
+
+/// Text size from a pin's `name`/`number` sub-node effects.
+fn pin_text_size(node: &Node, tag: &str) -> f64 {
+    child(node, tag)
+        .and_then(|n| child(n, "effects"))
+        .and_then(|e| child(e, "font"))
+        .and_then(|f| child(f, "size"))
+        .and_then(|s| items(s).get(1).and_then(sexpr::number))
+        .unwrap_or(1.27)
 }
 
 /// A pin of a placed symbol, resolved into sheet coordinates.
@@ -49,6 +80,24 @@ pub struct PlacedPin {
     /// Unit vector along which a wire leaves this pin, in sheet coordinates
     /// (y grows downward) — the direction pointing away from the symbol body.
     pub out: Point2,
+    /// Pin line length: the run from `at` back into the body.
+    pub length: f64,
+    /// How KiCAD draws this pin's name and number.
+    pub text: PinTextStyle,
+}
+
+impl PlacedPin {
+    /// This pin as the as-drawn text model measures it.
+    pub fn as_drawn(&self) -> sch_model::text::DrawnPin<'_> {
+        sch_model::text::DrawnPin {
+            tip: self.at,
+            out: self.out,
+            length: self.length,
+            name: &self.name,
+            number: &self.number,
+            style: self.text,
+        }
+    }
 }
 
 /// Sub-symbol names inside a definition end in `_<unit>_<style>`.
@@ -62,7 +111,7 @@ pub(crate) fn unit_and_style(name: &str) -> (u32, u32) {
     }
 }
 
-fn decode_pin(node: &Node, unit: u32, style: u32) -> Option<LibPin> {
+fn decode_pin(node: &Node, unit: u32, style: u32, text: PinTextStyle) -> Option<LibPin> {
     let at = child(node, "at")?;
     let number = child_text(node, "number")?.to_string();
     Some(LibPin {
@@ -81,17 +130,27 @@ fn decode_pin(node: &Node, unit: u32, style: u32) -> Option<LibPin> {
         hidden: sexpr::flag_present(node, "hide"),
         unit,
         style,
+        length: child(node, "length")
+            .and_then(|l| items(l).get(1).and_then(sexpr::number))
+            .unwrap_or(2.54),
+        text: PinTextStyle {
+            pin_hidden: sexpr::flag_present(node, "hide"),
+            name_size: pin_text_size(node, "name"),
+            number_size: pin_text_size(node, "number"),
+            ..text
+        },
     })
 }
 
 /// Every pin declared by a `lib_symbols` definition, across all units.
 pub(crate) fn lib_pins(def: &Node) -> Vec<LibPin> {
+    let text = definition_pin_text(def);
     let mut pins = Vec::new();
     for child in items(def) {
         match sexpr::head(child) {
             // A pin declared straight on the definition belongs to no
             // particular unit or body style, so it belongs to every one.
-            Some("pin") => pins.extend(decode_pin(child, 0, 0)),
+            Some("pin") => pins.extend(decode_pin(child, 0, 0, text)),
             Some("symbol") => {
                 let (unit, style) = items(child)
                     .get(1)
@@ -100,7 +159,7 @@ pub(crate) fn lib_pins(def: &Node) -> Vec<LibPin> {
                     .unwrap_or((1, 1));
                 for grandchild in items(child) {
                     if sexpr::head(grandchild) == Some("pin") {
-                        pins.extend(decode_pin(grandchild, unit, style));
+                        pins.extend(decode_pin(grandchild, unit, style, text));
                     }
                 }
             }
@@ -222,6 +281,8 @@ pub(crate) fn pins_of(doc: &SchDoc, inst: &SymbolInst) -> Vec<PlacedPin> {
                 power_symbol,
                 at: to_sheet(p.at.point(), inst.at, inst.mirror),
                 out,
+                length: p.length,
+                text: p.text,
             }
         })
         .collect()
