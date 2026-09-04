@@ -100,20 +100,47 @@ impl<'a> RegionProblem<'a> {
     }
 }
 
+/// The box `items` occupy, over their symbol bodies.
+fn content_bbox(items: &[Item]) -> Option<Rect> {
+    let pts: Vec<Point2> = items
+        .iter()
+        .flat_map(|it| {
+            let r = body_rect(it, it.at);
+            [Point2::new(r.min_x, r.min_y), Point2::new(r.max_x, r.max_y)]
+        })
+        .collect();
+    Rect::bounding(&pts)
+}
+
+/// What is left of each standard page once `there` and the gap beside it are taken —
+/// where [`beside_the_fixed`] is about to put the new blocks. Pages with no room left
+/// simply drop out, so the typesetter tries the next size up.
+fn beside_pages(there: Rect) -> Vec<[f64; 2]> {
+    /// A strip narrower than this share of its page is not a page to pack for — aiming at
+    /// it would only stack the new blocks into a column. Such a sheet is full, and the
+    /// graft falls back to packing for a page's proportions and letting the fit grow it.
+    const USABLE_SHARE: f64 = 1.0 / 3.0;
+    let taken = there.max_x + BLOCK_MARGIN - geom::PAGE_MARGIN;
+    crate::write::usable_pages()
+        .into_iter()
+        .map(|page| {
+            (
+                page,
+                [
+                    page[0] - taken,
+                    page[1] - (there.min_y - geom::PAGE_MARGIN).max(0.0),
+                ],
+            )
+        })
+        .filter(|(page, room)| room[0] >= page[0] * USABLE_SHARE && room[1] > 0.0)
+        .map(|(_, room)| room)
+        .collect()
+}
+
 /// Slide a freshly typeset block clear of the content already on the sheet, so it starts
 /// beside it rather than on top of it.
 fn beside_the_fixed(movable: &mut [Item], fixed: &[Item]) {
-    let corners = |items: &[Item]| {
-        let pts: Vec<Point2> = items
-            .iter()
-            .flat_map(|it| {
-                let r = body_rect(it, it.at);
-                [Point2::new(r.min_x, r.min_y), Point2::new(r.max_x, r.max_y)]
-            })
-            .collect();
-        Rect::bounding(&pts)
-    };
-    let (Some(here), Some(there)) = (corners(movable), corners(fixed)) else {
+    let (Some(here), Some(there)) = (content_bbox(movable), content_bbox(fixed)) else {
         return;
     };
     let delta = Point2::new(
@@ -308,12 +335,15 @@ pub fn arrange(problem: RegionProblem) -> RegionOutput {
         it.preseeded = true;
     }
 
-    // A sheet with nothing on it is the typesetter's to fill, so it packs the blocks for a
-    // real page. A graft has no such freedom: its blocks land beside content this crate
-    // cannot see, and packing them for a whole page would push the sheet onto a custom one.
-    let pages = match fixed.is_empty() && obstacles.is_empty() {
-        true => crate::write::usable_pages(),
-        false => Vec::new(),
+    // What the new blocks may fill. An empty sheet is the typesetter's whole page; a graft
+    // gets only what is left of each page beside the content already on it, because
+    // `beside_the_fixed` below is about to slide the group past that content. Packing a
+    // graft for a WHOLE page would push the sheet onto a custom one — the 985x646 blue
+    // pill — and packing it for no page at all leaves the 260 mm column that made it.
+    let pages = match content_bbox(&fixed) {
+        None if obstacles.is_empty() => crate::write::usable_pages(),
+        None => Vec::new(),
+        Some(there) => beside_pages(there),
     };
     let typeset = sch_flex::typeset(&mut all, &ir.trees, &pages);
     // The typesetter lays a block out from the origin: it draws the block, not the sheet.
