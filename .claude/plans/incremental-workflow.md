@@ -323,3 +323,8 @@ re-place." Quality first; time later via parallel subagents; schematic too.
   facts as ground truth), prompt review loop (stop at 9 or two flat rounds), `review_scores` in the
   harness. Pre-trees trajectory: sallen-key 3→4→5, blue-pill 3→3→3. Follow-up after push: drop the
   model-supplied `anchor` path parameter from the tool schema.
+- layout-trees merged locally (gate running): `sch-flex` typesets the model's row/col trees
+  (showcase mean 8.3 vs theirs 8.8 vs spine 7.5/cluster 6.8, 3–5 s), anneal/cluster/spine/
+  budgets/relations/idioms/tidy deleted (−17k lines); found+fixed a silent-open (off-lattice block
+  origins). Not ported yet: shape-based route acceptance; sheet balance/page fill is the critic's
+  top remaining defect. BluePill sample run started for the user.
