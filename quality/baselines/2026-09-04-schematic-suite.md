@@ -31,8 +31,9 @@ Critic is the anchored score (three reads, modal) against a human sheet rated 9;
 | prompt-bjt-preamp | 6/4 | 6/6 |
 | prompt-blue-pill | 7/6 | **8/7 — every check passes** |
 | prompt-hbridge | 6/5 | 4/7 |
+| prompt-sallen-key-gain | 6/– | 5/4 |
 
-Mean critic 5.93 before, 5.77 after.
+Mean critic 5.93 before, 5.71 after, over all fourteen.
 
 ## Reading it honestly
 
@@ -42,7 +43,7 @@ is a single agent run whose composition choices vary as much again. A 14-case
 single-run comparison cannot resolve a one-point change.
 
 What did move is the ceiling and the pass count. **Two cases now clear every rubric
-check, where none did before** and the previous best score anywhere was 7. Both are
+check (`prompt-555-blinker-ldo`, `prompt-blue-pill`), where none did before** and the previous best score anywhere was 7. Both are
 cases where the model composed good layout trees; both draw titled framed blocks with
 notes and wire their topology rather than naming it.
 
