@@ -264,10 +264,16 @@ impl LabelPolicy {
     }
 }
 
-/// A net KiCAD named for us, after the one pin that happens to sort first. It tells a
-/// reader nothing, and it is long enough that drawing it collides with its neighbours.
+/// A net named by a tool rather than by a person: KiCAD's `Net-(D1-A)` after whichever
+/// pin sorts first, its `unconnected-(…)`, or the `N$7` an older editor hands out. None
+/// of them tells a reader anything, and a sheet of them reads as a parts bin with
+/// numbers on it rather than a circuit.
 fn is_unnamed(net: &str) -> bool {
-    net.starts_with("Net-(") || net.starts_with("unconnected-(")
+    net.starts_with("Net-(")
+        || net.starts_with("unconnected-(")
+        || net
+            .strip_prefix("N$")
+            .is_some_and(|rest| !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit()))
 }
 
 /// Route one signal/port net's terminals as a tree (MST) with the direction-
