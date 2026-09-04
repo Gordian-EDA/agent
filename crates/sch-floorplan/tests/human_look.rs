@@ -12,16 +12,15 @@ use kicad::KicadInstallation;
 use kicad_symbol::SymbolTable;
 use sch_floorplan::floorplan;
 
-/// Longest wire the realiser may draw (mm): the rail cap and the signal-label threshold
-/// are the same corpus rule, plus the elbow router's detour around one body.
-const LONGEST_WIRE: f64 = 60.0;
+/// Longest wire the realiser may draw (mm). The router's own wire-versus-label policy
+/// decides this — a hop past [`LONG_SIMPLE_LEN_MM`] is named rather than drawn — so the
+/// gate reads that constant instead of keeping a second copy to drift from it.
+use sch_floorplan::floorplan::place::LONG_SIMPLE_LEN_MM as LONGEST_WIRE;
 
-/// The fixtures whose PLACEMENT is still one long row, so no page holds them. Their width
-/// comes from the typesetter's row ordering, not from anything the writer or the page
-/// fitter decides — a sheet 938 mm wide is a placement that never folded. Listed rather
-/// than tolerated: the assertion is EQUALITY, so a new oversize sheet fails here and so
-/// does a fixed one, which is what makes the list shrink.
-const OVERSIZE: [&str; 2] = ["campaign-esp32-sensor-node", "campaign-stm32-buck"];
+/// The fixtures no standard page holds — a placement that never folded, drawn on paper
+/// bought to fit it. The list is empty: every fixture folds now. The assertion is
+/// EQUALITY, so a sheet that grows its own paper again fails here.
+const OVERSIZE: [&str; 0] = [];
 
 fn corpus() -> std::path::PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/validation")

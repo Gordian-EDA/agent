@@ -17,6 +17,7 @@ mod route;
 mod score;
 
 pub use audit::*;
+pub use route::LONG_SIMPLE_LEN_MM;
 pub use emit::*;
 pub use measure::*;
 pub use score::*;

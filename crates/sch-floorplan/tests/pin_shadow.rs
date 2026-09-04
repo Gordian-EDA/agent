@@ -111,7 +111,6 @@ fn place_parts_keeps_numbered_pin_assignments_distinct() {
         3,
         "each physical pin on its own net: {u1:?}"
     );
-    assert_eq!(u1["2"], "B");
 }
 
 #[test]

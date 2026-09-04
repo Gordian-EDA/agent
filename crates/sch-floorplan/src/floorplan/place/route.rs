@@ -1330,7 +1330,7 @@ pub(crate) const CROSS_LABEL_LEN_MM: f64 = 19.0;
 /// The longest hop still drawn as a wire (mm) — and only when its shape is SIMPLE
 /// (straight, or one corner with no detour). 60 grid: humans draw the occasional long
 /// clean run between two blocks; what they never draw is a long snake.
-pub(crate) const LONG_SIMPLE_LEN_MM: f64 = 76.2;
+pub const LONG_SIMPLE_LEN_MM: f64 = 76.2;
 
 /// How spread a node may be (mm, the sum of its terminal bbox's two sides) and still be
 /// drawn as one trunk with drops. 44 grid: past that the node is not a node any more, and
