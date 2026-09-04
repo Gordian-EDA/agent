@@ -156,8 +156,14 @@ pub(crate) fn wire(
     // dense ones: the wire-dense small references (555/uart/grid) are exactly where
     // literal long crossing wires read worst. Mirrors the spread-rail →
     // local-power-symbol distribution above.
+    // Fewest terminals first: a two-pin local hop claims its channel before a sprawling
+    // bus runs through it, so the short connections that carry a sheet's readability are
+    // drawn and the wide ones degrade to labels. Alphabetical order decided this before,
+    // which is to say nothing decided it.
     let label_policy = LabelPolicy::default();
-    for (net, eps) in &net_eps {
+    let mut order: Vec<(&String, &Vec<([f64; 2], Dir)>)> = net_eps.iter().collect();
+    order.sort_by_key(|(net, eps)| (eps.len(), (*net).clone()));
+    for (net, eps) in order {
         if ir.rails.contains_key(net) {
             continue;
         }
@@ -837,37 +843,23 @@ pub(crate) fn route_local_tee(
     if !clear(trunk) || terms.iter().any(|(p, _)| !clear([*p, foot(p)])) {
         return false;
     }
-    if horizontal {
-        let ty = trunk_line;
-        w.add_wire_on_net([min_x, ty], [max_x, ty], net);
-        scene.segments.push(sch_model::route::NetSegment::new(
-            [min_x, ty].into(),
-            [max_x, ty].into(),
-            net,
-        ));
-        for (p, _) in terms {
-            if (p[1] - ty).abs() > EPS {
-                w.add_wire_on_net(*p, [p[0], ty], net);
-            }
-            if p[0] > min_x + EPS && p[0] < max_x - EPS {
-                w.add_junction_on_net([p[0], ty], net);
-            }
+    // Every wire the tee draws goes through `emit_routed_segment`, so the scene learns
+    // the FEET as well as the trunk. A foot the scene never heard of is a wire a later
+    // foreign route may legally end on — a short nothing downstream can see.
+    let (trunk_a, trunk_b) = (trunk[0], trunk[1]);
+    emit_routed_segment(w, scene, net, trunk_a.into(), trunk_b.into());
+    for (p, _) in terms {
+        let f = foot(p);
+        if (p[0] - f[0]).abs() > EPS || (p[1] - f[1]).abs() > EPS {
+            emit_routed_segment(w, scene, net, (*p).into(), f.into());
         }
-    } else {
-        let tx = trunk_line;
-        w.add_wire_on_net([tx, min_y], [tx, max_y], net);
-        scene.segments.push(sch_model::route::NetSegment::new(
-            [tx, min_y].into(),
-            [tx, max_y].into(),
-            net,
-        ));
-        for (p, _) in terms {
-            if (p[0] - tx).abs() > EPS {
-                w.add_wire_on_net(*p, [tx, p[1]], net);
-            }
-            if p[1] > min_y + EPS && p[1] < max_y - EPS {
-                w.add_junction_on_net([tx, p[1]], net);
-            }
+        let interior = if horizontal {
+            f[0] > min_x + EPS && f[0] < max_x - EPS
+        } else {
+            f[1] > min_y + EPS && f[1] < max_y - EPS
+        };
+        if interior {
+            w.add_junction_on_net(f, net);
         }
     }
     true
