@@ -2134,8 +2134,9 @@ async fn check_schematic_review(
 fn regression_note(round: u64, score: f64, best: f64, best_round: u64) -> String {
     format!(
         "Round {round} scores {score}, below the {best} this sheet reached at round \
-         {best_round}: the layout changes since then cost more than they won. Restore that \
-         arrangement before trying a different fix, and do not finish on this one."
+         {best_round}: the layout changes since then cost more than they won. Re-send the \
+         `layout` tree you passed in the call just before round {best_round}'s review — it \
+         is in this conversation — and review again. Do not finish on this round."
     )
 }
 
@@ -2711,7 +2712,7 @@ mod tests {
         let note = super::regression_note(4, 4.0, 8.0, 2);
         assert!(note.contains("Round 4 scores 4"), "{note}");
         assert!(note.contains("reached at round 2"), "{note}");
-        assert!(note.contains("Restore that arrangement"), "{note}");
+        assert!(note.contains("Re-send the `layout` tree"), "{note}");
     }
     use super::*;
     use crate::prompts::system_prompt;
