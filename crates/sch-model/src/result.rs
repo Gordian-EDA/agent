@@ -21,6 +21,13 @@ pub fn synthesized_block(name: &str) -> bool {
     name == DEFAULT_BLOCK || name == SHEET_BLOCK
 }
 
+/// Property key recording the authored net of the symbol's pins whose name the
+/// drawing itself does not carry. A block wires its own nets and labels none of
+/// them, so the name the author gave one is gone the moment KiCAD re-derives it —
+/// and the next block, which joins by name, finds nothing. This is where that name
+/// survives between calls. Written as `pin=net|pin=net`.
+pub const AP_NETS: &str = "ap_nets";
+
 /// Property key marking a symbol as benched — on the sheet and on its nets, but
 /// not laid out. `"1"` when set, cleared when the symbol is arranged.
 pub const AP_BENCH: &str = "ap_bench";

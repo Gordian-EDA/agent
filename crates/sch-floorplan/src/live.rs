@@ -52,6 +52,27 @@ use sch_model::result::SHEET_BLOCK;
 /// Clearance added around a selected part when deciding which wires belong to it.
 const TOUCH_MARGIN: f64 = 1.27;
 
+/// Separator between `pin=net` entries of the [`sch_model::result::AP_NETS`] record.
+/// Neither a pin number nor a net name may contain it, which is what a name carrying
+/// one is rejected for.
+const AP_NETS_SEP: char = '|';
+
+/// Whether `net` is a name a later block could ask to join.
+///
+/// A name the author WROTE is a contract; one a tool derived (`Net-(D1-A)`,
+/// `unconnected-(…)`, `N$7`) is recomputed from the net's own pins, so writing it
+/// down forks the net the moment a pin moves. A power net is left out too: its rail
+/// symbols already carry the name everywhere it is needed.
+fn joinable_net_name(net: &str) -> bool {
+    !net.is_empty()
+        && !net.starts_with('@')
+        && !net.contains(AP_NETS_SEP)
+        && !net.contains('=')
+        && !crate::floorplan::place::is_unnamed(net)
+        && !circuit_graph::netclass::is_power_net(net)
+        && !sch_check::place_parts::is_no_connect_name(net)
+}
+
 /// Everything that can stop a live edit.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -205,9 +226,17 @@ fn place_parts_inner(
     input: &PlacePartsInput,
 ) -> Result<PlaceReport> {
     let provider = SymbolTable::from_symbol_dir(env.symbol_dir().to_path_buf());
-    let before = live_phase("lower", input.parts.len(), 0, || {
+    let mut before = live_phase("lower", input.parts.len(), 0, || {
         connect::extract(doc)
     });
+    // Every edit from here on is undone by this snapshot, the join included: a payload
+    // the audit refuses must not leave a label behind for a net it never draws.
+    let snapshot = doc.snapshot();
+    let promoted = promote_authored_nets(doc, input, &before);
+    if !promoted.is_empty() {
+        tracing::info!(?promoted, "named an earlier block's nets so this block can join them");
+        before = connect::extract(doc);
+    }
     let existing = ExistingSheet {
         net_pins: before
             .nets
@@ -237,6 +266,7 @@ fn place_parts_inner(
     // diagnostics in sequence made each layer mask the next, so a payload with a bad
     // lib_id and a bad net name cost two full resubmissions to discover.
     if !audit.is_valid() || diags.has_errors() {
+        doc.restore(snapshot)?;
         audit.input_errors = diags
             .0
             .iter()
@@ -252,10 +282,9 @@ fn place_parts_inner(
         .cloned()
         .collect();
     if new_refs.is_empty() {
+        doc.restore(snapshot)?;
         return Err(Error::Nothing);
     }
-
-    let snapshot = doc.snapshot();
     let fresh = doc.symbols().next().is_none();
 
     let mut design = added;
@@ -283,6 +312,7 @@ fn place_parts_inner(
 
     let movable = crate::floorplan::place_problem(env, &design, Some(ir.clone()))?.items;
     if movable.is_empty() {
+        doc.restore(snapshot)?;
         return Err(Error::Nothing);
     }
     let held = seated_items(doc, &before);
@@ -331,8 +361,9 @@ fn place_parts_inner(
     });
     mismatch.disturbed = disturbed(&before, &connect::extract(doc));
     let committed = mismatch.is_empty();
-    if !committed {
-        doc.restore(snapshot)?;
+    match committed {
+        true => record_authored_nets(doc, &placed),
+        false => doc.restore(snapshot)?,
     }
     Ok(PlaceReport {
         placed: new_refs.into_iter().collect(),
@@ -1248,6 +1279,140 @@ fn rename_net(design: &mut Design, from: &str, to: &str) {
     if let Some(attrs) = design.nets.shift_remove(from) {
         design.nets.insert(to.to_string(), attrs);
     }
+}
+
+/// The authored net of every pin whose name the drawing does not carry, read back off
+/// the sheet.
+///
+/// Returns net → the pins that were declared on it, so a later block can find the pin
+/// to name even though KiCAD calls its net `Net-(R1-Pad1)` today.
+fn authored_pin_nets(doc: &SchDoc) -> BTreeMap<String, Vec<(String, String)>> {
+    let mut out: BTreeMap<String, Vec<(String, String)>> = BTreeMap::new();
+    for symbol in doc.symbols() {
+        let Some(field) = symbol.fields.get(sch_model::result::AP_NETS) else {
+            continue;
+        };
+        for entry in field.value.split(AP_NETS_SEP) {
+            if let Some((pin, net)) = entry.split_once('=') {
+                out.entry(net.to_string())
+                    .or_default()
+                    .push((symbol.refdes().to_string(), pin.to_string()));
+            }
+        }
+    }
+    out
+}
+
+/// Keep the authored name of each net `placed` declared that the finished drawing does
+/// not spell out — the block wired it, so KiCAD derives its own name and the author's
+/// is gone. Rails, no-connects and names KiCAD generated itself are never recorded:
+/// a rail draws its own symbol, and a generated name is no identity to join by.
+fn record_authored_nets(doc: &mut SchDoc, placed: &[Item]) {
+    let drawn: BTreeSet<String> = connect::extract(doc)
+        .nets
+        .iter()
+        .filter(|net| net.source != NetSource::Auto)
+        .map(|net| net.name.clone())
+        .collect();
+    let keep = |net: &str| !drawn.contains(net) && joinable_net_name(net);
+    let mut per_ref: BTreeMap<&str, Vec<String>> = BTreeMap::new();
+    for item in placed {
+        for (number, _, net) in &item.pins {
+            if let Some(net) = net.as_deref().filter(|net| keep(net)) {
+                per_ref
+                    .entry(item.refdes.as_str())
+                    .or_default()
+                    .push(format!("{number}={net}"));
+            }
+        }
+    }
+    // One record per refdes, on whichever instance the sheet holds first: the reader
+    // looks the pin's position up by (refdes, pin), so which unit carries the note
+    // does not matter, and a multi-unit part has no unambiguous single symbol anyway.
+    let mut hosts: BTreeMap<String, String> = BTreeMap::new();
+    for symbol in doc.symbols() {
+        hosts
+            .entry(symbol.refdes().to_string())
+            .or_insert_with(|| symbol.uuid.clone());
+    }
+    let records: Vec<(String, String)> = per_ref
+        .into_iter()
+        .filter_map(|(refdes, mut entries)| {
+            entries.sort();
+            entries.dedup();
+            Some((hosts.get(refdes)?.clone(), entries.join(&AP_NETS_SEP.to_string())))
+        })
+        .collect();
+    for (uuid, record) in records {
+        let _ = doc.set_field(&uuid, sch_model::result::AP_NETS, &record);
+    }
+}
+
+/// Name, on the sheet, every net this payload declares that an earlier `place_parts`
+/// drew but left unnamed — so the join by name that follows has something to find.
+///
+/// This is the other half of [`record_authored_nets`]: the name is written down only
+/// when a second block asks for it, which is what keeps a net that never leaves its
+/// own block free of a label it does not need. Returns the names given.
+fn promote_authored_nets(
+    doc: &mut SchDoc,
+    input: &PlacePartsInput,
+    before: &Netlist,
+) -> Vec<String> {
+    let live: BTreeSet<&str> = before.nets.iter().map(|net| net.name.as_str()).collect();
+    let wanted: BTreeSet<&str> = input
+        .parts
+        .iter()
+        .flat_map(|part| part.pins.values())
+        .map(String::as_str)
+        .filter(|net| !live.contains(net) && joinable_net_name(net))
+        .collect();
+    if wanted.is_empty() {
+        return Vec::new();
+    }
+    let authored = authored_pin_nets(doc);
+    let at: HashMap<(String, String), Point2> = sch_doc::placed_pins(doc)
+        .into_iter()
+        .map(|pin| ((pin.refdes, pin.number), pin.at))
+        .collect();
+    // Which connected piece of the drawing each point belongs to, so a recorded net
+    // spread over several gets one label per piece rather than one label in total.
+    let piece_at: HashMap<(i64, i64), String> = connect::scene(doc)
+        .points
+        .into_iter()
+        .map(|(at, piece)| (coord(at), piece))
+        .collect();
+    let mut named = Vec::new();
+    let mut joined: BTreeSet<(i64, i64)> = BTreeSet::new();
+    for net in wanted {
+        let Some(pins) = authored.get(net) else {
+            continue;
+        };
+        let places: Vec<Point2> = pins
+            .iter()
+            .filter_map(|key| at.get(key).copied())
+            .collect();
+        if places.is_empty() {
+            continue;
+        }
+        let mut pieces: BTreeSet<String> = BTreeSet::new();
+        for place in places {
+            let piece = piece_at.get(&coord(place)).cloned().unwrap_or_default();
+            if pieces.insert(piece) {
+                doc.add_label(LabelKind::Local, net, Pose::new(place.x, place.y, 0.0));
+                joined.insert(coord(place));
+            }
+        }
+        named.push(net.to_string());
+    }
+    // A pin the earlier block left alone was marked no-connect — the honest drawing of
+    // "deliberately unwired". It is wired now, so the marker goes: KiCAD reports a
+    // no-connect on a live net as an error, and the extractor severs the pin outright.
+    doc.retain_drawing(|item| match item {
+        sch_doc::Item::NoConnect(nc) => !joined.contains(&coord(nc.at)),
+        _ => true,
+    });
+    named
 }
 
 /// Nets the new parts share with something already on the sheet.

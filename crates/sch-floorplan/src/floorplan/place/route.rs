@@ -285,7 +285,7 @@ impl LabelPolicy {
 /// pin sorts first, its `unconnected-(…)`, or the `N$7` an older editor hands out. None
 /// of them tells a reader anything, and a sheet of them reads as a parts bin with
 /// numbers on it rather than a circuit.
-fn is_unnamed(net: &str) -> bool {
+pub(crate) fn is_unnamed(net: &str) -> bool {
     net.starts_with("Net-(")
         || net.starts_with("unconnected-(")
         || net

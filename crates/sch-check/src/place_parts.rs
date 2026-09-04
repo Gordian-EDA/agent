@@ -576,7 +576,7 @@ fn next_free_ref(prefix: &str, occupied: &BTreeSet<RefDes>) -> RefDes {
 /// `nc`, `NC`, `NC_RTS`, `NC3`, `N/C` — the conventional ways a payload declares a pin
 /// deliberately unconnected. Such a net is not dangling: the realiser draws it as a
 /// no-connect marker rather than a wire.
-fn is_no_connect_name(net: &str) -> bool {
+pub fn is_no_connect_name(net: &str) -> bool {
     let upper = net.to_ascii_uppercase();
     upper == "NC"
         || upper == "N/C"
