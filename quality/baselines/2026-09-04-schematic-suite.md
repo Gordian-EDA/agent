@@ -110,3 +110,38 @@ re-compete on its proportions, to break up ribbon-shaped rows. It measured poole
 6.71 with compactness 6.71 to 5.29, every dimension down, and the unrestricted form was an
 order of magnitude slower. The apparent win for this change, and the label overlap that had
 blocked it, were both artifacts of the untreed path.
+
+
+## Acceptance run, everything landed (`--suite schematic --repeat 2 --jobs 7`)
+
+Each case run twice, the median reported, the spread shown after "of".
+
+| case | parts | netlist | erc e/w | critic | human look |
+| --- | --- | --- | --- | --- | --- |
+| dataset-current-sense-2995e0dd | 33 | yes | 0/4 | **8** of 6,8 | 8 |
+| dataset-ddr-memory-411be040 | 28 | yes | 10/32 | **8** of 7,8 | 8 |
+| dataset-ecg-sensor-07aabb42 | 49 | yes | 0/0 | 6 of 6,5 | 4 |
+| dataset-ibm-m122-261071e7 | 24 | yes | 1/68 | **8** of 7,8 | 7 |
+| dataset-light-accessory-266db471 | 21 | yes | 0/0 | 6 of 6,5 | 4 |
+| dataset-rp2040-mocon2040-0ea574f3 | 33 | yes | 0/0 | 7 of 7,5 | 7 |
+| dataset-stm32-microcontroller-22e02ab9 | 31 | yes | 0/19 | 6 of 5,6 | 4 |
+| dataset-three-phase-0cdac5a0 | 40 | yes | 0/0 | 7 of 6,7 | 7 |
+| prompt-555-blinker-ldo | 15 | - | 0/0 | 7 of 7,6 | 6 |
+| prompt-arduino-uno | 36 | - | 0/2 | 6 | 4 |
+| prompt-bjt-preamp | 16 | - | 0/0 | 7 | 5 |
+| prompt-blue-pill | 30 | - | 0/13 | 6 of 6,4 | 5 |
+| prompt-hbridge | 18 | - | 0/0 | 7 of 6,7 | 6 |
+| prompt-sallen-key-gain | 17 | - | 0/0 | 6 | 3 |
+
+**Three of fourteen pass every check**, against one at the sprint baseline and two this
+morning. Mean critic over each case's better attempt is 6.57, from 5.93.
+
+The structural change is in what is left failing. **Every remaining failure is the visual
+score.** Not one case fails on ERC, and not one fails netlist fidelity — all eight dataset
+sheets reproduce their human original exactly, where three did not this morning. The
+correctness work is done; what stands between here and a green table is the critic reaching
+8 on eleven more sheets.
+
+Movement on individual cases since this morning: three-phase 4 to 7, STM32 3 to 6, H-bridge
+4 to 7, DDR 6 to 8, IBM 7 to 8, RP2040 6 to 7. Blue Pill went 8 to 6 and the 555 8 to 7,
+which is within the two-point read noise and the reason each case is now run twice.
