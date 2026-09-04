@@ -48,7 +48,7 @@ REFERENCES = Path(__file__).resolve().parent / "references"
 ANCHOR_SCHEMATIC = Path(__file__).resolve().parent / "anchor" / "schematic-9.png"
 # Case inputs that describe the answer; the agent never sees them.
 REFERENCE_INPUTS = {"reference.kicad_sch", "reference.png", "reference.svg"}
-CRITIC_SAMPLES = 3
+CRITIC_SAMPLES = 7
 KICAD_DEMOS = Path(
     "/home/mimi/agent/.local/kicad-10.0.4/AppDir/usr/share/kicad/demos"
 )

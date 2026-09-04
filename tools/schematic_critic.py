@@ -23,7 +23,7 @@ Model notes (gateway = OPENAI_BASE_URL, OpenAI-compatible):
 
 Calibration: with `--anchor REF.png` the verdict is anchored to a human-drawn sheet
 rated exactly 9 — equal to it is a 9, clearly better a 10 — which is what makes scores
-comparable across circuits. `--samples 3` grades three times and reports the modal run.
+comparable across circuits. `--samples 3` grades three times and reports the rounded mean.
 
 Usage:
   python3 tools/schematic_critic.py OURS.png [--anchor REF.png [--anchor-same-circuit]]
@@ -176,17 +176,25 @@ def main():
     if not runs:
         print(last_text)
         sys.exit(2)
-    # Representative = the MODAL-score run: the score the model settles on most often,
-    # with its own defects and dimensions intact (averaging incoherent verdicts does not
-    # produce a verdict). Ties go to the run nearest the middle of the samples.
+    # The score is the MEAN of the samples, rounded. The critic reads the same
+    # unchanged image a point apart routinely and three apart at worst, so a single
+    # read — or the modal of three, which is nearly the median — carries about a
+    # point of noise, and an engine change worth half a point cannot be told from
+    # nothing. The mean is the efficient estimator here: its error falls as the root
+    # of the sample count, where the median's barely moves.
+    #
+    # The narrative half of the verdict cannot be averaged, so it comes from the
+    # single run whose own score sits nearest that mean: real defects, one coherent
+    # voice, attached to the score the samples actually support.
     runs.sort(key=lambda x: x[0])
     score_list = [s for s, _, _ in runs]
-    middle = score_list[len(score_list) // 2]
-    modal = max(set(score_list), key=lambda s: (score_list.count(s), -abs(s - middle)))
-    result, text = next((r, t) for s, r, t in runs if s == modal)
+    mean = sum(score_list) / len(score_list)
+    result, text = min(runs, key=lambda x: abs(x[0] - mean))[1:]
+    result["score"] = round(mean)
+    result["mean"] = round(mean, 2)
     result["samples"] = score_list
     if n > 1 and not args.json_only:
-        print(f"# {len(runs)}/{n} samples; scores {score_list}; modal run shown")
+        print(f"# {len(runs)}/{n} samples; scores {score_list}; mean {mean:.2f}")
 
     # The engine-clean contract is enforced in code too, in case the model slips.
     if args.engine_clean:
