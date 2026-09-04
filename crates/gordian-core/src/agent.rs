@@ -44,7 +44,7 @@ const MAX_FAILED_ROUTE_RETRIES: usize = 3;
 
 const MAX_ERC_CLEANUP_NUDGES: usize = 2;
 
-const CHECK_SCHEMATIC_NUDGE: &str = "Run check_schematic now. Fix the findings in what you touched; leave unrelated existing findings alone and mention them. If completeness.gaps is nonempty and this request calls for a complete powered/interface design, add exactly the listed support circuitry and check again. Those warnings are advisory for deliberately minimal designs and focused edits; do not add unrelated parts. Finish once errors in the requested work are clean and every applicable gap is resolved.";
+const CHECK_SCHEMATIC_NUDGE: &str = "Run check_schematic now. Fix the findings in what you touched; leave unrelated existing findings alone and mention them. If completeness.gaps is nonempty and this request calls for a complete powered/interface design, add exactly the listed support circuitry, each part INTO the block whose connector or rail it protects (never as a block of its own), and check again. Those warnings are advisory for deliberately minimal designs and focused edits; do not add unrelated parts. Finish once errors in the requested work are clean and every applicable gap is resolved.";
 
 /// A provider request has no project-side effects, so transient transport
 /// failures are safe to retry. Keep this small so bad credentials and other
@@ -2466,7 +2466,13 @@ fn tool_summary(name: &str, input: &Value, result: &Value) -> String {
                 0 => String::new(),
                 n => format!("; {n} on the bench"),
             };
-            format!("placed block; {gaps} completeness gaps remain{bench}")
+            // The gap count used to ride on every placement result, so a sheet that was
+            // nine tenths built kept reading "5 completeness gaps remain" and the model kept
+            // answering with one-part blocks of protection parts. The gaps are still in the
+            // result and still reported by `check_schematic`; they are advice given once,
+            // not a counter the model has to drive to zero after every block.
+            let _ = gaps;
+            format!("placed block{bench}")
         }
         "project_info" => result
             .get("sch_path")
