@@ -1,0 +1,7 @@
+{
+ "dataset_id": "2995e0dd785d",
+ "description": "Current-sense sheet of an HPM6P41 buck-boost board with labeled sampling stages.",
+ "source": "/home/mimi/kicad-scraper/dataset/2995e0dd785d.kicad_sch",
+ "part_count": 33,
+ "net_count": 21
+}

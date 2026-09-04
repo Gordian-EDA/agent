@@ -44,10 +44,10 @@ netlist.json:
 {netlist}"""
 
 RUBRIC = """The delivered sheet must carry the given netlist exactly — the same parts on the
-same nets as the human original — pass KiCAD's ERC, and read as well as the human
-sheet it was extracted from.
+same nets as the human original — carry no ERC error the human original does not
+carry itself, and read as well as the sheet it was extracted from.
 expect: netlist_matches_reference == true
-expect: erc_errors == 0
+expect: erc_errors_beyond_reference == 0
 expect: critic_vs_reference >= 8
 """
 
@@ -153,8 +153,31 @@ def library_only(sheet, index):
     return bool(ids)
 
 
+def annotated(_netlist, sheet):
+    """Whether every part on `sheet` carries a reference designator of its own.
+
+    An unannotated sheet draws three parts called `R1`. Its exported netlist then
+    puts that one designator's pins on six different nets, and the extraction below
+    keeps only the last of the three — so the case would demand a netlist no correct
+    schematic can draw. Counted off the export rather than the file, because a
+    multi-unit symbol writes its Reference once per unit.
+    """
+    with tempfile.TemporaryDirectory(prefix="sch-annotated-") as temporary:
+        root = netlist_xml(sheet, Path(temporary) / "netlist.xml")
+    seen = {}
+    for net in root.iter("net"):
+        for node in net.findall("node"):
+            pin = (node.get("ref"), node.get("pin"))
+            if pin[0].startswith("#"):
+                continue
+            if seen.setdefault(pin, net.get("name")) != net.get("name"):
+                return False
+    return True
+
+
 def candidates(dataset, index):
-    """Single-sheet, stock-library-only sheets, sized by their extracted netlist."""
+    """Single-sheet, stock-library-only, fully annotated sheets, sized by their
+    extracted netlist."""
     found = []
     for meta_path in sorted(dataset.glob("*.json")):
         meta = json.loads(meta_path.read_text(encoding="utf-8"))
@@ -165,6 +188,8 @@ def candidates(dataset, index):
             continue
         netlist = extract(sheet)
         if not BANDS[0][0] <= len(netlist["parts"]) <= BANDS[-1][1]:
+            continue
+        if not annotated(netlist, sheet):
             continue
         found.append((meta["id"], len(netlist["parts"]), meta["description"], sheet))
     return found

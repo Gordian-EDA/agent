@@ -516,6 +516,61 @@ def pin_partition(named_nets):
     return sorted(group for group in groups if group)
 
 
+def offered_pins(netlist_xml):
+    """Per reference designator, the pin numbers its symbol actually has.
+
+    Read from the delivered netlist's own `libparts`, which is the INSTALLED
+    library's view: KiCAD 10 renamed a USB-C receptacle's shield pin from `S1` to
+    `SH` and dropped a flash chip's ninth pin, so a netlist extracted from a sheet
+    drawn years earlier names pins that no longer exist to be placed.
+    """
+    try:
+        root = ET.parse(netlist_xml).getroot()
+    except (ET.ParseError, OSError):
+        return {}
+    parts = {}
+    for part in root.iter("libpart"):
+        key = (part.get("lib"), part.get("part"))
+        parts[key] = {
+            pin.get("num") for pin in part.iter("pin") if pin.get("num") is not None
+        }
+    offered = {}
+    for comp in root.iter("comp"):
+        source = comp.find("libsource")
+        if source is None:
+            continue
+        pins = parts.get((source.get("lib"), source.get("part")))
+        if pins:
+            offered[comp.get("ref")] = pins
+    return offered
+
+
+def without_absent_pins(groups, offered):
+    """`groups` with every pin the installed symbol does not offer removed, and
+    the removed pins listed."""
+    absent = sorted(
+        pin
+        for group in groups
+        for pin in group
+        if (ref := pin.split(".")[0]) in offered and pin.split(".", 1)[1] not in offered[ref]
+    )
+    if not absent:
+        return groups, []
+    gone = set(absent)
+    kept = [[pin for pin in group if pin not in gone] for group in groups]
+    return sorted(group for group in kept if group), absent
+
+
+def repeated_pins(groups):
+    """Pins the partition places on more than one net — impossible on a real sheet,
+    and the signature of one reference designator worn by several parts."""
+    seen, twice = set(), set()
+    for group in groups:
+        for pin in group:
+            (twice if pin in seen else seen).add(pin)
+    return sorted(twice)
+
+
 def reference_netlist_facts(case, facts, artifacts):
     """Is the delivered netlist the human original's netlist, pin set for pin set?
 
@@ -531,6 +586,28 @@ def reference_netlist_facts(case, facts, artifacts):
         return {"reference_netlist_error": error or "reference netlist not exported"}
     expected = pin_partition(named.values())
     delivered = pin_partition((facts.get("kicad_nets") or {}).values())
+    doubled = repeated_pins(expected)
+    if doubled:
+        # The human sheet annotates several parts with ONE reference designator — the
+        # RS485 board draws three `R1`s, one per channel — so its own export puts that
+        # designator's pins on six different nets. No sheet can reproduce that and stay
+        # a sheet. The case is unmeasurable, and saying so beats failing a faithful
+        # reproduction against ground truth that contradicts itself.
+        return {
+            "reference_netlist_error": (
+                "the reference sheet reuses a reference designator, so its netlist puts "
+                f"one pin on several nets: {', '.join(doubled[:4])}"
+            ),
+        }
+    # Compare only the pins BOTH libraries agree exist. KiCAD 10 renamed a USB-C
+    # receptacle's shield from `S1` to `SH`: the reference names a pin we cannot place,
+    # and we place one it never names, for the one piece of metal.
+    expected, absent = without_absent_pins(
+        expected, offered_pins(artifacts / "netlist.xml")
+    )
+    delivered, renamed = without_absent_pins(
+        delivered, offered_pins(artifacts / "reference-netlist.xml")
+    )
     missing = [group for group in expected if group not in delivered]
     extra = [group for group in delivered if group not in expected]
     expected_refs = {pin.split(".")[0] for group in expected for pin in group}
@@ -538,6 +615,7 @@ def reference_netlist_facts(case, facts, artifacts):
     return {
         "reference_netlist_error": None,
         "netlist_matches_reference": bool(expected) and not missing and not extra,
+        "reference_pins_absent_from_library": sorted(set(absent) | set(renamed)),
         "reference_net_count": len(expected),
         "reference_nets_missing": missing,
         "reference_nets_extra": extra,

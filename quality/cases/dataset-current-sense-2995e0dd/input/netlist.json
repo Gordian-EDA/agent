@@ -1,0 +1,315 @@
+{
+ "title": "HPM6P41_BuckBoost",
+ "parts": [
+  {
+   "ref": "C106",
+   "lib_id": "Device:C",
+   "value": "47pF,50V",
+   "pins": {
+    "1": "N$7",
+    "2": "N$8"
+   }
+  },
+  {
+   "ref": "C107",
+   "lib_id": "Device:C",
+   "value": "100nF,50V",
+   "pins": {
+    "1": "VANA",
+    "2": "GNDA"
+   }
+  },
+  {
+   "ref": "C108",
+   "lib_id": "Device:C",
+   "value": "100nF,50V",
+   "pins": {
+    "1": "VREFH",
+    "2": "GNDA"
+   }
+  },
+  {
+   "ref": "C109",
+   "lib_id": "Device:C",
+   "value": "47pF,50V",
+   "pins": {
+    "1": "AvgSns",
+    "2": "GNDA"
+   }
+  },
+  {
+   "ref": "C44",
+   "lib_id": "Device:C",
+   "value": "47pF,50V",
+   "pins": {
+    "1": "N$3",
+    "2": "N$4"
+   }
+  },
+  {
+   "ref": "C45",
+   "lib_id": "Device:C",
+   "value": "100nF,50V",
+   "pins": {
+    "1": "VANA",
+    "2": "GNDA"
+   }
+  },
+  {
+   "ref": "C46",
+   "lib_id": "Device:C",
+   "value": "100nF,50V",
+   "pins": {
+    "1": "VREFH",
+    "2": "GNDA"
+   }
+  },
+  {
+   "ref": "C47",
+   "lib_id": "Device:C",
+   "value": "47pF,50V",
+   "pins": {
+    "1": "PeakSns",
+    "2": "GNDA"
+   }
+  },
+  {
+   "ref": "C48",
+   "lib_id": "Device:C",
+   "value": "100nF,50V",
+   "pins": {
+    "1": "VANA",
+    "2": "GNDA"
+   }
+  },
+  {
+   "ref": "C49",
+   "lib_id": "Device:C",
+   "value": "100nF,50V",
+   "pins": {
+    "1": "VANA",
+    "2": "GNDA"
+   }
+  },
+  {
+   "ref": "C50",
+   "lib_id": "Device:C",
+   "value": "47pF,50V",
+   "pins": {
+    "1": "InputVSense",
+    "2": "GNDA"
+   }
+  },
+  {
+   "ref": "C51",
+   "lib_id": "Device:C",
+   "value": "47pF,50V",
+   "pins": {
+    "1": "OutputVSense",
+    "2": "GNDA"
+   }
+  },
+  {
+   "ref": "D12",
+   "lib_id": "Diode:1N4148WS",
+   "value": "1N4148WS",
+   "pins": {
+    "1": "VANA",
+    "2": "InputVsense+"
+   }
+  },
+  {
+   "ref": "D13",
+   "lib_id": "Diode:1N4148WS",
+   "value": "1N4148WS",
+   "pins": {
+    "1": "InputVsense+",
+    "2": "GNDA"
+   }
+  },
+  {
+   "ref": "D14",
+   "lib_id": "Diode:1N4148WS",
+   "value": "1N4148WS",
+   "pins": {
+    "1": "VANA",
+    "2": "OutputVsense+"
+   }
+  },
+  {
+   "ref": "D15",
+   "lib_id": "Diode:1N4148WS",
+   "value": "1N4148WS",
+   "pins": {
+    "1": "OutputVsense+",
+    "2": "GNDA"
+   }
+  },
+  {
+   "ref": "R42",
+   "lib_id": "Device:R",
+   "value": "100\u03a9",
+   "pins": {
+    "1": "ISENSE-",
+    "2": "N$3"
+   }
+  },
+  {
+   "ref": "R43",
+   "lib_id": "Device:R",
+   "value": "100\u03a9",
+   "pins": {
+    "1": "ISENSE+",
+    "2": "N$4"
+   }
+  },
+  {
+   "ref": "R44",
+   "lib_id": "Device:R",
+   "value": "33\u03a9",
+   "pins": {
+    "1": "N$1",
+    "2": "PeakSns"
+   }
+  },
+  {
+   "ref": "R47",
+   "lib_id": "Device:R",
+   "value": "33\u03a9",
+   "pins": {
+    "1": "N$5",
+    "2": "InputVSense"
+   }
+  },
+  {
+   "ref": "R48",
+   "lib_id": "Device:R",
+   "value": "33\u03a9",
+   "pins": {
+    "1": "N$6",
+    "2": "OutputVSense"
+   }
+  },
+  {
+   "ref": "R82",
+   "lib_id": "Device:R",
+   "value": "100\u03a9",
+   "pins": {
+    "1": "IAvg-",
+    "2": "N$7"
+   }
+  },
+  {
+   "ref": "R83",
+   "lib_id": "Device:R",
+   "value": "100\u03a9",
+   "pins": {
+    "1": "IAvg+",
+    "2": "N$8"
+   }
+  },
+  {
+   "ref": "R84",
+   "lib_id": "Device:R",
+   "value": "33\u03a9",
+   "pins": {
+    "1": "N$2",
+    "2": "AvgSns"
+   }
+  },
+  {
+   "ref": "TP5",
+   "lib_id": "Connector:TestPoint_Probe",
+   "value": "TestPoint_Probe",
+   "pins": {
+    "1": "PeakSns"
+   }
+  },
+  {
+   "ref": "TP6",
+   "lib_id": "Connector:TestPoint_Probe",
+   "value": "TestPoint_Probe",
+   "pins": {
+    "1": "GNDA"
+   }
+  },
+  {
+   "ref": "TP7",
+   "lib_id": "Connector:TestPoint_Probe",
+   "value": "TestPoint_Probe",
+   "pins": {
+    "1": "AvgSns"
+   }
+  },
+  {
+   "ref": "TP8",
+   "lib_id": "Connector:TestPoint_Probe",
+   "value": "TestPoint_Probe",
+   "pins": {
+    "1": "OutputVSense"
+   }
+  },
+  {
+   "ref": "TP9",
+   "lib_id": "Connector:TestPoint_Probe",
+   "value": "TestPoint_Probe",
+   "pins": {
+    "1": "InputVSense"
+   }
+  },
+  {
+   "ref": "U11",
+   "lib_id": "Amplifier_Current:INA241A2xDDF",
+   "value": "INA241A3xDDF",
+   "pins": {
+    "1": "N$4",
+    "2": "GNDA",
+    "3": "GNDA",
+    "4": "GNDA",
+    "5": "N$1",
+    "6": "VANA",
+    "7": "VREFH",
+    "8": "N$3"
+   }
+  },
+  {
+   "ref": "U12",
+   "lib_id": "Amplifier_Operational:OPA188xxDBV",
+   "value": "SGM8551XN",
+   "pins": {
+    "1": "N$5",
+    "2": "GNDA",
+    "3": "InputVsense+",
+    "4": "N$5",
+    "5": "VANA"
+   }
+  },
+  {
+   "ref": "U13",
+   "lib_id": "Amplifier_Operational:OPA188xxDBV",
+   "value": "SGM8551XN",
+   "pins": {
+    "1": "N$6",
+    "2": "GNDA",
+    "3": "OutputVsense+",
+    "4": "N$6",
+    "5": "VANA"
+   }
+  },
+  {
+   "ref": "U27",
+   "lib_id": "Amplifier_Current:INA241A2xDDF",
+   "value": "INA241A3xDDF",
+   "pins": {
+    "1": "N$8",
+    "2": "GNDA",
+    "3": "GNDA",
+    "4": "GNDA",
+    "5": "N$2",
+    "6": "VANA",
+    "7": "VREFH",
+    "8": "N$7"
+   }
+  }
+ ]
+}
