@@ -11,6 +11,14 @@ use super::place::{gather, incidence};
 use super::*;
 use circuit_graph::netclass::{is_ground, is_power_net};
 
+/// Lay the caller's stated intent over the inferred IR. Only the two things a caller can
+/// say about a NET — which are rails and which exit as ports — override inference; where
+/// the parts go is the block's tree.
+pub fn apply_intent(ir: &mut LayoutIr, intent: LayoutIr) {
+    ir.rails.extend(intent.rails);
+    ir.ports.extend(intent.ports);
+}
+
 /// Each block's authored arrangement, the tree the typesetter draws it from.
 fn block_trees(design: &Design) -> sch_model::tree::Trees {
     design

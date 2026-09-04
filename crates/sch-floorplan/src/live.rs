@@ -41,7 +41,6 @@ use kicad_symbol::geometry::SymbolGeometry;
 use sch_check::model::{Block, Component, Design, PinTarget};
 use sch_check::{ExistingSheet, PayloadAudit, PlacePartsInput};
 use sch_doc::{LabelKind, NetSource, Netlist, Pose, SchDoc, connect};
-use sch_model::ir::LayoutIr;
 use sch_model::item::{Incidence, Item};
 use serde::{Deserialize, Serialize};
 
@@ -269,7 +268,7 @@ fn place_parts_inner(
 
     let mut ir = crate::floorplan::infer_ir(env, &design);
     if let Some(intent) = input.intent.clone() {
-        apply_intent(&mut ir, intent.into_layout_ir());
+        crate::floorplan::apply_intent(&mut ir, intent.into_layout_ir());
     }
     // An unfinished single-pin net must not take the port convenience: a global label
     // reads as deliberate board I/O and silences KiCAD's own ERC, hiding the very gap
@@ -592,7 +591,7 @@ fn rearrange_inner(
     let mut owned = footprints(&movable);
     let mut ir = crate::floorplan::infer_ir(env, &design);
     if let Some(intent) = intent {
-        apply_intent(&mut ir, intent.into_layout_ir());
+        crate::floorplan::apply_intent(&mut ir, intent.into_layout_ir());
     }
     if let Some(tree) = layout {
         // The selection is drawn from the caller's tree. It is one arrangement, so it
@@ -958,12 +957,6 @@ fn selection_drawing(doc: &SchDoc, owned: &[Rect], held: &[Item]) -> BTreeSet<St
     }
 }
 
-/// Apply the caller's intent over the inferred IR, keeping everything inference
-/// derived for itself.
-fn apply_intent(ir: &mut LayoutIr, intent: LayoutIr) {
-    ir.rails.extend(intent.rails);
-    ir.ports.extend(intent.ports);
-}
 
 /// Move `items` onto the poses the typesetter chose, matched by part identity rather
 /// than by position in the list.

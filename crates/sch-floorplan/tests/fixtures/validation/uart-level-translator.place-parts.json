@@ -153,5 +153,83 @@
       "RXD1": "right",
       "TXD1": "right"
     }
+  },
+  "layout": {
+    "uart": {
+      "row": [
+        {
+          "part": "J1"
+        },
+        {
+          "col": [
+            {
+              "part": "R7"
+            },
+            {
+              "part": "R8"
+            }
+          ],
+          "gap": 6
+        },
+        {
+          "col": [
+            {
+              "part": "R9"
+            },
+            {
+              "part": "R16"
+            }
+          ],
+          "gap": 6
+        },
+        {
+          "part": "U2"
+        },
+        {
+          "col": [
+            {
+              "part": "R15"
+            },
+            {
+              "part": "R13"
+            }
+          ],
+          "gap": 6
+        },
+        {
+          "row": [
+            {
+              "part": "C14"
+            },
+            {
+              "part": "C16"
+            }
+          ],
+          "gap": 6
+        }
+      ],
+      "gap": 7
+    },
+    "power": {
+      "row": [
+        {
+          "part": "PWR1"
+        },
+        {
+          "part": "PWR2"
+        },
+        {
+          "part": "PWR3"
+        }
+      ],
+      "gap": 8
+    },
+    "mcu": {
+      "row": [
+        {
+          "part": "R20"
+        }
+      ]
+    }
   }
 }

@@ -25,6 +25,8 @@ use sch_model::place::PlaceResult;
 use crate::floorplan::place::{RoutedEvaluator, RoutedSheetRealizer, incidence};
 use sch_model::geometry::body_rect;
 
+/// Space left between the content already on a sheet and a block placed beside it.
+const BLOCK_MARGIN: f64 = 10.0 * geom::GRID_50_MIL.pitch();
 /// Step of the legalisation walk (100 mil — two schematic grid steps).
 const WALK: f64 = 2.0 * geom::GRID_50_MIL.pitch();
 /// How far a whole BLOCK may be slid to find free sheet. A block legitimately travels the
@@ -95,6 +97,31 @@ impl<'a> RegionProblem<'a> {
             incidence,
             ir,
         }
+    }
+}
+
+/// Slide a freshly typeset block clear of the content already on the sheet, so it starts
+/// beside it rather than on top of it.
+fn beside_the_fixed(movable: &mut [Item], fixed: &[Item]) {
+    let corners = |items: &[Item]| {
+        let pts: Vec<Point2> = items
+            .iter()
+            .flat_map(|it| {
+                let r = body_rect(it, it.at);
+                [Point2::new(r.min_x, r.min_y), Point2::new(r.max_x, r.max_y)]
+            })
+            .collect();
+        Rect::bounding(&pts)
+    };
+    let (Some(here), Some(there)) = (corners(movable), corners(fixed)) else {
+        return;
+    };
+    let delta = Point2::new(
+        geom::GRID_50_MIL.snap(there.max_x + BLOCK_MARGIN - here.min_x),
+        geom::GRID_50_MIL.snap(there.min_y - here.min_y),
+    );
+    for it in movable {
+        it.at = Point2::new(it.at.x + delta.x, it.at.y + delta.y);
     }
 }
 
@@ -282,10 +309,10 @@ pub fn arrange(problem: RegionProblem) -> RegionOutput {
     }
 
     let typeset = sch_flex::typeset(&mut all, &ir.trees);
-    for (it, live) in all.iter_mut().skip(movable).zip(&fixed) {
-        it.at = live.at;
-        it.angle = live.angle;
-    }
+    // The typesetter lays a block out from the origin: it draws the block, not the sheet.
+    // On a sheet that already has content that is on top of what is there, so the new
+    // block starts BESIDE it — the slide below only has to fine-tune from there.
+    beside_the_fixed(&mut all[..movable], &fixed);
 
     // With nothing to avoid, the typeset arrangement is authoritative — walking parts
     // apart here would only undo the alignment it just computed.

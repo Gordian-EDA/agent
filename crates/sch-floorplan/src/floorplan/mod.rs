@@ -18,5 +18,5 @@ pub use sch_model::ir::{Band, LayoutIr, Side};
 mod infer;
 pub mod place;
 
-pub use infer::{baseline_ir, infer_ir};
+pub use infer::{apply_intent, baseline_ir, infer_ir};
 pub use place::{emit_strategy, place_problem};

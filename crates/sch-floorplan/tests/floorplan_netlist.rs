@@ -217,10 +217,12 @@ fn validate_fixture(
         let (design, diagnostics, _) =
             sch_check::into_design(&input, provider, &Default::default());
         assert!(!diagnostics.has_errors(), "{name}: {:#?}", diagnostics);
-        let ir = input
-            .intent
-            .map(sch_check::Intent::into_layout_ir)
-            .unwrap_or_else(|| floorplan::baseline_ir(&design));
+        // Compose the IR exactly as the live path does: inference supplies the rails,
+        // the ports and each block's tree, and the caller's intent lays over it.
+        let mut ir = floorplan::infer_ir(env, &design);
+        if let Some(intent) = input.intent {
+            floorplan::apply_intent(&mut ir, intent.into_layout_ir());
+        }
         let out = floorplan::emit_strategy(env, &design, Some(ir))
             .unwrap_or_else(|e| panic!("{name}: {e}"));
 
