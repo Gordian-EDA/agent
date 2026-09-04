@@ -104,12 +104,12 @@ impl SchematicWriter {
     ///
     /// The router picks each label's stub independently — the shortest rung of
     /// its ladder that clears whatever that one pin faces — so a header's twenty
-    /// labels come out at four different offsets. This pass replaces the group's
-    /// lengths with ONE that seats every member of it clear of foreign anchors,
-    /// foreign wires and neighbouring ink: the same tests
-    /// [`Self::retract_colliding_stubs`] and [`Self::label_landing_clear`] apply,
-    /// so an aligned stub is never one retraction then drops. A group with no
-    /// such length keeps the lengths the router chose.
+    /// labels come out at four different offsets. This pass finds the ONE length
+    /// that seats the most of them clear of foreign anchors, foreign wires and
+    /// neighbouring ink — the same tests [`Self::retract_colliding_stubs`] and
+    /// [`Self::label_landing_clear`] apply, so an aligned stub is never one
+    /// retraction then drops — and moves those onto it. A member no length can
+    /// seat keeps what the router chose rather than dragging the column to it.
     ///
     /// Candidates are tried at [`DEFAULT_STUB_MM`] first and then outward-and-up,
     /// because the length is a *drawing* choice, not a clearance minimum: a
@@ -182,8 +182,10 @@ impl SchematicWriter {
                 }
                 self.label_landing_clear_excluding(end, label.dir, net, &refdes, &members)
             };
-            // Never shorter than a grid step, never past the longest rung the
-            // router itself would have tried.
+            // Rungs to try, best first: the default, then longer, then shorter. The
+            // one that seats the MOST of the group wins, so a single pin with a
+            // wire in its face costs that pin its column place rather than
+            // dragging the other nineteen labels in with it.
             let longest = members
                 .iter()
                 .map(|&i| {
@@ -194,15 +196,30 @@ impl SchematicWriter {
                 .max(11.0 * pitch);
             let rungs = (longest / pitch).round().max(1.0) as usize;
             let default = (DEFAULT_STUB_MM / pitch).round() as usize;
-            let Some(shared) = (default..=rungs.max(default))
+            let Some((_, shared, seats)) = (default..=rungs.max(default))
                 .chain((1..default).rev())
-                .map(|k| k as f64 * pitch)
-                .find(|&len| members.iter().all(|&i| clear(i, len)))
+                .enumerate()
+                .map(|(rank, k)| {
+                    let len = k as f64 * pitch;
+                    let seats: Vec<usize> = members
+                        .iter()
+                        .copied()
+                        .filter(|&i| clear(i, len))
+                        .collect();
+                    (rank, len, seats)
+                })
+                // Ties keep the earlier — and therefore more preferred — rung.
+                .max_by_key(|(rank, _, seats)| (seats.len(), std::cmp::Reverse(*rank)))
             else {
                 continue;
             };
+            // One member alone is not a column, and the router's own choice for it
+            // is at least as good as anything this pass would pick.
+            if seats.len() < 2 {
+                continue;
+            }
             let seated: Vec<(usize, Point2)> =
-                members.iter().map(|&i| (i, seat(i, shared).1)).collect();
+                seats.iter().map(|&i| (i, seat(i, shared).1)).collect();
             for (i, at) in seated {
                 self.labels[i].at = at;
             }
