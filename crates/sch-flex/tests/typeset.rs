@@ -115,7 +115,7 @@ fn every_part_lands_on_the_pin_lattice() {
             leaf("C1"),
         ],
     );
-    sch_flex::typeset(&mut items, &trees(tree));
+    sch_flex::typeset(&mut items, &trees(tree), &[]);
     for it in &items {
         let on = geom::GRID_50_MIL.snap_point(it.at);
         assert!(
@@ -145,7 +145,7 @@ fn a_column_beside_an_ic_seats_its_pin_on_the_ic_pin_line() {
             leaf("U1"),
         ],
     );
-    sch_flex::typeset(&mut items, &trees(tree));
+    sch_flex::typeset(&mut items, &trees(tree), &[]);
     let at = |refdes: &str| items.iter().find(|i| i.refdes == refdes).unwrap().at;
     // R1's top pin carries net A; so does the IC's pin 1. Both are 3.81 / 1.27 mm above
     // their own origin in sheet space, so the wire between them is a straight run.
@@ -162,7 +162,7 @@ fn a_column_beside_an_ic_seats_its_pin_on_the_ic_pin_line() {
 #[test]
 fn an_uncomposed_block_is_drawn_as_a_row_and_reported() {
     let mut items = vec![passive("R1", "A", "B"), passive("R2", "B", "C")];
-    let report = sch_flex::typeset(&mut items, &Trees::new());
+    let report = sch_flex::typeset(&mut items, &Trees::new(), &[]);
     assert_eq!(report.untreed, ["b"]);
     assert!(report.warnings()[0].contains("bare row"), "{report:?}");
     assert_ne!(items[0].at, items[1].at);
@@ -172,7 +172,7 @@ fn an_uncomposed_block_is_drawn_as_a_row_and_reported() {
 #[test]
 fn a_part_left_out_of_the_tree_is_drawn_and_named() {
     let mut items = vec![passive("R1", "A", "B"), passive("R2", "B", "C")];
-    let report = sch_flex::typeset(&mut items, &trees(leaf("R1")));
+    let report = sch_flex::typeset(&mut items, &trees(leaf("R1")), &[]);
     assert_eq!(report.uncomposed["b"], ["R2"]);
     assert!(report.warnings()[0].contains("leaves out R2"), "{report:?}");
     assert_ne!(items[0].at, items[1].at);
@@ -185,7 +185,7 @@ fn a_block_too_big_for_any_page_still_terminates_with_every_part_placed() {
     let mut items: Vec<Item> = (0..120)
         .map(|i| passive(&format!("R{i}"), "A", "GND"))
         .collect();
-    let report = sch_flex::typeset(&mut items, &Trees::new());
+    let report = sch_flex::typeset(&mut items, &Trees::new(), &[]);
     assert_eq!(report.untreed, ["b"]);
     let seats: std::collections::BTreeSet<(i64, i64)> = items
         .iter()
@@ -204,9 +204,9 @@ fn a_leaf_for_a_part_this_call_is_not_placing_leaves_no_hole() {
         vec![leaf("R0"), leaf("R1"), leaf("R9"), leaf("R2")],
     );
     let mut both = vec![passive("R1", "A", "B"), passive("R2", "B", "C")];
-    sch_flex::typeset(&mut both, &trees(tree.clone()));
+    sch_flex::typeset(&mut both, &trees(tree.clone()), &[]);
     let mut only = vec![passive("R1", "A", "B"), passive("R2", "B", "C")];
-    sch_flex::typeset(&mut only, &trees(stack(Axis::Row, vec![leaf("R1"), leaf("R2")])));
+    sch_flex::typeset(&mut only, &trees(stack(Axis::Row, vec![leaf("R1"), leaf("R2")])), &[]);
     assert_eq!(
         (both[1].at.x - both[0].at.x, both[0].at),
         (only[1].at.x - only[0].at.x, only[0].at),

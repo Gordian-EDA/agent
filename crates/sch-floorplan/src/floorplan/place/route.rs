@@ -161,9 +161,10 @@ pub(crate) fn wire(
     // drawn and the wide ones degrade to labels. Alphabetical order decided this before,
     // which is to say nothing decided it.
     let label_policy = LabelPolicy::default();
-    let mut order: Vec<(&String, &Vec<([f64; 2], Dir)>)> = net_eps.iter().collect();
-    order.sort_by_key(|(net, eps)| (eps.len(), (*net).clone()));
-    for (net, eps) in order {
+    let mut order: Vec<&String> = net_eps.keys().collect();
+    order.sort_by_key(|net| (net_eps[*net].len(), (*net).clone()));
+    for net in order {
+        let eps = &net_eps[net];
         if ir.rails.contains_key(net) {
             continue;
         }

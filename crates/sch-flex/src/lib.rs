@@ -40,11 +40,17 @@ const BLOCK_GAP: f64 = 6.0 * UNIT_MM;
 /// Room each block keeps outside its parts for the dashed frame the realiser draws around
 /// it and the field text the solver seats along its edge.
 const FRAME_PAD: f64 = 4.0 * UNIT_MM;
-/// The width-to-height ratio a packed sheet aims for — a landscape page's usable area.
+/// The width-to-height ratio a graft aims for when no page is named — a landscape page's
+/// usable area.
 const SHEET_ASPECT: f64 = 1.5;
-/// Usable width (mm) of the page the sheet starts on; a pack wider than this grows the
+/// Usable width (mm) of the page a graft starts on; a pack wider than this grows the
 /// paper, which reads worse than a taller sheet.
 const PAGE_WIDTH: f64 = 260.0;
+/// Fraction of a page's usable box the packed BLOCKS may claim. The blocks are not the
+/// whole drawing: power rails run in bands above and below them and cross-block labels sit
+/// outside their frames, none of which this crate measures. Packing to the last millimetre
+/// therefore buys the next page up as soon as the router draws.
+const BLOCK_SHARE: f64 = 0.9;
 
 /// What the typesetter had to decide for itself, because its author did not.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -79,7 +85,12 @@ impl Report {
 /// Lay out every non-preseeded item from its block's tree, writing `at`, `angle` and
 /// `mirror` back into `items`. Items a caller already posed are left exactly where they
 /// are, and nothing is drawn on top of them — the caller's region adapter owns that.
-pub fn typeset(items: &mut [Item], trees: &Trees) -> Report {
+///
+/// `pages` are the usable boxes of the pages this drawing could be printed on, smallest
+/// first, with margins and any title-block band already taken off. Empty means the caller
+/// owns the page — a graft beside existing content — and the blocks are then packed for a
+/// page's proportions without aiming at one.
+pub fn typeset(items: &mut [Item], trees: &Trees, pages: &[[f64; 2]]) -> Report {
     let movable: Vec<usize> = (0..items.len()).filter(|i| !items[*i].preseeded).collect();
     let mut report = Report::default();
     let blocks = compose(items, &movable, trees, &mut report);
@@ -111,7 +122,7 @@ pub fn typeset(items: &mut [Item], trees: &Trees) -> Report {
         .iter()
         .map(|(_, b)| (b.width() + 2.0 * FRAME_PAD, b.height() + 2.0 * FRAME_PAD))
         .collect();
-    for (origin, (placed, bbox)) in pack(&sizes).into_iter().zip(&drawings) {
+    for (origin, (placed, bbox)) in pack(&sizes, pages).into_iter().zip(&drawings) {
         let shift = block_shift(origin, *bbox);
         for p in placed {
             let item = &mut items[p.part];
@@ -268,48 +279,79 @@ fn drawing_bbox(placed: &[measure::Placed], parts: &[Part]) -> Rect {
     Rect::bounding(&corners).unwrap_or_else(|| Rect::new(0.0, 0.0, 0.0, 0.0))
 }
 
-/// Shelf-pack the blocks, choosing the shelf width whose finished sheet is closest to a
-/// page's proportions — a sheet in one long row and a sheet in one long column are the two
-/// ways a multi-block drawing reads badly.
+/// Shelf-pack the blocks onto the smallest page they fill.
+///
+/// A pack that does not know which page it is filling optimises for a sheet nobody will
+/// print: it shelves a wide drawing into a narrow column, and the writer then buys the
+/// next page up to hold the column's height — the drawing ends in one corner of a sheet
+/// twice the size it needed. So the pages come in, smallest first, and the first one an
+/// arrangement fits wins.
 ///
 /// The widths worth trying are exactly the ones a shelf boundary can fall on: the total
 /// width of each contiguous run of blocks. Anything between two of those packs identically.
-fn pack(sizes: &[(f64, f64)]) -> Vec<Point2> {
-    let shelve = |limit: f64| {
-        let (mut origins, mut x, mut y, mut shelf, mut used) =
-            (Vec::new(), MARGIN, MARGIN, 0.0f64, 0.0f64);
-        for (w, h) in sizes {
-            // The candidate limits are sums of these same widths, so a run that exactly
-            // fills one must not be pushed off it by floating-point dust.
-            if x > MARGIN && x + w > MARGIN + limit + geom::EPS {
-                x = MARGIN;
-                y += shelf + BLOCK_GAP;
-                shelf = 0.0;
-            }
-            origins.push(Point2::new(x, y));
-            x += w + BLOCK_GAP;
-            shelf = shelf.max(*h);
-            used = used.max(x - BLOCK_GAP - MARGIN);
-        }
-        (origins, used, y + shelf - MARGIN)
-    };
-    shelf_widths(sizes)
+fn pack(sizes: &[(f64, f64)], pages: &[[f64; 2]]) -> Vec<Point2> {
+    pages
+        .iter()
+        .find_map(|page| fills(sizes, *page))
+        .unwrap_or_else(|| loose(sizes))
+}
+
+/// Pack `sizes` into `page` (a usable box), returning the arrangement whose proportions
+/// best match the page's — or `None` when nothing fits inside it.
+///
+/// The author's block order is the sheet's signal flow, so it is tried first and kept
+/// whenever it fits; a reordering is only ever allowed to rescue a page the given order
+/// could not fill, never to shave an aspect error.
+fn fills(sizes: &[(f64, f64)], page: [f64; 2]) -> Option<Vec<Point2>> {
+    let target = page[0] / page[1].max(1.0);
+    let room = [page[0] * BLOCK_SHARE, page[1] * BLOCK_SHARE];
+    orders(sizes).into_iter().find_map(|order| {
+        limits(sizes, room[0])
+            .into_iter()
+            .map(|limit| corner_pack(sizes, &order, limit))
+            .filter(|(_, w, h)| *w <= room[0] + geom::EPS && *h <= room[1] + geom::EPS)
+            .min_by(|a, b| aspect_error(a.1, a.2, target).total_cmp(&aspect_error(b.1, b.2, target)))
+            .map(|(origins, ..)| origins)
+    })
+}
+
+/// Pack `sizes` with no page to fill — an incremental graft, whose blocks land beside
+/// content this crate never sees. Proportions only, in the author's order, with the width
+/// held near a page's so a grafted group does not widen the sheet onto a custom page.
+fn loose(sizes: &[(f64, f64)]) -> Vec<Point2> {
+    let order: Vec<usize> = (0..sizes.len()).collect();
+    limits(sizes, PAGE_WIDTH)
         .into_iter()
-        .map(shelve)
-        .min_by(|a, b| aspect_error(a.1, a.2).total_cmp(&aspect_error(b.1, b.2)))
+        .map(|limit| corner_pack(sizes, &order, limit))
+        .min_by(|a, b| {
+            let error =
+                |w: f64, h: f64| aspect_error(w, h, SHEET_ASPECT) + (w - PAGE_WIDTH).max(0.0);
+            error(a.1, a.2).total_cmp(&error(b.1, b.2))
+        })
         .map(|(origins, ..)| origins)
         .unwrap_or_default()
 }
 
-/// How far a packed sheet of `w` x `h` is from a page's proportions, with an overflowing
-/// width counted as the defect it is: a sheet wider than a page grows the paper.
-fn aspect_error(w: f64, h: f64) -> f64 {
-    (w / h.max(1.0) - SHEET_ASPECT).abs() + (w - PAGE_WIDTH).max(0.0)
+/// Block orders worth trying, the author's first: then tallest, largest and widest first,
+/// the classic bin-packing heuristics for getting an awkward set onto one page.
+fn orders(sizes: &[(f64, f64)]) -> Vec<Vec<usize>> {
+    let by = |key: fn(&(f64, f64)) -> f64| {
+        let mut order: Vec<usize> = (0..sizes.len()).collect();
+        order.sort_by(|a, b| key(&sizes[*b]).total_cmp(&key(&sizes[*a])).then(a.cmp(b)));
+        order
+    };
+    vec![
+        (0..sizes.len()).collect(),
+        by(|s| s.1),
+        by(|s| s.0 * s.1),
+        by(|s| s.0),
+    ]
 }
 
-/// Every shelf width that packs differently: the total width of each contiguous run.
-fn shelf_widths(sizes: &[(f64, f64)]) -> Vec<f64> {
-    let mut widths = Vec::new();
+/// Width limits that pack differently: the total width of each contiguous run of blocks,
+/// plus the page's own width. Anything between two of those packs identically.
+fn limits(sizes: &[(f64, f64)], page_width: f64) -> Vec<f64> {
+    let mut widths = vec![page_width];
     for i in 0..sizes.len() {
         let mut run = 0.0;
         for (w, _) in &sizes[i..] {
@@ -322,27 +364,97 @@ fn shelf_widths(sizes: &[(f64, f64)]) -> Vec<f64> {
     widths
 }
 
+/// Bottom-left packing of `sizes`, visited in `order`, into a box `limit` wide and
+/// unbounded in height: each block takes the lowest, then left-most corner that clears the
+/// blocks already down. Row-major shelves leave a dead band under every short block; a
+/// corner pack lets the next block slide up into it.
+///
+/// Returns the origins in the ORIGINAL index order, plus the finished sheet's extent.
+fn corner_pack(sizes: &[(f64, f64)], order: &[usize], limit: f64) -> (Vec<Point2>, f64, f64) {
+    let mut placed: Vec<Rect> = Vec::with_capacity(order.len());
+    let mut origins = vec![Point2::new(MARGIN, MARGIN); sizes.len()];
+    let (mut used_w, mut used_h) = (0.0f64, 0.0f64);
+    for &i in order {
+        let (w, h) = sizes[i];
+        let mut corners = vec![Point2::new(MARGIN, MARGIN)];
+        for r in &placed {
+            corners.push(Point2::new(r.max_x + BLOCK_GAP, r.min_y));
+            corners.push(Point2::new(r.min_x, r.max_y + BLOCK_GAP));
+            corners.push(Point2::new(r.max_x + BLOCK_GAP, MARGIN));
+            corners.push(Point2::new(MARGIN, r.max_y + BLOCK_GAP));
+        }
+        corners.sort_by(|a, b| a.y.total_cmp(&b.y).then(a.x.total_cmp(&b.x)));
+        let at = corners
+            .into_iter()
+            .find(|c| {
+                let r = Rect::new(c.x, c.y, c.x + w, c.y + h);
+                // A run that exactly fills the limit must not be pushed off it by dust.
+                r.max_x <= MARGIN + limit + geom::EPS
+                    && !placed.iter().any(|p| gapped(p).overlaps(&r))
+            })
+            .unwrap_or(Point2::new(MARGIN, used_h + MARGIN + BLOCK_GAP));
+        placed.push(Rect::new(at.x, at.y, at.x + w, at.y + h));
+        origins[i] = at;
+        used_w = used_w.max(at.x + w - MARGIN);
+        used_h = used_h.max(at.y + h - MARGIN);
+    }
+    (origins, used_w, used_h)
+}
+
+/// A placed block's rect grown by half the inter-block gap on every side, so two blocks
+/// that merely respect the gap do not read as overlapping.
+fn gapped(r: &Rect) -> Rect {
+    let m = BLOCK_GAP / 2.0 - geom::EPS;
+    Rect::new(r.min_x - m, r.min_y - m, r.max_x + m, r.max_y + m)
+}
+
+/// How far a packed sheet of `w` x `h` is from proportions of `target`. Logarithmic, so
+/// half as wide and twice as wide are the same defect — the linear form punished a tall
+/// sheet far less than a wide one, which is how a drawing ends up in a column.
+fn aspect_error(w: f64, h: f64, target: f64) -> f64 {
+    ((w / h.max(1.0)) / target).ln().abs()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// Three blocks that would make a tall column go two-to-a-shelf instead: the pack is
-    /// chosen on the proportions of the finished sheet, not on the first width that fits.
+    /// A third block tucks into the band a short second block leaves beside a tall first,
+    /// instead of starting a row below both — the dead page a shelf pack cannot use.
     #[test]
-    fn blocks_are_shelved_into_a_page_shaped_sheet() {
-        let origins = pack(&[(160.0, 90.0), (105.0, 70.0), (80.0, 35.0)]);
-        assert_eq!(origins[0], Point2::new(MARGIN, MARGIN));
-        assert!(origins[1].y > origins[0].y, "the wide block gets its own shelf");
-        assert_eq!(origins[2].y, origins[1].y, "the two narrow blocks share one");
-        assert!(origins[2].x > origins[1].x);
+    fn a_short_block_does_not_strand_the_page_under_it() {
+        let blocks = [(140.0, 90.0), (100.0, 30.0), (90.0, 50.0)];
+        let (origins, _, height) = corner_pack(&blocks, &[0, 1, 2], 247.62);
+        assert_eq!(origins[1].y, origins[0].y, "the short block sits beside the tall one");
+        assert_eq!(origins[2].x, origins[1].x, "and the third tucks under it");
+        assert!(origins[2].y > origins[1].y);
+        assert_eq!(height, 90.0, "all three inside the tall block's own band");
     }
 
-    /// A pack wider than the page grows the paper, so a run that overflows loses to a
-    /// taller sheet even when its proportions are better.
+    /// With no page to fill, a pack wider than a page grows the paper, so a run that
+    /// overflows loses to a taller sheet even when its proportions are better.
     #[test]
-    fn a_shelf_never_overflows_the_page_to_look_squarer() {
-        let origins = pack(&[(200.0, 40.0), (200.0, 40.0)]);
+    fn a_graft_never_overflows_the_page_to_look_squarer() {
+        let origins = pack(&[(200.0, 40.0), (200.0, 40.0)], &[]);
         assert!(origins[1].y > origins[0].y);
+    }
+
+    /// Given the pages it may be printed on, the pack fills one instead of stacking into a
+    /// column that then buys the next page up. Three blocks this size fit nothing on A4;
+    /// on A3 they go two to a shelf, inside its usable box.
+    #[test]
+    fn the_pack_aims_at_the_page_it_will_be_printed_on() {
+        let a4 = [271.6, 151.6];
+        let a3 = [394.6, 238.6];
+        let blocks = [(180.0, 100.0), (180.0, 100.0), (150.0, 100.0)];
+        assert!(fills(&blocks, a4).is_none(), "nothing this size fits A4");
+        let origins = pack(&blocks, &[a4, a3]);
+        let shelves: BTreeSet<i64> = origins.iter().map(|o| (o.y * 100.0) as i64).collect();
+        assert_eq!(shelves.len(), 2, "three blocks on two shelves, not a column");
+        let far = origins.iter().zip(blocks).fold((0.0f64, 0.0f64), |m, (o, b)| {
+            (m.0.max(o.x + b.0 - MARGIN), m.1.max(o.y + b.1 - MARGIN))
+        });
+        assert!(far.0 <= a3[0] && far.1 <= a3[1], "{far:?} outside A3");
     }
 
     /// A block lands on the lattice a pin connects on, however ragged the extent that
@@ -355,3 +467,4 @@ mod tests {
         assert_eq!(geom::GRID_50_MIL.snap_point(shift), shift, "{shift:?}");
     }
 }
+

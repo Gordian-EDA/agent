@@ -308,7 +308,14 @@ pub fn arrange(problem: RegionProblem) -> RegionOutput {
         it.preseeded = true;
     }
 
-    let typeset = sch_flex::typeset(&mut all, &ir.trees);
+    // A sheet with nothing on it is the typesetter's to fill, so it packs the blocks for a
+    // real page. A graft has no such freedom: its blocks land beside content this crate
+    // cannot see, and packing them for a whole page would push the sheet onto a custom one.
+    let pages = match fixed.is_empty() && obstacles.is_empty() {
+        true => crate::write::usable_pages(),
+        false => Vec::new(),
+    };
+    let typeset = sch_flex::typeset(&mut all, &ir.trees, &pages);
     // The typesetter lays a block out from the origin: it draws the block, not the sheet.
     // On a sheet that already has content that is on top of what is there, so the new
     // block starts BESIDE it — the slide below only has to fine-tune from there.
