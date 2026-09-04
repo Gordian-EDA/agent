@@ -195,22 +195,27 @@ pub(crate) fn wire(
     Ok(())
 }
 
-/// When the orthogonal router should promote a signal hop to a net-LABEL pair
-/// instead of drawing the literal wire — the wire-vs-label decision, anchored to
-/// the human corpus (`tools/layout_metrics.py`: humans keep wires short, ~0% >50mm,
-/// and ~0 crossings; long literal crossing wires are the auto-layout "spaghetti"
-/// tell). A hop is labelled when EITHER:
-///   * its (direct or routed) length exceeds [`LABEL_LEN_MM`] — too long to draw; or
-///   * its DIRECT pin gap exceeds [`CROSS_LABEL_LEN_MM`], the literal route would CROSS
-///     a foreign wire, AND both endpoints could carry a body-clear label — a crossing
-///     reads as clutter, so name it instead (but never if naming would just move the
-///     defect to a label-over-body).
+/// When the orthogonal router should promote a signal hop to a net-LABEL pair instead of
+/// drawing the literal wire.
 ///
-/// Local short hops (the bulk of a human sheet) stay drawn, so `label_per_part`
-/// climbs toward the human ~0.76 without labelling everything.
+/// The judgement is about SHAPE, not length: a long straight run reads better than a short
+/// snake, so what a hop may spend is a [`geom::RouteShape`] budget, and how much it may
+/// spend depends only on how far apart its ends are.
+///
+///   * up to [`LABEL_LEN_MM`] — a LOCAL hop, [`geom::SHAPE_GENERAL`]: a Z, or one crossing
+///     on an otherwise direct run.
+///   * up to [`LONG_SIMPLE_LEN_MM`] — a LONG hop, [`geom::SHAPE_SIMPLE`]: straight, or one
+///     corner with no detour. Humans do draw these; what they never draw is a long snake.
+///   * beyond that, always a label.
+///
+/// Two riders. A hop shorter than [`CROSS_LABEL_LEN_MM`] keeps whatever legal route it has
+/// — a tight cluster must not fragment into label spam over one crossing. And an endpoint
+/// that could not seat a body-clear label forgives one crossing ([`CROWDED_FORGIVES`]),
+/// because naming such a pin only moves the defect onto a label over a body.
 #[derive(Clone, Copy)]
 pub(crate) struct LabelPolicy {
     pub len_mm: f64,
+    pub long_simple_len_mm: f64,
     pub cross_len_mm: f64,
 }
 
@@ -218,8 +223,38 @@ impl LabelPolicy {
     pub(crate) fn default() -> Self {
         LabelPolicy {
             len_mm: LABEL_LEN_MM,
+            long_simple_len_mm: LONG_SIMPLE_LEN_MM,
             cross_len_mm: CROSS_LABEL_LEN_MM,
         }
+    }
+
+    /// The shape budget for a hop whose ends are `direct` mm apart, or `None` when no
+    /// wire is acceptable at that distance.
+    fn budget(&self, direct: f64, label_clear: bool) -> Option<f64> {
+        let base = match direct {
+            d if d <= self.len_mm => geom::SHAPE_GENERAL,
+            d if d <= self.long_simple_len_mm => geom::SHAPE_SIMPLE,
+            _ => return None,
+        };
+        Some(base + if label_clear { 0.0 } else { CROWDED_FORGIVES })
+    }
+
+    /// Whether a routed path is worth drawing rather than naming.
+    fn keeps(&self, path: &[::geom::Point2], crossings: usize, label_clear: bool) -> bool {
+        let shape = geom::RouteShape::of(path, crossings);
+        let direct = match (path.first(), path.last()) {
+            (Some(a), Some(b)) => a.manhattan(*b),
+            _ => return false,
+        };
+        let drawn = direct + shape.detour_mm;
+        if drawn > self.long_simple_len_mm {
+            return false;
+        }
+        if direct <= self.cross_len_mm {
+            return true;
+        }
+        self.budget(direct, label_clear)
+            .is_some_and(|budget| shape.cost() <= budget)
     }
 }
 
@@ -385,40 +420,16 @@ pub(crate) fn route_signal(
             (None, Some(d)) => (pts[j], d, pts[i]),
             (None, None) => (pts[i], dir_toward(pts[i], pts[j]), pts[j]),
         };
-        // A hop longer than the label policy's length is left unrouted so the union-find
+        // A hop the policy will not draw at any shape is left unrouted so the union-find
         // leaves its endpoints split — the label-bridge below then names each side,
         // turning a long literal wire into a net-label pair (the human idiom).
         let direct = (a[0] - b[0]).abs() + (a[1] - b[1]).abs();
-        if direct > label_policy.len_mm {
+        if direct > label_policy.long_simple_len_mm {
             continue;
         }
         if let Some(p) = router.route_edge(a, da, b, net, scene) {
-            // The DIRECT gap may be short while the only obstacle-free ROUTE is a sheet-wide
-            // DETOUR (two ICs whose shared bus pins face opposite ways, so the wire wraps the
-            // perimeter). A drawn wraparound reads far worse than naming each end, so discard a
-            // path whose routed length exceeds the policy length and leave the endpoints split.
-            let routed: f64 = p
-                .windows(2)
-                .map(|s| (s[0][0] - s[1][0]).abs() + (s[0][1] - s[1][1]).abs())
-                .sum();
-            if routed > label_policy.len_mm {
-                continue;
-            }
-            // CROSSING-DRIVEN promotion: a cross-block hop whose literal route would CROSS a
-            // foreign wire reads as spaghetti (humans keep ~0 crossings). Name it instead —
-            // leave the endpoints split for the label-bridge. Gated on the DIRECT pin-to-pin
-            // gap (not the routed length): a LOCAL node (terminals a few mm apart) keeps its
-            // wires even when the only obstacle-free route detours far around a body, so a
-            // tight cluster isn't fragmented into label spam. Only promote when BOTH endpoints
-            // could carry a body-CLEAR label (predictor matches the lint's geometry), so a pin
-            // whose label would land over a chip body or pin-name text — including after the
-            // stub-retraction — keeps its wire instead of becoming a lint-flagged label.
-            // Conservative on purpose: the TIER-1 references must stay 0-warning.
-            if direct > label_policy.cross_len_mm
-                && term_label_clear[i]
-                && term_label_clear[j]
-                && sch_model::route::path_crossings(&p, net, scene) > 0
-            {
+            let crossings = sch_model::route::path_crossings(&p, net, scene);
+            if !label_policy.keeps(&p, crossings, term_label_clear[i] && term_label_clear[j]) {
                 continue;
             }
             for seg in p.windows(2) {
@@ -1209,10 +1220,11 @@ pub(crate) const LABEL_LEN_MM: f64 = 50.0;
 /// risers or one of its lead-outs is a cross-sheet detour, and [`emit_rail`] gives the
 /// trunk up for distributed local power symbols instead.
 ///
-/// A rail wire is a wire, so it is held to the same corpus rule as a signal wire and
-/// simply IS [`LABEL_LEN_MM`] — humans keep ~0% of wires above it, whatever net they are
-/// on. Measured the same way too: on the geometry actually drawn, not on a pin-span proxy.
-pub(crate) const RAIL_SEGMENT_MAX: f64 = LABEL_LEN_MM;
+/// A rail wire is a wire, so it is held to the same corpus rule as a signal wire —
+/// humans keep ~0% of wires above 50mm, whatever net they are on. Measured the same way
+/// too: on the geometry actually drawn, not on a pin-span proxy. Its own literal, so that
+/// tuning the signal policy never silently redistributes a board's power.
+pub(crate) const RAIL_SEGMENT_MAX: f64 = 50.0;
 
 /// The CROSSING-driven label threshold (mm): a hop longer than this whose literal route
 /// would cross a foreign wire is named rather than drawn (see [`LabelPolicy`]). Lower than
@@ -1222,6 +1234,16 @@ pub(crate) const RAIL_SEGMENT_MAX: f64 = LABEL_LEN_MM;
 /// 19mm ≈ 7.5 grid: above the human wire-length median (~5mm) and p75, so only the longer,
 /// genuinely-crossing hops promote.
 pub(crate) const CROSS_LABEL_LEN_MM: f64 = 19.0;
+
+/// The longest hop still drawn as a wire (mm) — and only when its shape is SIMPLE
+/// (straight, or one corner with no detour). 60 grid: humans draw the occasional long
+/// clean run between two blocks; what they never draw is a long snake.
+pub(crate) const LONG_SIMPLE_LEN_MM: f64 = 76.2;
+
+/// Shape budget added when an endpoint could not seat a body-clear net label: exactly one
+/// crossing. Naming a walled-in pin does not remove the defect, it moves it onto a label
+/// over a body — so such a hop is forgiven a crossing, and nothing more.
+const CROWDED_FORGIVES: f64 = 20.0;
 
 /// Assign each drawn rail (≥3 pins) a y. Rails in a band share a base y, but overlapping
 /// x-ranges are pushed to successive rows (away from the content) via greedy interval
