@@ -118,7 +118,7 @@ pub(crate) fn selection_schema(engine: bool) -> Value {
 
 pub(crate) fn place_parts(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let mut input = input;
-    let warnings = sanitize_place_parts_input(&mut input);
+    let mut warnings = sanitize_place_parts_input(&mut input);
     let mut payload: sch_check::PlacePartsInput = typed(input, "place_parts")?;
     // The exact payload is what reproduces a placement; nothing else in the log does.
     tracing::debug!(
@@ -175,6 +175,7 @@ pub(crate) fn place_parts(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             }
         }
     }
+    warnings.extend(crowded_blocks(&design));
     let (_, diags, mut audit) = sch_check::into_design(&payload, ctx.provider(), &existing);
     audit.input_errors = diags
         .0
@@ -268,6 +269,31 @@ pub(crate) fn place_parts(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let value = with_resolved_nets(value, &resolved_nets.reported);
     let value = with_nc_overrides(value, &audit.nc_overridden);
     Ok(with_renamed(with_warnings(value, &warnings), &renamed))
+}
+
+/// Blocks holding more parts than one drawing can group.
+///
+/// A block is a section of the sheet, and a reader takes it in as one thing. Past
+/// about a dozen parts it stops being a section: a 24-part H-bridge asked for as
+/// ONE block comes back as a field of components joined by names, because there is
+/// no arrangement of 24 parts that reads as a single idea. The typesetter draws
+/// whatever tree it is handed, so this is the only place that can say so.
+fn crowded_blocks(design: &sch_check::model::Design) -> Vec<String> {
+    const ROOMY: usize = 12;
+    design
+        .blocks
+        .iter()
+        .filter(|(_, block)| block.components.len() > ROOMY)
+        .map(|(name, block)| {
+            format!(
+                "block `{name}` holds {} parts: split it into sections of 3-{ROOMY} \
+                 (power entry, regulator, MCU core, each interface, each repeated \
+                 channel) and give each its own `layout` tree, or it will draw as a \
+                 field of parts joined by labels rather than a circuit.",
+                block.components.len()
+            )
+        })
+        .collect()
 }
 
 fn nothing_placed_response(unplaced: Value, warnings: &[String]) -> Value {
@@ -1181,5 +1207,33 @@ impl Timing {
             "layout finished"
         );
         elapsed_ms
+    }
+}
+
+#[cfg(test)]
+mod block_size_tests {
+    use sch_check::model::{Block, Component, Design};
+
+    fn design_with(parts: usize) -> Design {
+        let mut block = Block::default();
+        for n in 0..parts {
+            block.components.insert(format!("R{n}"), Component::default());
+        }
+        let mut design = Design::default();
+        design.blocks.insert("everything".into(), block);
+        design
+    }
+
+    #[test]
+    fn a_section_of_a_dozen_parts_is_left_alone() {
+        assert!(super::crowded_blocks(&design_with(12)).is_empty());
+    }
+
+    #[test]
+    fn a_block_too_big_to_read_says_how_to_split_it() {
+        let said = super::crowded_blocks(&design_with(24));
+        assert_eq!(said.len(), 1);
+        assert!(said[0].contains("holds 24 parts"), "{said:?}");
+        assert!(said[0].contains("split it into sections"), "{said:?}");
     }
 }
