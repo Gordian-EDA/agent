@@ -212,8 +212,16 @@ fn compose(
         .collect()
 }
 
-/// The authored tree plus a trailing row of whatever it forgot, so every part is drawn —
-/// and a note to its author saying which parts they left to the typesetter.
+/// The authored tree plus everything it left out, so every part is drawn.
+///
+/// A part left out falls into two kinds, and they are not the same omission. A SYNTHESIZED
+/// part — a `decouple` cap the sugar expanded — was never the author's to name: it is
+/// seated beside the part it supports, which is where a human draws it, and nobody is told
+/// off for it. Anything else is the author's own gap: it goes in a trailing row with a note
+/// saying so, because a bare row is not a composition.
+///
+/// This only ever INSERTS. An authored leaf never changes place or order, so a tree that
+/// already reads as a signal path still does.
 fn complete(
     tree: &Tree,
     items: &[Item],
@@ -222,28 +230,80 @@ fn complete(
     report: &mut Report,
 ) -> Tree {
     let named = tree.keys();
-    let missing: Vec<(String, u8)> = members
+    let key = |i: usize| (items[i].refdes.clone(), items[i].unit);
+    let missing: Vec<usize> = members
         .iter()
-        .filter(|i| {
-            !named
-                .iter()
-                .any(|(r, u)| *r == items[**i].refdes && *u == items[**i].unit)
-        })
-        .map(|i| (items[*i].refdes.clone(), items[*i].unit))
+        .copied()
+        .filter(|i| !named.iter().any(|k| *k == key(*i)))
         .collect();
     if missing.is_empty() {
         return tree.clone();
     }
+    // A part supports something only if that something is in this tree: a cap whose parent
+    // the author ALSO left out has no slot to be seated beside.
+    let mut beside: BTreeMap<String, Vec<(String, u8)>> = BTreeMap::new();
+    let mut orphans: Vec<(String, u8)> = Vec::new();
+    for i in missing {
+        match items[i]
+            .supports
+            .clone()
+            .filter(|parent| named.iter().any(|(r, _)| r == parent))
+        {
+            Some(parent) => beside.entry(parent).or_default().push(key(i)),
+            None => orphans.push(key(i)),
+        }
+    }
+    let seatable: Vec<(String, u8)> = beside.values().flatten().cloned().collect();
+    let tree = beside
+        .into_iter()
+        .fold(tree.clone(), |tree, (parent, parts)| {
+            seat_beside(&tree, &parent, parts)
+        });
+    // A tree that is one bare leaf has no slot beside anything. Whatever the seating could
+    // not place still has to be DRAWN — a part left out of the tree is never placed at all,
+    // and a stack of symbols at the origin renders as one part and extracts as none.
+    let placed = tree.keys();
+    orphans.extend(seatable.into_iter().filter(|k| !placed.contains(k)));
+    if orphans.is_empty() {
+        return tree;
+    }
     report.uncomposed.insert(
         block.to_owned(),
-        missing.iter().map(|(refdes, _)| refdes.clone()).collect(),
+        orphans.iter().map(|(refdes, _)| refdes.clone()).collect(),
     );
     Tree::Container(Container {
         axis: Axis::Col,
-        children: vec![tree.clone(), Tree::row_of(missing)],
+        children: vec![tree, Tree::row_of(orphans)],
         gap: None,
         align: Align::Start,
         wrap: None,
+    })
+}
+
+/// Put `parts` in the slot right after the leaf drawing `parent`, wherever in the tree that
+/// leaf sits — the row of decoupling caps a human draws beside the device they serve.
+///
+/// They go in as ONE row, not as loose siblings. A bank spliced flat is measured child by
+/// child, and the wrap then folds the container between two of them: the caps come out in
+/// two bands with the far one stranded, which is the defect this is here to fix.
+fn seat_beside(tree: &Tree, parent: &str, parts: Vec<(String, u8)>) -> Tree {
+    let Tree::Container(c) = tree else {
+        return tree.clone();
+    };
+    let mut children: Vec<Tree> = c
+        .children
+        .iter()
+        .map(|child| seat_beside(child, parent, parts.clone()))
+        .collect();
+    if let Some(at) = children
+        .iter()
+        .position(|k| matches!(k, Tree::Leaf(l) if l.part == parent))
+    {
+        children.insert(at + 1, Tree::row_of(parts));
+    }
+    Tree::Container(Container {
+        children,
+        ..c.clone()
     })
 }
 
@@ -309,10 +369,10 @@ fn fills(sizes: &[(f64, f64)], page: [f64; 2], strict: bool) -> Option<Vec<Point
         limits(sizes, room[0])
             .into_iter()
             .map(|limit| corner_pack(sizes, &order, limit))
-            .filter(|(_, w, h)| {
-                !strict || (*w <= room[0] + geom::EPS && *h <= room[1] + geom::EPS)
+            .filter(|(_, w, h)| !strict || (*w <= room[0] + geom::EPS && *h <= room[1] + geom::EPS))
+            .min_by(|a, b| {
+                aspect_error(a.1, a.2, target).total_cmp(&aspect_error(b.1, b.2, target))
             })
-            .min_by(|a, b| aspect_error(a.1, a.2, target).total_cmp(&aspect_error(b.1, b.2, target)))
             .map(|(origins, ..)| origins)
     })
 }
@@ -394,13 +454,23 @@ mod tests {
         let a4 = [271.6, 151.6];
         let a3 = [394.6, 238.6];
         let blocks = [(180.0, 100.0), (180.0, 100.0), (150.0, 100.0)];
-        assert!(fills(&blocks, a4, true).is_none(), "nothing this size fits A4");
+        assert!(
+            fills(&blocks, a4, true).is_none(),
+            "nothing this size fits A4"
+        );
         let origins = pack(&blocks, &[a4, a3]);
         let shelves: BTreeSet<i64> = origins.iter().map(|o| (o.y * 100.0) as i64).collect();
-        assert_eq!(shelves.len(), 2, "three blocks on two shelves, not a column");
-        let far = origins.iter().zip(blocks).fold((0.0f64, 0.0f64), |m, (o, b)| {
-            (m.0.max(o.x + b.0 - MARGIN), m.1.max(o.y + b.1 - MARGIN))
-        });
+        assert_eq!(
+            shelves.len(),
+            2,
+            "three blocks on two shelves, not a column"
+        );
+        let far = origins
+            .iter()
+            .zip(blocks)
+            .fold((0.0f64, 0.0f64), |m, (o, b)| {
+                (m.0.max(o.x + b.0 - MARGIN), m.1.max(o.y + b.1 - MARGIN))
+            });
         assert!(far.0 <= a3[0] && far.1 <= a3[1], "{far:?} outside A3");
     }
 
@@ -414,4 +484,3 @@ mod tests {
         assert_eq!(geom::GRID_50_MIL.snap_point(shift), shift, "{shift:?}");
     }
 }
-

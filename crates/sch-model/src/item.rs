@@ -65,6 +65,12 @@ pub struct Item {
     /// neighbours, lifted off a real sheet), so seeding must leave `at`/`angle` alone.
     /// Every whole-sheet path builds items at the origin with this clear.
     pub preseeded: bool,
+    /// The refdes this part was SYNTHESIZED to support — the parent of a `decouple`
+    /// cap. Such a part exists only because the sugar expanded, so its author never saw
+    /// it and could not have given it a place in the layout tree; the typesetter seats it
+    /// beside the part it supports rather than in the leftovers row.
+    #[serde(default)]
+    pub supports: Option<String>,
 }
 
 /// Natural refdes sort key: alpha prefix + numeric suffix, so `J2` < `J10`.

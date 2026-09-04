@@ -1306,6 +1306,7 @@ fn seated_items(doc: &SchDoc, netlist: &Netlist) -> Vec<Item> {
                 unit,
                 mirror: symbol.mirror == sch_doc::Mirror::Y,
                 preseeded: true,
+                supports: None,
             })
         })
         .collect()

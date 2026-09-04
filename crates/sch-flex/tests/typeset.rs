@@ -47,6 +47,7 @@ fn item(refdes: &str, pins: Vec<PinGeom>, nets: &[(&str, &str)]) -> Item {
         unit: 1,
         mirror: false,
         preseeded: false,
+        supports: None,
     }
 }
 
@@ -213,4 +214,63 @@ fn a_leaf_for_a_part_this_call_is_not_placing_leaves_no_hole() {
         (only[1].at.x - only[0].at.x, only[0].at),
         "the absent leaves widened the row"
     );
+}
+
+/// A `decouple` cap is synthesized after the author composed the block, so the author
+/// could not have named it. It is drawn as one row beside the part it supports — not in
+/// the leftovers row at the bottom of the block — and its author is not told off for it.
+#[test]
+fn a_synthesized_decoupler_is_seated_beside_the_part_it_supports() {
+    let cap = |refdes: &str| Item {
+        supports: Some("U1".into()),
+        ..passive(refdes, "+3V3", "GND")
+    };
+    let mut items = vec![
+        passive("R1", "A", "GND"),
+        ic("U1", ["A", "+3V3", "GND"]),
+        passive("R2", "B", "GND"),
+        cap("C1"),
+        cap("C2"),
+        cap("C3"),
+    ];
+    let tree = stack(Axis::Row, vec![leaf("R1"), leaf("U1"), leaf("R2")]);
+    let report = sch_flex::typeset(&mut items, &trees(tree), &[]);
+    assert!(report.uncomposed.is_empty(), "{report:?}");
+    let at = |refdes: &str| items.iter().find(|i| i.refdes == refdes).unwrap().at;
+    let (u1, c1, c2, c3, r2) = (at("U1"), at("C1"), at("C2"), at("C3"), at("R2"));
+    assert_eq!((c1.y, c2.y), (c3.y, c3.y), "the caps are not on one line");
+    assert!(
+        u1.x < c1.x && c1.x < c2.x && c2.x < c3.x && c3.x < r2.x,
+        "the caps do not sit between U1 and the rest of the row"
+    );
+    assert!(
+        ((c2.x - c1.x) - (c3.x - c2.x)).abs() < 1e-6,
+        "the row is not evenly pitched"
+    );
+}
+
+/// A part the AUTHOR left out is still their own gap: it goes in the trailing row with the
+/// note that says so. Only a synthesized part is seated silently.
+#[test]
+fn a_part_the_author_forgot_is_still_reported() {
+    let mut items = vec![ic("U1", ["A", "+3V3", "GND"]), passive("C1", "+3V3", "GND")];
+    let report = sch_flex::typeset(&mut items, &trees(stack(Axis::Row, vec![leaf("U1")])), &[]);
+    assert_eq!(report.uncomposed["b"], ["C1"]);
+}
+
+/// A synthesized cap whose parent the author ALSO left out has no slot to be seated
+/// beside, and a tree that is one bare leaf has no slot at all. It still has to be DRAWN:
+/// a part missing from the tree is never placed, and a stack of symbols at the origin
+/// renders as one part and extracts as none.
+#[test]
+fn a_decoupler_with_nowhere_to_sit_is_still_drawn() {
+    let mut items = vec![
+        passive("R1", "A", "GND"),
+        Item {
+            supports: Some("U9".into()),
+            ..passive("C1", "+3V3", "GND")
+        },
+    ];
+    sch_flex::typeset(&mut items, &trees(leaf("R1")), &[]);
+    assert_ne!(items[0].at, items[1].at, "C1 was never placed");
 }

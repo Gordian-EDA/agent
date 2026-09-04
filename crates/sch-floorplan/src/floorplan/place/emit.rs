@@ -10,7 +10,7 @@ use std::io;
 use kicad::KicadInstallation;
 use kicad_symbol::SymbolTable;
 use kicad_symbol::geometry::SymbolGeometry;
-use sch_check::model::{Component, Design, PinTarget};
+use sch_check::model::{Component, Design, Origin, PinTarget};
 use sch_check::{PinType, SymbolMeta, find_pin};
 
 use crate::write::SchematicWriter;
@@ -495,6 +495,10 @@ pub(crate) fn gather(env: &KicadInstallation, design: &Design) -> io::Result<Vec
                     unit: u,
                     mirror: false,
                     preseeded: false,
+                    supports: match &comp.origin {
+                        Origin::Synthesized { parent, .. } => Some(parent.clone()),
+                        Origin::Authored => None,
+                    },
                 });
             }
         }
