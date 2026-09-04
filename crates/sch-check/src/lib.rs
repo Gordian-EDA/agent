@@ -15,6 +15,7 @@ pub mod model;
 pub mod nets;
 pub mod pins;
 pub mod place_parts;
+pub mod reference;
 
 pub use diag::{Diagnostic, Diagnostics, Severity, Span};
 pub use kicad_symbol::{PinDir, PinMeta, PinType, SymbolMeta, SymbolTable, find_pin};
@@ -23,3 +24,4 @@ pub use place_parts::{
     BlockDoc, DanglingPin, DuplicateRef, ExistingSheet, Intent, NcOverride, PayloadAudit,
     PlacePartsInput, into_design, place_parts_input_schema,
 };
+pub use reference::{Fidelity, MisNettedPin, ReferenceNetlist};

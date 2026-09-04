@@ -95,6 +95,13 @@ pub(crate) fn place_parts(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     } else {
         Edit::create(ctx, sch_floorplan::live::blank_sheet()?)
     };
+    if payload.strict {
+        let mut scope = ctx.request_scope();
+        scope.no_additions = true;
+        ctx.workspace()
+            .set_request_scope(&scope)
+            .context("recording the request's part-list constraint")?;
+    }
     if let Some(error) = coalesce_payload_parts(&mut payload) {
         return Ok(with_warnings(error, &warnings));
     }

@@ -202,6 +202,11 @@ impl AgentRuntime {
         &self.project.workspace
     }
 
+    /// What the user's request permits the design to become.
+    pub fn request_scope(&self) -> crate::workspace::RequestScope {
+        self.project.workspace.request_scope()
+    }
+
     /// The project's refdes reservation store.
     pub fn reservations(&self) -> &crate::refdes::Reservations {
         &self.reservations

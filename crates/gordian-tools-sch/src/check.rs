@@ -1,5 +1,5 @@
 //! `check_schematic`: the symbol-aware lints, deterministic electrical rules,
-//! completeness audit, and KiCad ERC over the live file.
+//! completeness audit, netlist fidelity, and KiCad ERC over the live file.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -920,6 +920,11 @@ struct Inspection {
     /// Symbols placed and wired but not laid out — progress, not a defect.
     bench: Vec<String>,
     gaps: Vec<sch_check::completeness::Gap>,
+    /// The request fixes the part list, so no finding may suggest adding to it.
+    strict: bool,
+    /// How far the sheet is from the reference netlist, when the project carries
+    /// one; `Err` when it carries one that will not parse.
+    fidelity: Option<std::result::Result<sch_check::Fidelity, String>>,
     findings: Vec<Finding>,
     local_errors: usize,
     local_warnings: usize,
@@ -968,13 +973,101 @@ fn live_footprint_mismatches(
     Ok(mismatches)
 }
 
+/// The netlist the request pins the design to, `<project>/netlist.json`.
+///
+/// Absent means the request named no reference; present but unparseable is
+/// reported, never swallowed — it is the one input this whole check rests on.
+fn reference_netlist(
+    ctx: &AgentRuntime,
+) -> Option<std::result::Result<sch_check::ReferenceNetlist, String>> {
+    let path = ctx.project_dir().join("netlist.json");
+    let text = std::fs::read_to_string(&path).ok()?;
+    Some(sch_check::ReferenceNetlist::parse(&text).map_err(|error| error.to_string()))
+}
+
+/// One finding per way the sheet departs from the reference netlist.
+///
+/// Advisory: the sheet may still be mid-construction, and it is the model — not
+/// this check — that decides the circuit is finished.
+fn fidelity_findings(locator: &FindingLocator, fidelity: &sch_check::Fidelity) -> Vec<Finding> {
+    let mut findings = Vec::new();
+    let mut push = |message: String, refs: Vec<String>, why: String| {
+        let (refs, nets, at) = locator.locate(&message, refs, std::iter::empty::<String>());
+        findings.push(Finding {
+            severity: "warning".to_string(),
+            source: "netlist_fidelity",
+            code: "netlist_fidelity".to_string(),
+            message,
+            refs,
+            nets,
+            at,
+            fix: None,
+            why,
+            advisory: true,
+        });
+    };
+    if !fidelity.parts_missing.is_empty() {
+        push(
+            format!(
+                "the reference netlist names {} that the sheet does not have",
+                fidelity.parts_missing.join(", ")
+            ),
+            fidelity.parts_missing.clone(),
+            "Place them; the request fixed the part list.".to_string(),
+        );
+    }
+    if !fidelity.parts_extra.is_empty() {
+        push(
+            format!(
+                "{} are not in the reference netlist",
+                fidelity.parts_extra.join(", ")
+            ),
+            fidelity.parts_extra.clone(),
+            "Remove them; the request fixed the part list.".to_string(),
+        );
+    }
+    if fidelity.pins_mis_netted_total > 0 {
+        let named: Vec<String> = fidelity
+            .pins_mis_netted
+            .iter()
+            .map(|pin| {
+                let expected = pin.expected_net.as_deref().unwrap_or("no connection");
+                let actual = pin.actual_net.as_deref().unwrap_or("no connection");
+                format!("{} is on {actual}, not {expected}", pin.pin)
+            })
+            .collect();
+        let refs = fidelity
+            .pins_mis_netted
+            .iter()
+            .filter_map(|pin| pin.pin.split('.').next().map(str::to_owned))
+            .collect();
+        push(
+            format!(
+                "{} pin(s) are not on the net the reference netlist puts them on",
+                fidelity.pins_mis_netted_total
+            ),
+            refs,
+            named.join("; "),
+        );
+    }
+    findings
+}
+
 fn inspect_schematic(path: &Path, ctx: &AgentRuntime) -> Result<Inspection> {
     let doc = SchDoc::read(path).with_context(|| format!("reading {}", path.display()))?;
     let netlist = sch_doc::connect::extract(&doc);
     let bench = sch_floorplan::bench::benched(&doc);
     let design = design(&doc, &netlist);
     let locator = FindingLocator::new(&doc, &netlist);
-    let gaps = sch_check::completeness::audit(&design, ctx.provider());
+    let strict = ctx.request_scope().no_additions;
+    let gaps = if strict {
+        Vec::new()
+    } else {
+        sch_check::completeness::audit(&design, ctx.provider())
+    };
+    let fidelity = reference_netlist(ctx).map(|reference| {
+        reference.map(|reference| sch_check::reference::compare(&reference, &design))
+    });
     let mut findings = Vec::new();
 
     let lint = sch_check::lint::lint(&design, ctx.provider());
@@ -1128,13 +1221,19 @@ fn inspect_schematic(path: &Path, ctx: &AgentRuntime) -> Result<Inspection> {
         });
     }
 
+    if let Some(Ok(fidelity)) = &fidelity {
+        findings.extend(fidelity_findings(&locator, fidelity));
+    }
+
+    let advisory_source =
+        |finding: &&Finding| matches!(finding.source, "completeness" | "netlist_fidelity");
     let local_errors = findings
         .iter()
-        .filter(|finding| finding.source != "completeness" && finding.severity == "error")
+        .filter(|finding| !advisory_source(finding) && finding.severity == "error")
         .count();
     let local_warnings = findings
         .iter()
-        .filter(|finding| finding.source != "completeness" && finding.severity == "warning")
+        .filter(|finding| !advisory_source(finding) && finding.severity == "warning")
         .count();
     let erc = ctx
         .env()
@@ -1161,6 +1260,8 @@ fn inspect_schematic(path: &Path, ctx: &AgentRuntime) -> Result<Inspection> {
         netlist,
         bench,
         gaps,
+        strict,
+        fidelity,
         findings,
         local_errors,
         local_warnings,
@@ -1204,8 +1305,17 @@ pub fn check_schematic(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         "completeness": {
             "warnings": inspection.gaps.len(),
             "gaps": inspection.gaps,
+            "strict": inspection.strict,
         },
     });
+    match &inspection.fidelity {
+        Some(Ok(fidelity)) => report["netlist_fidelity"] = json!(fidelity),
+        Some(Err(error)) => {
+            report["netlist_fidelity"] =
+                json!({"error": format!("netlist.json is not a reference netlist: {error}")});
+        }
+        None => {}
+    }
 
     match &inspection.erc {
         Ok(erc) => {
@@ -1220,7 +1330,13 @@ pub fn check_schematic(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             });
             report["erc_clean"] = json!(erc_errors == 0);
             if errors == 0 {
-                report["message"] = if inspection.gaps.is_empty() {
+                let unfaithful =
+                    matches!(&inspection.fidelity, Some(Ok(fidelity)) if !fidelity.matches);
+                report["message"] = if unfaithful {
+                    json!(
+                        "schematic is electrically clean but does not reproduce the reference netlist; fix `netlist_fidelity`"
+                    )
+                } else if inspection.gaps.is_empty() {
                     json!(
                         "schematic is clean and complete by deterministic rules; placement is final"
                     )

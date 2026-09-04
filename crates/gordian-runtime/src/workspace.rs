@@ -6,6 +6,21 @@
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
+use serde::{Deserialize, Serialize};
+
+/// What the user's request permits the design to become.
+///
+/// Written once per turn from the request itself, so every tool call in the
+/// project reads the same intent instead of each one guessing.
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RequestScope {
+    /// The request fixes the part list — a netlist to reproduce, "do not add
+    /// parts". Advisory findings that would have the model add support
+    /// circuitry stay silent.
+    pub no_additions: bool,
+}
+
 #[derive(Debug)]
 pub struct Workspace {
     root: PathBuf,
@@ -39,6 +54,25 @@ impl Workspace {
             Err(err) => return Err(err),
         }
         Ok(Self { root })
+    }
+
+    /// What the user's request permits; the default (nothing forbidden) when
+    /// the file is absent or unreadable.
+    pub fn request_scope(&self) -> RequestScope {
+        std::fs::read_to_string(self.scope_path())
+            .ok()
+            .and_then(|text| serde_json::from_str(&text).ok())
+            .unwrap_or_default()
+    }
+
+    /// Record what the request permits, for every later tool call to read.
+    pub fn set_request_scope(&self, scope: &RequestScope) -> io::Result<()> {
+        let json = serde_json::to_vec_pretty(scope).map_err(io::Error::other)?;
+        atomic_write(&self.scope_path(), &json)
+    }
+
+    fn scope_path(&self) -> PathBuf {
+        self.root.join("request.json")
     }
 
     /// Atomically persist a PNG under the next free `renders/render-NNN.png`.
@@ -131,6 +165,22 @@ mod tests {
             std::fs::read_to_string(dir.path().join(".gordian/.gitignore")).unwrap(),
             "*\n"
         );
+    }
+
+    #[test]
+    fn request_scope_round_trips_and_defaults_to_permissive() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = Workspace::for_project(dir.path()).unwrap();
+        assert_eq!(workspace.request_scope(), RequestScope::default());
+        assert!(!workspace.request_scope().no_additions);
+        workspace
+            .set_request_scope(&RequestScope { no_additions: true })
+            .unwrap();
+        assert!(workspace.request_scope().no_additions);
+        workspace
+            .set_request_scope(&RequestScope::default())
+            .unwrap();
+        assert!(!workspace.request_scope().no_additions);
     }
 
     #[test]

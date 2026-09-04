@@ -662,8 +662,7 @@ impl<P: Provider> Agent<P> {
             })));
         }
         let ctx = Arc::clone(&self.runtime);
-        let render =
-            tokio::task::spawn_blocking(move || gordian_tools_sch::review::prepare(&ctx));
+        let render = tokio::task::spawn_blocking(move || gordian_tools_sch::review::prepare(&ctx));
         let subject = match tokio::time::timeout(RENDER_TIMEOUT, render).await {
             Err(_) => {
                 return into_outcome(Err(anyhow::anyhow!(tool_timeout_message(
@@ -844,6 +843,18 @@ impl<P: Provider> Agent<P> {
         Ok(outcome)
     }
 
+    /// Persist what the request permits, so every tool call in the project reads
+    /// the same intent. A failed write leaves the previous turn's scope standing
+    /// rather than failing the turn, which is why it is warned about.
+    fn record_request_scope(&self, request: &str) {
+        let scope = gordian_runtime::workspace::RequestScope {
+            no_additions: request_forbids_additions(request),
+        };
+        if let Err(error) = self.ctx().workspace().set_request_scope(&scope) {
+            tracing::warn!(%error, "recording the request scope");
+        }
+    }
+
     /// Start a fresh turn: its request count spans every subturn.
     fn start_turn(&mut self, events: Events<'_>) {
         emit(
@@ -869,6 +880,7 @@ impl<P: Provider> Agent<P> {
         self.history.push(ChatMessage::user(instruction));
 
         let discovery_rounds = discovery_rounds_for_intent(authoritative_intent);
+        self.record_request_scope(authoritative_intent);
         let pcb_work_requested = request_requires_pcb_work(authoritative_intent);
         let fabrication_required = request_requires_fabrication(authoritative_intent);
         let mut applied = false;
@@ -1149,7 +1161,9 @@ impl<P: Provider> Agent<P> {
                 let parsed = parse_or_null(&content);
                 // Only a read that actually answered is spent: a failed one left
                 // the state unchanged and told the model to try again.
-                if dispatched && is_state_scoped_read(&call.fn_name) && parsed.get("error").is_none()
+                if dispatched
+                    && is_state_scoped_read(&call.fn_name)
+                    && parsed.get("error").is_none()
                 {
                     state_read_uses.insert(call.fn_name.clone(), tool_state_generation);
                 }
@@ -1550,6 +1564,31 @@ fn check_board_is_clean(value: &Value) -> bool {
             .pointer("/silk/warnings")
             .and_then(Value::as_u64)
             .is_some_and(|count| count == 0)
+}
+
+/// Does the request fix the part list?
+///
+/// A netlist to reproduce, or an explicit "do not add parts", turns every
+/// advisory "you are missing a decoupler" into a wrong answer, so the tools have
+/// to be told before the model hears one.
+fn request_forbids_additions(user_msg: &str) -> bool {
+    let request = user_msg.to_ascii_lowercase();
+    [
+        "do not add",
+        "don't add",
+        "without adding",
+        "add no ",
+        "nothing extra",
+        "no extra parts",
+        "no additional parts",
+        "exactly these parts",
+        "exactly the parts",
+        "only the parts",
+        "from the netlist",
+        "netlist.json",
+    ]
+    .iter()
+    .any(|phrase| request.contains(phrase))
 }
 
 fn request_requires_pcb_work(user_msg: &str) -> bool {
@@ -2623,6 +2662,30 @@ mod tests {
     use super::*;
     use crate::prompts::system_prompt;
     use crate::testing::ScriptedClient;
+
+    /// The dataset prompts hand over a netlist and forbid additions; an ordinary
+    /// design request must stay permissive.
+    #[test]
+    fn a_fixed_part_list_is_recognised_in_the_request() {
+        for request in [
+            "Draw this circuit as a schematic from the netlist in netlist.json: every part \
+             with its lib id and value. Do not add or remove parts.",
+            "Reproduce exactly these parts, nothing else.",
+            "Swap U1 for an ECC82 and add no new parts.",
+            "Change the divider ratio. Do not add unrelated parts.",
+        ] {
+            assert!(request_forbids_additions(request), "missed `{request}`");
+        }
+        for request in [
+            "Design a 5V buck converter from 12V with a USB-C input.",
+            "Finish the board: place the remaining parts and route it.",
+        ] {
+            assert!(
+                !request_forbids_additions(request),
+                "false alarm on `{request}`"
+            );
+        }
+    }
 
     /// The user-set cap is the only stop the loop imposes, and it has to say so.
     #[tokio::test]
