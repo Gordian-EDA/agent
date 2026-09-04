@@ -173,12 +173,7 @@ pub fn tool_defs() -> Vec<Tool> {
             "An independent visual critic scores the rendered sheet 0-10 against a human-drawn reference sheet rated 9 (as good as it = 9, clearly better = 10) and returns the defects that cost it, each with `at_mm` sheet coordinates, the `refs` involved and a concrete `fix`. Call it once `check_schematic` is clean; below 9, re-lay-out the blocks the defects name and review again.",
             json!({
                 "type": "object",
-                "properties": {
-                    "anchor": {
-                        "type": "string",
-                        "description": "Path to a different reference PNG to calibrate against."
-                    }
-                },
+                "properties": {},
                 "additionalProperties": false
             }),
         ),

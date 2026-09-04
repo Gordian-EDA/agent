@@ -62,7 +62,7 @@ impl Subject {
 
 /// Render the sheet and load the anchor. Blocking: KiCAD exports the SVG.
 /// `input` accepts `{anchor}` — a path to a different reference PNG.
-pub fn prepare(input: &Value, ctx: &AgentRuntime) -> Result<Result<Subject, Value>> {
+pub fn prepare(ctx: &AgentRuntime) -> Result<Result<Subject, Value>> {
     if !ctx.sch_path().is_file() {
         return Ok(Err(json!({
             "error": format!(
@@ -71,18 +71,7 @@ pub fn prepare(input: &Value, ctx: &AgentRuntime) -> Result<Result<Subject, Valu
             ),
         })));
     }
-    let anchor = match input.get("anchor").and_then(Value::as_str) {
-        Some(path) => match std::fs::read(path) {
-            Ok(bytes) => bytes,
-            Err(e) => {
-                return Ok(Err(json!({
-                    "error": format!("anchor {path} is unreadable: {e}"),
-                })));
-            }
-        },
-        None => DEFAULT_ANCHOR.to_vec(),
-    };
-    Ok(Ok(Subject::new(sheet_pngs(ctx)?, anchor)))
+    Ok(Ok(Subject::new(sheet_pngs(ctx)?, DEFAULT_ANCHOR.to_vec())))
 }
 
 fn png(bytes: Vec<u8>) -> Binary {

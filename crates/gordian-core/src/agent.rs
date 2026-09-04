@@ -656,16 +656,15 @@ impl<P: Provider> Agent<P> {
     /// cannot do this — the critic is the model itself. Both halves are deadlined
     /// like any other tool; neither writes the design, so an expired render needs
     /// no settling, unlike a mutation.
-    async fn review_schematic(&self, input: &Value) -> ToolOutcome {
+    async fn review_schematic(&self) -> ToolOutcome {
         if !self.client.vision() {
             return into_outcome(Ok(json!({
                 "error": "this model has no vision input; review_schematic needs to see the render",
             })));
         }
         let ctx = Arc::clone(&self.runtime);
-        let input = input.clone();
         let render =
-            tokio::task::spawn_blocking(move || gordian_tools_sch::review::prepare(&input, &ctx));
+            tokio::task::spawn_blocking(move || gordian_tools_sch::review::prepare(&ctx));
         let subject = match tokio::time::timeout(RENDER_TIMEOUT, render).await {
             Err(_) => {
                 return into_outcome(Err(anyhow::anyhow!(tool_timeout_message(
@@ -1297,7 +1296,7 @@ impl<P: Provider> Agent<P> {
 
     async fn run_tool_call(&self, call: &ToolCall) -> (String, Vec<Binary>, Option<String>, bool) {
         let outcome = if call.fn_name == "review_schematic" {
-            self.review_schematic(&call.fn_arguments).await
+            self.review_schematic().await
         } else {
             run_kicad_tool(&self.runtime, &self.settling, call).await
         };
