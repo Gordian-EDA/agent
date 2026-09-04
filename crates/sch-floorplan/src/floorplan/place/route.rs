@@ -241,7 +241,12 @@ impl LabelPolicy {
     }
 
     /// Whether a routed path is worth drawing rather than naming.
-    fn keeps(&self, path: &[::geom::Point2], crossings: usize, label_clear: bool) -> bool {
+    ///
+    /// Naming is only the better answer when the name MEANS something. `Net-(D1-A)` is
+    /// what KiCAD calls a net nobody named, and the sheet it came from draws it as a
+    /// plain wire — so for those the wire wins on any shape it can be drawn in, and the
+    /// budget only decides between two ways of drawing it.
+    fn keeps(&self, net: &str, path: &[::geom::Point2], crossings: usize, label_clear: bool) -> bool {
         let shape = geom::RouteShape::of(path, crossings);
         let direct = match (path.first(), path.last()) {
             (Some(a), Some(b)) => a.manhattan(*b),
@@ -251,12 +256,18 @@ impl LabelPolicy {
         if drawn > self.long_simple_len_mm {
             return false;
         }
-        if direct <= self.cross_len_mm {
+        if direct <= self.cross_len_mm || is_unnamed(net) {
             return true;
         }
         self.budget(direct, label_clear)
             .is_some_and(|budget| shape.cost() <= budget)
     }
+}
+
+/// A net KiCAD named for us, after the one pin that happens to sort first. It tells a
+/// reader nothing, and it is long enough that drawing it collides with its neighbours.
+fn is_unnamed(net: &str) -> bool {
+    net.starts_with("Net-(") || net.starts_with("unconnected-(")
 }
 
 /// Route one signal/port net's terminals as a tree (MST) with the direction-
@@ -430,7 +441,7 @@ pub(crate) fn route_signal(
         }
         if let Some(p) = router.route_edge(a, da, b, net, scene) {
             let crossings = sch_model::route::path_crossings(&p, net, scene);
-            if !label_policy.keeps(&p, crossings, term_label_clear[i] && term_label_clear[j]) {
+            if !label_policy.keeps(net, &p, crossings, term_label_clear[i] && term_label_clear[j]) {
                 continue;
             }
             for seg in p.windows(2) {
