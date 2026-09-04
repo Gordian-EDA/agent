@@ -22,8 +22,10 @@ pub struct BlockFrame<'a> {
 
 /// Air between the block's outermost ink and its frame.
 const FRAME_PAD: f64 = 3.81;
-/// Air between a frame and the caption seated against it.
-const GAP: f64 = 1.27;
+/// Air between a frame and the caption seated against it. A caption whose
+/// ascenders graze the dashed border reads as a mistake, so this is a clear
+/// line's worth rather than a hairline.
+const GAP: f64 = 1.905;
 const TITLE_SIZE: f64 = 1.778;
 const NOTE_SIZE: f64 = 1.27;
 /// A note wraps to its frame's width, held between these so a narrow block does
@@ -223,46 +225,48 @@ fn boxed(text: &str, size: f64) -> Rect {
     })
 }
 
-/// Min corners for a title, best first: the frame's four outside corners, the
-/// top-left one — where a human writes it — first.
+/// Min corners for a title, best first. A title belongs over its frame's top-left
+/// corner, so that corner is tried at increasing heights before the other three
+/// are considered: a sheet whose titles all sit in the same corner reads as one
+/// drawing, and moving a title is a bigger change than lifting it.
 fn title_corners(frame: Rect, shape: &Rect) -> Vec<Point2> {
     let (w, h) = (shape.width(), shape.height());
-    let (above, below) = (frame.min_y - GAP - h, frame.max_y + GAP);
     let (left, right) = (frame.min_x, frame.max_x - w);
-    [
-        (left, above),
-        (right, above),
-        (left, below),
-        (right, below),
-    ]
-    .into_iter()
-    .map(|(x, y)| Point2::new(x, y))
-    .collect()
+    let mut out = Vec::new();
+    for x in [left, right] {
+        for push in 0..PUSH_STEPS {
+            out.push((x, frame.min_y - GAP - h - push as f64 * (h + GAP)));
+        }
+    }
+    out.extend([(left, frame.max_y + GAP), (right, frame.max_y + GAP)]);
+    out.into_iter().map(|(x, y)| Point2::new(x, y)).collect()
 }
 
-/// Min corners for a note, best first: under the frame, then over it clear of the
-/// title, then beside it — each pushed further out while it stays fouled.
+/// Min corners for a note, best first: under its frame, then beside it, and only
+/// then over it.
+///
+/// Over the frame means over the title too — the frame's top edge belongs to the
+/// title — which leaves a reader meeting the explanation before the heading, so
+/// those corners come last and are rarely reached. Under the frame is tried at
+/// only two depths before the sides, so a note never settles deep in the gap
+/// between two frames where it could belong to either.
 fn note_corners(frame: Rect, title: Rect, shape: &Rect) -> Vec<Point2> {
     let (w, h) = (shape.width(), shape.height());
-    let step = h + GAP;
     let mut out = Vec::new();
-    for push in 0..PUSH_STEPS {
-        let d = push as f64 * step;
-        let below = frame.max_y + GAP + d;
-        let above = frame.min_y.min(title.min_y) - GAP - h - d;
-        out.extend([
-            (frame.min_x, below),
-            (frame.max_x - w, below),
-            (frame.min_x, above),
-            (frame.max_x - w, above),
-        ]);
+    for push in 0..2 {
+        let below = frame.max_y + GAP + push as f64 * (h + GAP);
+        out.extend([(frame.min_x, below), (frame.max_x - w, below)]);
     }
-    for push in 0..PUSH_STEPS {
+    for push in 0..2 {
         let d = push as f64 * (w + GAP);
         out.extend([
             (frame.max_x + GAP + d, frame.min_y),
             (frame.min_x - GAP - w - d, frame.min_y),
         ]);
+    }
+    for push in 0..PUSH_STEPS {
+        let above = title.min_y - GAP - h - push as f64 * (h + GAP);
+        out.extend([(frame.min_x, above), (frame.max_x - w, above)]);
     }
     out.into_iter().map(|(x, y)| Point2::new(x, y)).collect()
 }

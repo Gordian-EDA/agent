@@ -31,9 +31,17 @@ fn main() {
                     && a.kind.is_pin_text()
                     && b.kind.is_pin_text();
                 if !same_pin && a.bbox.overlaps(&b.bbox) {
+                    let o = a.bbox.intersection(&b.bbox).expect("they overlap");
                     hits.push(format!(
-                        "  {:?} {:?} x {:?} {:?}",
-                        a.kind, a.text, b.kind, b.text
+                        "  {:?} {:?} x {:?} {:?} at ({:.2},{:.2}) by {:.2}x{:.2}",
+                        a.kind,
+                        a.text,
+                        b.kind,
+                        b.text,
+                        o.center().x,
+                        o.center().y,
+                        o.width(),
+                        o.height(),
                     ));
                 }
             }
