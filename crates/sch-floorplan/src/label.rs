@@ -13,7 +13,7 @@
 //! determinism scrutiny.
 
 use geom::Rect;
-use sch_model::text::{Movable, ObKind, Obstacle, Pick, TextSolver};
+use sch_model::text::{Movable, Obstacle, Pick, TextSolver};
 
 /// First-fit text placement in the caller's order.
 pub struct GreedyText;
@@ -24,7 +24,7 @@ impl TextSolver for GreedyText {
     }
 
     /// For each movable (in order), the first candidate that collides with no obstacle
-    /// (minus own-body exemptions) and no previously chosen box. Falls back to candidate
+    /// (minus same-owner exemptions) and no previously chosen box. Falls back to candidate
     /// 0 with `fits: false` when none is free — the caller decides the degradation
     /// (lint-flagged for fields/labels, hidden for optional text like repeated
     /// power-rail names).
@@ -38,9 +38,9 @@ impl TextSolver for GreedyText {
         let mut out = Vec::with_capacity(movables.len());
         for m in movables {
             let free = |b: &Rect| {
-                obstacles.iter().all(|o| match &o.kind {
-                    ObKind::OwnExempt(r) if Some(r) == m.owner.as_ref() => true,
-                    _ => b.intersection(&o.bbox).is_none(),
+                obstacles.iter().all(|o| {
+                    (o.owner.is_some() && o.owner == m.owner)
+                        || b.intersection(&o.bbox).is_none()
                 }) && placed.iter().all(|p| grow(b).intersection(p).is_none())
             };
             let pick = m.candidates.iter().position(free);
@@ -59,12 +59,10 @@ impl TextSolver for GreedyText {
 mod tests {
     use super::*;
     use geom::Rect;
+    use sch_model::text::Owner;
 
     fn hard(b: Rect) -> Obstacle {
-        Obstacle {
-            bbox: b,
-            kind: ObKind::Hard,
-        }
+        Obstacle { bbox: b, owner: None }
     }
 
     #[test]
@@ -107,7 +105,7 @@ mod tests {
         let obstacles = vec![
             Obstacle {
                 bbox: Rect::new(0.0, 0.0, 10.0, 10.0),
-                kind: ObKind::OwnExempt("R1".into()),
+                owner: Some(Owner::Symbol("R1".into())),
             },
             hard(Rect::new(0.0, 0.0, 4.0, 4.0)),
         ];
@@ -115,7 +113,7 @@ mod tests {
         // hard obstacle still rejects it. Candidate 1 overlaps the body only
         // -> exempt -> chosen.
         let m = Movable {
-            owner: Some("R1".into()),
+            owner: Some(Owner::Symbol("R1".into())),
             candidates: vec![Rect::new(1.0, 1.0, 3.0, 3.0), Rect::new(5.0, 5.0, 9.0, 9.0)],
         };
         assert_eq!(
@@ -127,7 +125,7 @@ mod tests {
         );
         // A different owner gets no exemption anywhere -> all collide -> fallback.
         let m2 = Movable {
-            owner: Some("R2".into()),
+            owner: Some(Owner::Symbol("R2".into())),
             candidates: vec![Rect::new(1.0, 1.0, 3.0, 3.0), Rect::new(5.0, 5.0, 9.0, 9.0)],
         };
         assert_eq!(

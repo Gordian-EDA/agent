@@ -12,7 +12,8 @@ use sch_model::geometry::{pin_endpoint, quantize_dir};
 use sch_model::route::{DrawnSegment, NetSegment};
 
 use super::{
-    Dir, Instance, Junction, NoConnect, PinLabel, SchematicWriter, SheetRect, SheetText, Stub, Wire,
+    Anchor, Dir, Instance, Junction, NoConnect, PinLabel, SchematicWriter, SheetRect, SheetText,
+    Wire,
 };
 
 /// A sheet point as an exact, comparable key (µm), so two endpoints that coincide
@@ -189,7 +190,7 @@ impl SchematicWriter {
                 // Direct/no-stub path: East -> angle 0, justify left bottom,
                 // byte-identical to pre-stub label output.
                 dir: Dir::East,
-                stub: None,
+                anchor: Anchor::Fixed,
                 global: false,
             });
         }
@@ -266,7 +267,7 @@ impl SchematicWriter {
                 at: end,
                 uuid_key: format!("{refdes}:{pin}:{net}:{idx}"),
                 dir,
-                stub: Some(Stub { pin_at: ep }),
+                anchor: Anchor::Stub(ep),
                 global,
             });
         }
@@ -374,7 +375,7 @@ impl SchematicWriter {
             at,
             uuid_key: format!("cluster:{net}:{}:{}", at.x, at.y),
             dir,
-            stub: None,
+            anchor: Anchor::Swivel(dir),
             global,
         });
     }
@@ -684,7 +685,7 @@ impl SchematicWriter {
             at,
             uuid_key: format!("{refdes}:1:{net}:0"),
             dir: Dir::East,
-            stub: None,
+            anchor: Anchor::Fixed,
             global: false,
         });
         Ok(())
@@ -830,8 +831,8 @@ impl SchematicWriter {
         }
         for l in &self.labels {
             scene.points.push((l.at, l.net.clone()));
-            if let Some(stub) = &l.stub {
-                scene.points.push((stub.pin_at, l.net.clone()));
+            if let Anchor::Stub(pin_at) = l.anchor {
+                scene.points.push((pin_at, l.net.clone()));
             }
         }
         for w in &self.wires {
@@ -914,8 +915,8 @@ impl SchematicWriter {
         let mut out = Vec::new();
         for l in &self.labels {
             out.push((l.at.into(), l.net.clone()));
-            if let Some(stub) = &l.stub {
-                out.push((stub.pin_at.into(), l.net.clone()));
+            if let Anchor::Stub(pin_at) = l.anchor {
+                out.push((pin_at.into(), l.net.clone()));
             }
         }
         out
@@ -1143,8 +1144,8 @@ impl SchematicWriter {
         }
         for l in &mut self.labels {
             sh(&mut l.at);
-            if let Some(s) = &mut l.stub {
-                sh(&mut s.pin_at);
+            if let Anchor::Stub(pin_at) = &mut l.anchor {
+                sh(pin_at);
             }
             if l.uuid_key.starts_with("cluster:") {
                 l.uuid_key = format!("cluster:{}:{}:{}", l.net, l.at.x, l.at.y);
@@ -1267,7 +1268,7 @@ mod tests {
         assert_eq!(w.labels.len(), 1);
         assert!(w.labels[0].global);
         assert!(
-            w.labels[0].stub.is_some(),
+            matches!(w.labels[0].anchor, Anchor::Stub(_)),
             "the global label must be wired to its pin"
         );
 

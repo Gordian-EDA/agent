@@ -21,4 +21,14 @@ impl Dir {
             Dir::South => Point2::new(0.0, 1.0),
         }
     }
+
+    /// The reverse direction.
+    pub fn opposite(self) -> Dir {
+        match self {
+            Dir::East => Dir::West,
+            Dir::West => Dir::East,
+            Dir::North => Dir::South,
+            Dir::South => Dir::North,
+        }
+    }
 }

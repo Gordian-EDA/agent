@@ -146,22 +146,28 @@ pub(super) struct PinLabel {
     /// direct `add_pin_label` path defaults to `Dir::East` (angle 0, justify
     /// left), keeping its output byte-identical to pre-stub emission.
     pub(super) dir: Dir,
-    /// Present for stub-mounted signal labels: the stub wire to emit and the
-    /// pin endpoint to retract onto if the stub end collides with a foreign net.
-    /// `None` for direct labels placed on the pin endpoint.
-    pub(super) stub: Option<Stub>,
+    /// The freedom the text solver has over this label.
+    pub(super) anchor: Anchor,
     /// Render as a KiCAD `global_label` (the off-sheet I/O pentagon) rather than
     /// a plain local label. Set for ports — board-edge / cross-sheet signals —
     /// so a single-pin port reads as intentional I/O and ERC does not flag it.
     pub(super) global: bool,
 }
 
-/// A retractable stub wire backing a signal label: the pin endpoint the stub
-/// starts at. The stub end is the owning [`PinLabel`]'s `at`. If retracted, the
-/// wire is dropped and the label is moved back to `pin_at`.
+/// How a [`PinLabel`] is held to the sheet — the one degree of freedom the text
+/// solver may spend on it without changing the netlist.
 #[derive(Clone, Copy)]
-pub(super) struct Stub {
-    pub(super) pin_at: Point2,
+pub(super) enum Anchor {
+    /// A pin-mounted signal label riding a retractable stub wire out of the pin
+    /// endpoint it carries. The stub end is the label's `at`; retracting drops
+    /// the wire and moves the label back onto the pin.
+    Stub(Point2),
+    /// A cluster/port label welded to its tap point: moving the anchor would
+    /// change what the label connects to, so only the reading direction is free.
+    /// Carries the direction it was emitted with, so re-solving is idempotent.
+    Swivel(Dir),
+    /// Nowhere to go: a direct label, or a stub label already retracted.
+    Fixed,
 }
 
 /// One `(wire …)` segment between two grid-snapped sheet points.
@@ -332,14 +338,14 @@ pub(super) fn field_box(at: impl Into<Point2>, j: Justify, text: &str) -> Rect {
     )
 }
 
-/// Box of a label as the sheet DRAWS it, anchored at `at` (which may be the
-/// label's own position or a candidate landing): a port renders as KiCAD's
+/// Box of a label as the sheet DRAWS it in the pose `at`/`dir` — the label's own
+/// pose, or a candidate the text solver is trying: a port renders as KiCAD's
 /// global-label pentagon, a signal label as plain text floating off its wire.
-pub(super) fn label_rect(label: &PinLabel, at: Point2) -> Rect {
+pub(super) fn label_rect(label: &PinLabel, at: Point2, dir: Dir) -> Rect {
     if label.global {
-        sch_model::text::global_label_box(at, label.dir, &label.net)
+        sch_model::text::global_label_box(at, dir, &label.net)
     } else {
-        sch_model::text::label_box(at, label.dir, &label.net)
+        sch_model::text::label_box(at, dir, &label.net)
     }
 }
 

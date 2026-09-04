@@ -9,15 +9,29 @@
 
 use std::collections::BTreeMap;
 
-use geom::{EPS, GRID_50_MIL, Point2, Rect, Segment};
+use geom::{Dir, EPS, GRID_50_MIL, Point2, Rect, Segment};
 
-use super::{Justify, SchematicWriter, TextPos, Wire, field_anchors, field_box, label_rect};
+use super::{
+    Anchor, Justify, SchematicWriter, TextPos, Wire, field_anchors, field_box, label_rect,
+};
 
 /// What [`SchematicWriter::solve_text_positions`] mutates once the greedy solver
 /// has picked a candidate for the parallel [`sch_model::text::Movable`].
+/// The reading directions a swivel label may take, best first: its emitted home
+/// direction, then the reverse, then the two perpendiculars.
+fn swivel_poses(home: Dir) -> [Dir; 4] {
+    let (a, b) = match home {
+        Dir::East | Dir::West => (Dir::North, Dir::South),
+        Dir::North | Dir::South => (Dir::East, Dir::West),
+    };
+    [home, home.opposite(), a, b]
+}
+
 enum Apply {
     /// labels[i]: candidate 1 retracts onto the pin endpoint.
     StubLabel(usize),
+    /// labels[i]: per-candidate reading direction, the anchor held fixed.
+    SwivelLabel(usize, Vec<Dir>),
     /// instances[i]: per-candidate (Reference, Value) anchors.
     Fields(usize, Vec<(TextPos, TextPos)>),
     /// instances[i]: per-candidate Value anchor (power rail name).
@@ -97,9 +111,9 @@ impl SchematicWriter {
             add_point(nc.at, NC, &mut points);
         }
         for label in &self.labels {
-            match &label.stub {
-                None => add_point(label.at, &label.net, &mut points),
-                Some(stub) => add_point(stub.pin_at, &label.net, &mut points),
+            match label.anchor {
+                Anchor::Stub(pin_at) => add_point(pin_at, &label.net, &mut points),
+                _ => add_point(label.at, &label.net, &mut points),
             }
         }
         // Every wire carries the net it was drawn for, so its endpoints are that
@@ -118,14 +132,16 @@ impl SchematicWriter {
 
         // Deterministic processing order for stub labels.
         let mut order: Vec<usize> = (0..self.labels.len())
-            .filter(|&i| self.labels[i].stub.is_some())
+            .filter(|&i| matches!(self.labels[i].anchor, Anchor::Stub(_)))
             .collect();
         order.sort_by(|&a, &b| self.labels[a].uuid_key.cmp(&self.labels[b].uuid_key));
 
         for i in order {
             let net = self.labels[i].net.clone();
             let end = self.labels[i].at;
-            let pin_at = self.labels[i].stub.unwrap().pin_at;
+            let Anchor::Stub(pin_at) = self.labels[i].anchor else {
+                unreachable!()
+            };
 
             // Collision if either endpoint touches foreign geometry, or if the
             // stub segment passes through a foreign point. A pin on a foreign
@@ -161,7 +177,7 @@ impl SchematicWriter {
                 // body (an East reset would run a west-side pin's text back
                 // across the pin line, over the pin name).
                 self.labels[i].at = pin_at;
-                self.labels[i].stub = None;
+                self.labels[i].anchor = Anchor::Fixed;
             } else if let Some(covering) = covering {
                 for at in [pin_at, end] {
                     let is_endpoint = at.near_eq(covering.a, EPS) || at.near_eq(covering.b, EPS);
@@ -205,9 +221,10 @@ impl SchematicWriter {
 
         let obstacles = self.build_obstacles();
         let (mut movables, mut applies) = self.stub_label_movables();
-        let (field_movables, field_applies) = self.field_movables();
-        movables.extend(field_movables);
-        applies.extend(field_applies);
+        for (m, a) in [self.swivel_label_movables(), self.field_movables()] {
+            movables.extend(m);
+            applies.extend(a);
+        }
 
         let picks = GreedyText.solve(&obstacles, &movables);
         for (
@@ -221,7 +238,9 @@ impl SchematicWriter {
             match apply {
                 Apply::StubLabel(i) => {
                     if pick == 1 {
-                        let pin_at = self.labels[i].stub.unwrap().pin_at;
+                        let Anchor::Stub(pin_at) = self.labels[i].anchor else {
+                            unreachable!()
+                        };
                         let end = self.labels[i].at;
                         // Drop the now-unneeded stub wire retract_colliding_stubs
                         // materialized — but ONLY if its far end DANGLES. When the
@@ -241,9 +260,10 @@ impl SchematicWriter {
                             self.wires.retain(|w| w.uuid_key != key);
                         }
                         self.labels[i].at = pin_at;
-                        self.labels[i].stub = None;
+                        self.labels[i].anchor = Anchor::Fixed;
                     }
                 }
+                Apply::SwivelLabel(i, dirs) => self.labels[i].dir = dirs[pick],
                 Apply::Fields(i, cands) => {
                     let (r, v) = cands[pick];
                     self.instances[i].ref_pos = Some(r);
@@ -265,7 +285,7 @@ impl SchematicWriter {
     /// for their own refdes), pin name/number text, wires, no-connect markers,
     /// and fixed (stub-less) labels.
     fn build_obstacles(&self) -> Vec<sch_model::text::Obstacle> {
-        use sch_model::text::{ObKind, Obstacle, pin_text_boxes, wire_box};
+        use sch_model::text::{Obstacle, Owner, pin_text_boxes, wire_box};
         let mut obstacles: Vec<Obstacle> = Vec::new();
         for inst in &self.instances {
             let h = inst.half_extents.rotated_half_extents(inst.angle);
@@ -277,7 +297,7 @@ impl SchematicWriter {
                     inst.at[1] + h[1],
                 ]
                 .into(),
-                kind: ObKind::OwnExempt(inst.refdes.clone()),
+                owner: Some(Owner::Symbol(inst.refdes.clone())),
             });
             // Pin name/number text (skip power/flag graphics — single
             // unnamed pin, no meaningful pin text).
@@ -288,7 +308,7 @@ impl SchematicWriter {
                     for b in pin_text_boxes(pg, inst.at, inst.angle, inst.mirror) {
                         obstacles.push(Obstacle {
                             bbox: b,
-                            kind: ObKind::Hard,
+                            owner: None,
                         });
                     }
                 }
@@ -297,7 +317,7 @@ impl SchematicWriter {
         for w in &self.wires {
             obstacles.push(Obstacle {
                 bbox: wire_box(w.a, w.b),
-                kind: ObKind::Hard,
+                owner: Some(Owner::Net(w.net.clone())),
             });
         }
         for nc in &self.no_connects {
@@ -309,15 +329,15 @@ impl SchematicWriter {
                     nc.at[1] + 0.64,
                 ]
                 .into(),
-                kind: ObKind::Hard,
+                owner: None,
             });
         }
-        // Fixed (stub-less) labels are obstacles; stub labels become movables.
+        // Only fixed labels are obstacles; stub and swivel labels become movables.
         for l in &self.labels {
-            if l.stub.is_none() {
+            if matches!(l.anchor, Anchor::Fixed) {
                 obstacles.push(Obstacle {
-                    bbox: label_rect(l, l.at),
-                    kind: ObKind::Hard,
+                    bbox: label_rect(l, l.at, l.dir),
+                    owner: None,
                 });
             }
         }
@@ -333,19 +353,57 @@ impl SchematicWriter {
         let mut movables: Vec<Movable> = Vec::new();
         let mut applies: Vec<Apply> = Vec::new();
         let mut stub_idx: Vec<usize> = (0..self.labels.len())
-            .filter(|&i| self.labels[i].stub.is_some())
+            .filter(|&i| matches!(self.labels[i].anchor, Anchor::Stub(_)))
             .collect();
         stub_idx.sort_by(|&a, &b| self.labels[a].uuid_key.cmp(&self.labels[b].uuid_key));
         for &i in &stub_idx {
             let l = &self.labels[i];
+            let Anchor::Stub(pin_at) = l.anchor else {
+                unreachable!()
+            };
             let owner = l.uuid_key.split(':').next().unwrap_or("").to_string();
             movables.push(Movable {
-                owner: Some(owner),
-                candidates: vec![label_rect(l, l.at), label_rect(l, l.stub.unwrap().pin_at)],
+                owner: Some(sch_model::text::Owner::Symbol(owner)),
+                candidates: vec![label_rect(l, l.at, l.dir), label_rect(l, pin_at, l.dir)],
             });
             applies.push(Apply::StubLabel(i));
         }
         (movables, applies)
+    }
+
+    /// Cluster/port labels, in deterministic uuid_key order. The tap point is
+    /// part of the netlist and never moves; the reading direction is not, so the
+    /// candidates are the four poses about that anchor — the emitted one first,
+    /// then its reverse, then the two perpendiculars.
+    ///
+    /// Without this pass a port pentagon simply landed wherever its side said to
+    /// read, which is how one came to be drawn straight over a neighbouring
+    /// symbol's body. The label's OWN net's wires are exempt (the anchor sits on
+    /// them by construction); a foreign wire still blocks, since a pentagon lying
+    /// across one reads as a connection.
+    fn swivel_label_movables(&self) -> (Vec<sch_model::text::Movable>, Vec<Apply>) {
+        use sch_model::text::{Movable, Owner};
+        let mut idx: Vec<usize> = (0..self.labels.len())
+            .filter(|&i| matches!(self.labels[i].anchor, Anchor::Swivel(_)))
+            .collect();
+        idx.sort_by(|&a, &b| self.labels[a].uuid_key.cmp(&self.labels[b].uuid_key));
+        idx.into_iter()
+            .map(|i| {
+                let l = &self.labels[i];
+                let Anchor::Swivel(home) = l.anchor else {
+                    unreachable!()
+                };
+                let dirs = swivel_poses(home);
+                let movable = Movable {
+                    owner: Some(Owner::Net(l.net.clone())),
+                    candidates: dirs
+                        .iter()
+                        .map(|&dir| label_rect(l, l.at, dir))
+                        .collect(),
+                };
+                (movable, Apply::SwivelLabel(i, dirs.to_vec()))
+            })
+            .unzip()
     }
 
     /// Reference+Value field pairs and power-symbol rail names, in deterministic
@@ -353,7 +411,7 @@ impl SchematicWriter {
     /// instance dispatches to [`Self::power_value_movable`] (power symbols) or
     /// [`Self::field_pair_movable`] (everything else).
     fn field_movables(&self) -> (Vec<sch_model::text::Movable>, Vec<Apply>) {
-        let mut movables = Vec::new();
+        let mut movables: Vec<sch_model::text::Movable> = Vec::new();
         let mut applies = Vec::new();
         let mut order: Vec<usize> = (0..self.instances.len()).collect();
         order.sort_by(|&a, &b| self.instances[a].refdes.cmp(&self.instances[b].refdes));
@@ -407,7 +465,7 @@ impl SchematicWriter {
             vec![above, right, left]
         };
         let movable = Movable {
-            owner: Some(inst.refdes.clone()),
+            owner: Some(sch_model::text::Owner::Symbol(inst.refdes.clone())),
             candidates: cands.iter().map(|c| c.1).collect(),
         };
         Some((
@@ -553,7 +611,7 @@ impl SchematicWriter {
             ]
         };
         let movable = Movable {
-            owner: Some(inst.refdes.clone()),
+            owner: Some(sch_model::text::Owner::Symbol(inst.refdes.clone())),
             candidates: cands.iter().map(|c| c.2).collect(),
         };
         (
@@ -708,7 +766,7 @@ impl SchematicWriter {
             );
         }
         for l in &self.labels {
-            let b = label_rect(l, l.at);
+            let b = label_rect(l, l.at, l.dir);
             acc(b.min_x, b.min_y, b.max_x, b.max_y);
         }
         for j in &self.junctions {
@@ -840,7 +898,7 @@ impl SchematicWriter {
             if label.net == net {
                 continue;
             }
-            let lb = label_rect(label, label.at);
+            let lb = label_rect(label, label.at, label.dir);
             if lb.overlaps(&b) {
                 return false;
             }
@@ -942,7 +1000,7 @@ impl SchematicWriter {
             ));
         }
         for label in &self.labels {
-            let b = label_rect(label, label.at);
+            let b = label_rect(label, label.at, label.dir);
             let owner = label.uuid_key.split(':').next().unwrap_or("").to_string();
             items.push((
                 format!("label \"{}\" at {:?}", label.net, label.at),
@@ -1036,7 +1094,7 @@ impl SchematicWriter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::write::{Dir, Instance, PinLabel, Stub};
+    use crate::write::{Anchor, Dir, Instance, PinLabel};
     use geom::Point2;
     use kicad::KicadInstallation;
     use kicad_symbol::geometry::PinGeom;
@@ -1160,7 +1218,7 @@ mod tests {
             at: label_at,
             uuid_key: "U1:1:SIG:0".into(),
             dir: Dir::East,
-            stub: Some(Stub { pin_at }),
+            anchor: Anchor::Stub(pin_at),
             global: true,
         });
         w.add_wire_on_net([11.43, 10.16], pin_at, "SIG");
@@ -1182,7 +1240,7 @@ mod tests {
             assert!(segments.insert(if a <= b { (a, b) } else { (b, a) }));
         }
         assert_eq!(w.wires.len(), 3);
-        assert!(w.labels[0].stub.is_some());
+        assert!(matches!(w.labels[0].anchor, Anchor::Stub(_)));
         assert_eq!(w.labels[0].at, label_at);
         assert_eq!(
             w.wires
@@ -1235,7 +1293,7 @@ mod tests {
         assert!(added.labels.iter().any(|label| {
             label.net == "SIG"
                 && label.at.near_eq(Point2::new(127.0, 59.69), EPS)
-                && label.stub.is_none()
+                && matches!(label.anchor, Anchor::Fixed)
         }));
         assert!(
             added

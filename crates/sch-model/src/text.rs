@@ -604,24 +604,28 @@ pub fn wire_box(a: Point2, b: Point2) -> Rect {
     Rect::from_points(a, b).inflate(0.13)
 }
 
-/// Fixed geometry a movable must not collide with.
-pub enum ObKind {
-    /// A symbol body, exempted for text OWNED by that refdes (a label on its
-    /// own pin endpoint legitimately sits inside its symbol's generous bbox).
-    OwnExempt(String),
-    /// Never exempted: pin text, wires, fixed labels, no-connects.
-    Hard,
+/// What a piece of geometry belongs to. An obstacle and a movable that name the
+/// same owner belong together, so the movable is exempt from that obstacle.
+#[derive(Clone, PartialEq, Eq)]
+pub enum Owner {
+    /// A symbol, by refdes: its body, and the fields and pin labels that ride it
+    /// (a label on its own pin endpoint sits inside the body's generous bbox).
+    Symbol(String),
+    /// A net, by name: its wires, and the labels anchored on them.
+    Net(String),
 }
 
+/// Fixed geometry a movable must not collide with.
 pub struct Obstacle {
     pub bbox: Rect,
-    pub kind: ObKind,
+    /// `None` for geometry nothing is exempt from: pin text, no-connects, fixed labels.
+    pub owner: Option<Owner>,
 }
 
 /// One piece of movable text with its candidate boxes in preference order.
 pub struct Movable {
-    /// Owning refdes, matched against [`ObKind::OwnExempt`].
-    pub owner: Option<String>,
+    /// What this text belongs to; obstacles with the same owner do not block it.
+    pub owner: Option<Owner>,
     /// Candidate bboxes, best-first. Never empty.
     pub candidates: Vec<Rect>,
 }

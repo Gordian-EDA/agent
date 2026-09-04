@@ -74,15 +74,6 @@ impl SchematicWriter {
         self.render()
     }
 
-    /// The same document [`Self::finish`] renders, without the shipped-sheet
-    /// assertion — for reading a CANDIDATE back (its netlist) during a search,
-    /// where a duplicate segment is a fact to measure rather than a contract
-    /// to trip over.
-    pub(crate) fn candidate_document(mut self) -> String {
-        self.prepare();
-        self.render()
-    }
-
     fn render(self) -> String {
         let root_uuid = stable_uuid("sheet", ROOT_SHEET_KEY);
 
@@ -465,6 +456,7 @@ fn render_instance(inst: &Instance, root_uuid: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::write::Anchor;
     use kicad::KicadInstallation;
 
     /// `add_symbol` needs a real symbol library to resolve geometry, so these
@@ -643,7 +635,7 @@ mod tests {
             at: [0.0, 0.0].into(),
             uuid_key: "k".into(),
             dir,
-            stub: None,
+            anchor: Anchor::Fixed,
             global: false,
         };
         assert!(render_label(&mk(Dir::East)).contains("(at 0 0 0)"));
