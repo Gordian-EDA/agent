@@ -1,5 +1,5 @@
 //! `place::wire` — the orthogonal elbow router: per-net signal routing
-//! (`route_signal`/`route_local_tee`), port-exit geometry, and power-rail riser
+//! (`route_signal`/`route_trunk`), port-exit geometry, and power-rail riser
 //! planning + emission (`assign_rail_levels`, `plan_riser_offsets`, `emit_rail`).
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -307,7 +307,7 @@ pub(crate) fn route_signal(
             || (terms[0].0[0] - terms[pi].0[0]).abs() + (terms[0].0[1] - terms[pi].0[1]).abs()
                 <= 2.54 + EPS
     });
-    if local_tee_safe && route_local_tee(w, net, &terms, scene) {
+    if local_tee_safe && route_trunk(w, net, &terms, scene) {
         if let (Some(side), Some(pi)) = (port, port_idx) {
             w.add_cluster_label(net, terms[pi].0, side_dir(side), true);
         }
@@ -736,6 +736,12 @@ fn subtract_collinear_overlap(
 /// which needs a foreign wire or pin over this pin's own tip, so only on a block drawn
 /// beside existing content — the default landing comes back reported as not clear, and
 /// the bridge picks another pin.
+///
+/// The pin TIP is not a rung. KiCAD draws the pin's number along the pin, so a label
+/// sitting on the tip overprints it — the clearance predictor is blind to the label's own
+/// symbol and so calls that landing clear, while the readability lint, which is not,
+/// reports it. A walled-in pin keeps the nearest outward landing instead, and the writer's
+/// own stub retraction still pulls it in where it must.
 fn label_stub(
     w: &SchematicWriter,
     env: &KicadInstallation,
@@ -758,7 +764,6 @@ fn label_stub(
     };
     let truthful: Vec<f64> = LADDER
         .into_iter()
-        .chain([0.0])
         .filter(|&s| !anchor_merges(scene, landing(s), net))
         .collect();
     match truthful
@@ -783,98 +788,184 @@ pub(crate) fn safe_forced_single_port_stub(
     short && axis_aligned && sch_model::route::path_ok(&[pin, exit], net, scene)
 }
 
-/// Draw a clustered net as a single-trunk tee (one straight trunk + a short
-/// stub from each terminal), returning true if it applied. Used when the
-/// terminals are close together AND the whole tee is clear of the scene, so a
-/// trunk is safe — far cleaner than an MST of overlapping elbows. Spread or
-/// obstacle-crossing nets return false and fall through to the router.
+/// Draw a multi-terminal node as one straight TRUNK with a drop from every terminal —
+/// the way a person draws a node, rather than an MST of independent elbows whose
+/// overlapping collinear runs over-junction it. Returns whether it applied; a node too
+/// spread out, or one no legal trunk serves, falls through to the router.
 ///
-/// "Clear" is the FULL [`sch_model::route::path_ok`] test, not just a body check: a trunk
+/// The trunk lines worth trying are every terminal's own coordinate, the coordinates two
+/// to eight grid OUTWARD along a terminal's pin, and four or six grid either side of a
+/// terminal whose pin points ALONG the trunk — a bus running past a resistor. A terminal
+/// facing the trunk drops straight onto it; one facing along it leaves its pin two grid
+/// first and then turns. The cheapest whole tee wins: its length, plus a crossing's worth
+/// of grid for every foreign wire it passes and a little for each extra wire it needs.
+///
+/// Nothing is drawn until the WHOLE tee — every drop and the trunk that joins them —
+/// passes the full [`sch_model::route::path_ok`] test. Not just a body check: a trunk
 /// drawn down an IC's pin column passes over the neighbouring pins, and KiCAD welds a
 /// wire to every pin it crosses — the `mixed-signal-adc-frontend` `SDA`/`SCL` short,
 /// where SCL's trunk ran from pin 10 straight down through pin 9 to its pull-up. The tee
 /// is a shortcut PAST the obstacle-aware router, so it owes everything the router's own
 /// edges owe.
-pub(crate) fn route_local_tee(
+pub(crate) fn route_trunk(
     w: &mut SchematicWriter,
     net: &str,
     terms: &[([f64; 2], Option<Dir>)],
     scene: &mut sch_model::route::RouteScene,
 ) -> bool {
-    const LOCAL: f64 = 30.48;
-    let xs: Vec<f64> = terms.iter().map(|t| t.0[0]).collect();
-    let ys: Vec<f64> = terms.iter().map(|t| t.0[1]).collect();
-    let (min_x, max_x) = (
-        xs.iter().cloned().fold(f64::MAX, f64::min),
-        xs.iter().cloned().fold(f64::MIN, f64::max),
-    );
-    let (min_y, max_y) = (
-        ys.iter().cloned().fold(f64::MAX, f64::min),
-        ys.iter().cloned().fold(f64::MIN, f64::max),
-    );
-    if max_x - min_x > LOCAL || max_y - min_y > LOCAL {
+    let span = |axis: usize| {
+        let (lo, hi) = terms.iter().fold((f64::MAX, f64::MIN), |(lo, hi), (p, _)| {
+            (lo.min(p[axis]), hi.max(p[axis]))
+        });
+        hi - lo
+    };
+    if terms.len() < 2 || span(0) + span(1) > TRUNK_SPAN_MM {
         return false;
     }
-    // A body strictly inside the terminal bbox would be cut by the trunk.
-    let bbox = [min_x, min_y, max_x, max_y];
-    let hits_body = scene.solids.iter().any(|r| {
-        r[0] < bbox[2] - EPS && bbox[0] < r[2] - EPS && r[1] < bbox[3] - EPS && bbox[1] < r[3] - EPS
-    });
-    if hits_body {
+    let plan = |horizontal: bool| {
+        let scene: &sch_model::route::RouteScene = scene;
+        trunk_lines(terms, horizontal)
+            .into_iter()
+            .filter_map(move |line| plan_trunk(terms, horizontal, line, net, scene))
+    };
+    let best = plan(true).chain(plan(false)).min_by(|a, b| a.0.total_cmp(&b.0));
+    let Some((_, paths, feet, horizontal, line)) = best else {
         return false;
-    }
-    // Trunk along the longer axis, on the (lower-)median terminal line so the
-    // most terminals sit on it without a stub.
-    let median = |mut v: Vec<f64>| {
-        v.sort_by(f64::total_cmp);
-        v[(v.len() - 1) / 2]
     };
-    let horizontal = (max_x - min_x) >= (max_y - min_y);
-    // Every wire the tee would draw, so the whole shape can be cleared against the
-    // scene before any of it is committed.
-    let trunk_line = if horizontal {
-        geom::GRID_50_MIL.snap(median(ys))
-    } else {
-        geom::GRID_50_MIL.snap(median(xs))
-    };
-    let foot = |p: &[f64; 2]| {
-        if horizontal {
-            [p[0], trunk_line]
-        } else {
-            [trunk_line, p[1]]
+    for path in &paths {
+        for seg in path.windows(2) {
+            emit_routed_segment(w, scene, net, seg[0], seg[1]);
         }
-    };
-    let trunk = if horizontal {
-        [[min_x, trunk_line], [max_x, trunk_line]]
-    } else {
-        [[trunk_line, min_y], [trunk_line, max_y]]
-    };
-    let clear = |path: [[f64; 2]; 2]| {
-        sch_model::route::path_ok(&[path[0].into(), path[1].into()], net, scene)
-    };
-    if !clear(trunk) || terms.iter().any(|(p, _)| !clear([*p, foot(p)])) {
-        return false;
     }
-    // Every wire the tee draws goes through `emit_routed_segment`, so the scene learns
-    // the FEET as well as the trunk. A foot the scene never heard of is a wire a later
-    // foreign route may legally end on — a short nothing downstream can see.
-    let (trunk_a, trunk_b) = (trunk[0], trunk[1]);
-    emit_routed_segment(w, scene, net, trunk_a.into(), trunk_b.into());
-    for (p, _) in terms {
-        let f = foot(p);
-        if (p[0] - f[0]).abs() > EPS || (p[1] - f[1]).abs() > EPS {
-            emit_routed_segment(w, scene, net, (*p).into(), f.into());
-        }
-        let interior = if horizontal {
-            f[0] > min_x + EPS && f[0] < max_x - EPS
-        } else {
-            f[1] > min_y + EPS && f[1] < max_y - EPS
-        };
-        if interior {
-            w.add_junction_on_net(f, net);
+    let (lo, hi) = feet
+        .iter()
+        .fold((f64::MAX, f64::MIN), |(lo, hi), f| (lo.min(*f), hi.max(*f)));
+    for foot in feet {
+        if foot > lo + EPS && foot < hi - EPS {
+            let at = match horizontal {
+                true => [foot, line],
+                false => [line, foot],
+            };
+            w.add_junction_on_net(at, net);
         }
     }
     true
+}
+
+/// Candidate coordinates for a trunk on the given axis: every terminal's own line, the
+/// lines two to eight grid outward along a terminal that faces across the trunk, and four
+/// or six grid to either side of one that faces along it.
+fn trunk_lines(terms: &[([f64; 2], Option<Dir>)], horizontal: bool) -> Vec<f64> {
+    let axis = usize::from(horizontal);
+    let grid = geom::GRID_50_MIL;
+    let mut out = Vec::new();
+    for (p, dir) in terms {
+        out.push(grid.snap(p[axis]));
+        let along = dir.map(|d| match horizontal {
+            true => d.vec().y == 0.0,
+            false => d.vec().x == 0.0,
+        });
+        match (dir, along) {
+            (Some(d), Some(false)) => {
+                let step = match horizontal {
+                    true => d.vec().y,
+                    false => d.vec().x,
+                };
+                out.extend([2.0, 4.0, 6.0, 8.0].map(|k| grid.snap(p[axis] + step * k * 1.27)));
+            }
+            _ => out.extend(
+                [-6.0, -4.0, 4.0, 6.0].map(|k| grid.snap(p[axis] + k * 1.27)),
+            ),
+        }
+    }
+    out.sort_by(f64::total_cmp);
+    out.dedup_by(|a, b| (*a - *b).abs() < EPS);
+    out
+}
+
+/// The tee one candidate trunk line would draw: its cost, the paths, the feet along the
+/// trunk, and the line itself. `None` when a terminal cannot reach the line, or any wire
+/// the tee would draw is illegal.
+type Tee = (f64, Vec<Vec<::geom::Point2>>, Vec<f64>, bool, f64);
+fn plan_trunk(
+    terms: &[([f64; 2], Option<Dir>)],
+    horizontal: bool,
+    line: f64,
+    net: &str,
+    scene: &sch_model::route::RouteScene,
+) -> Option<Tee> {
+    /// Grid charged for a foreign wire the tee passes over, and for each extra wire drawn.
+    const CROSSING: f64 = 20.0 * 1.27;
+    const EXTRA_WIRE: f64 = 3.0 * 1.27;
+    /// A drop leaves its pin at least this far before it may turn.
+    const LEAD: f64 = 2.0 * 1.27;
+
+    let axis = usize::from(horizontal);
+    let other = 1 - axis;
+    let point = |along: f64, across: f64| match horizontal {
+        true => ::geom::Point2::new(along, across),
+        false => ::geom::Point2::new(across, along),
+    };
+    let mut paths: Vec<Vec<::geom::Point2>> = Vec::new();
+    let mut feet: Vec<f64> = Vec::new();
+    for (p, dir) in terms {
+        let at = point(p[other], p[axis]);
+        if (p[axis] - line).abs() <= EPS {
+            feet.push(p[other]);
+            continue;
+        }
+        let across = dir.map(|d| match horizontal {
+            true => d.vec().y,
+            false => d.vec().x,
+        });
+        match across {
+            // Facing across the trunk: straight out onto it, and only outward.
+            Some(step) if step != 0.0 => {
+                if (line - p[axis]) * step < LEAD - EPS {
+                    return None;
+                }
+                paths.push(vec![at, point(p[other], line)]);
+                feet.push(p[other]);
+            }
+            // Facing along it (or a virtual port with no pin): out along the pin first,
+            // then turn onto the trunk.
+            _ => {
+                let step = dir.map_or(1.0, |d| match horizontal {
+                    true => d.vec().x,
+                    false => d.vec().y,
+                });
+                let turn = p[other] + step * LEAD;
+                paths.push(vec![at, point(turn, p[axis]), point(turn, line)]);
+                feet.push(turn);
+            }
+        }
+    }
+    if feet.len() < 2 {
+        return None;
+    }
+    let (lo, hi) = feet
+        .iter()
+        .fold((f64::MAX, f64::MIN), |(lo, hi), f| (lo.min(*f), hi.max(*f)));
+    if hi - lo > EPS {
+        paths.push(vec![point(lo, line), point(hi, line)]);
+    }
+    if !paths
+        .iter()
+        .all(|path| sch_model::route::path_ok(path, net, scene))
+    {
+        return None;
+    }
+    let length: f64 = paths
+        .iter()
+        .flat_map(|path| path.windows(2).map(|s| s[0].manhattan(s[1])))
+        .sum();
+    let crossings: usize = paths
+        .iter()
+        .map(|path| sch_model::route::path_crossings(path, net, scene))
+        .sum();
+    let cost =
+        length + CROSSING * crossings as f64 + EXTRA_WIRE * paths.len() as f64;
+    Some((cost, paths, feet, horizontal, line))
 }
 
 /// A virtual port-exit point just past the net's pin extent on `side`.
@@ -1240,6 +1331,11 @@ pub(crate) const CROSS_LABEL_LEN_MM: f64 = 19.0;
 /// (straight, or one corner with no detour). 60 grid: humans draw the occasional long
 /// clean run between two blocks; what they never draw is a long snake.
 pub(crate) const LONG_SIMPLE_LEN_MM: f64 = 76.2;
+
+/// How spread a node may be (mm, the sum of its terminal bbox's two sides) and still be
+/// drawn as one trunk with drops. 44 grid: past that the node is not a node any more, and
+/// the obstacle-aware router should draw it edge by edge.
+const TRUNK_SPAN_MM: f64 = 55.88;
 
 /// Shape budget added when an endpoint could not seat a body-clear net label: exactly one
 /// crossing. Naming a walled-in pin does not remove the defect, it moves it onto a label
