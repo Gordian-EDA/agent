@@ -47,11 +47,14 @@ fn main() {
             eprintln!("{name}: {diags:#?}");
             continue;
         }
-        let ir = input
-            .intent
-            .clone()
-            .map(sch_check::Intent::into_layout_ir)
-            .unwrap_or_else(|| floorplan::baseline_ir(&design));
+        // Compose the IR exactly as the live path and the netlist gate do: inference
+        // supplies the rails, the ports and each block's TREE, and the caller's intent
+        // lays over it. Building it from the intent alone drops every authored tree, so
+        // every block came out as one bare row — a sheet the production path never draws.
+        let mut ir = floorplan::infer_ir(&env, &design);
+        if let Some(intent) = input.intent.clone() {
+            floorplan::apply_intent(&mut ir, intent.into_layout_ir());
+        }
         match floorplan::emit_strategy(&env, &design, Some(ir)) {
             Ok(result) => {
                 std::fs::write(out.join(format!("{name}.kicad_sch")), &result.sch).unwrap();
