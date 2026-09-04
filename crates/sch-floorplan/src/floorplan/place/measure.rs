@@ -223,7 +223,7 @@ impl CandidateEvaluator for RoutedEvaluator<'_> {
             + count_shorts(self.realizer.env, &w, items, self.realizer.inc, &wires)
             + count_foreign_taps(&wires);
         w.set_frame(true);
-        let opens = match sch_doc::SchDoc::parse(&w.finish()) {
+        let opens = match sch_doc::SchDoc::parse(&w.candidate_document()) {
             Ok(doc) => crate::live::verify(&doc, self.design).scattered.len(),
             Err(_) => return usize::MAX,
         };

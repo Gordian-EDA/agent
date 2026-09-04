@@ -50,7 +50,19 @@ impl SchematicWriter {
     pub fn finish(mut self) -> String {
         self.prepare();
         self.debug_assert_unique_wire_segments();
+        self.render()
+    }
 
+    /// The same document [`Self::finish`] renders, without the shipped-sheet
+    /// assertion — for reading a CANDIDATE back (its netlist) during a search,
+    /// where a duplicate segment is a fact to measure rather than a contract
+    /// to trip over.
+    pub(crate) fn candidate_document(mut self) -> String {
+        self.prepare();
+        self.render()
+    }
+
+    fn render(self) -> String {
         let root_uuid = stable_uuid("sheet", ROOT_SHEET_KEY);
 
         let mut out = String::new();
