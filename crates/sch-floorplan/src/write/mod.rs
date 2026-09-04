@@ -47,12 +47,14 @@ use geom::{Dir, Point2, Rect};
 use kicad_symbol::geometry::PinGeom;
 
 mod build;
+mod caption;
 mod emit;
 mod textsolve;
 
 // Re-export the public surface VERBATIM so external `crate::write::…` paths
 // resolve unchanged across the split.
 pub use build::{pin_end0, point_key};
+pub use caption::BlockFrame;
 pub use sch_model::geometry::quantize_dir;
 pub use emit::{escape_sexpr_string, fmt_coord};
 pub(crate) use emit::usable_pages;
@@ -320,6 +322,19 @@ impl Justify {
             Justify::Center => sch_model::text::HJust::Center,
         }
     }
+}
+
+/// Box of a block caption as `emit` draws it: a free `(text …)` note, left/bottom
+/// justified, possibly several lines tall.
+pub(super) fn sheet_text_box(t: &SheetText) -> Rect {
+    sch_model::text::note_box(
+        &t.text,
+        t.size,
+        sch_model::text::HJust::Left,
+        sch_model::text::VJust::Bottom,
+        0.0,
+        t.at,
+    )
 }
 
 /// Box of a rendered field text line, per the as-drawn model.

@@ -776,15 +776,7 @@ impl SchematicWriter {
             acc(nc.at[0], nc.at[1], nc.at[0], nc.at[1]);
         }
         for t in &self.texts {
-            // `emit::render_text` writes notes `(justify left bottom)`.
-            let b = sch_model::text::note_box(
-                &t.text,
-                t.size,
-                Justify::Left.hjust(),
-                sch_model::text::VJust::Bottom,
-                0.0,
-                t.at,
-            );
+            let b = super::sheet_text_box(t);
             acc(b.min_x, b.min_y, b.max_x, b.max_y);
         }
         for r in &self.rects {
@@ -1009,7 +1001,33 @@ impl SchematicWriter {
                 Kind::Text,
             ));
         }
+        // Block captions (title/note) are decoration the realiser fully controls, so a
+        // caption over the drawing is a bug it can always avoid — lint it like any
+        // other text. Each owns a unique key so no exemption ever applies to it.
+        for t in &self.texts {
+            items.push((
+                format!("caption {:?}", t.text.lines().next().unwrap_or("")),
+                super::sheet_text_box(t),
+                format!("\0caption:{}", t.uuid_key),
+                Kind::Text,
+            ));
+        }
         let mut warnings = Vec::new();
+        // A caption over a wire is never legitimate — unlike a pin's own text, no
+        // wire has any business under one — so it is linted where other text is not.
+        for t in &self.texts {
+            let b = super::sheet_text_box(t);
+            if self
+                .wires
+                .iter()
+                .any(|w| b.overlaps(&sch_model::text::wire_box(w.a, w.b)))
+            {
+                warnings.push(format!(
+                    "caption {:?} crosses a wire",
+                    t.text.lines().next().unwrap_or("")
+                ));
+            }
+        }
         // Wire through an IC body: a wire segment running strictly inside a chip's
         // package box (the pin-tip bbox shrunk past the pin stubs onto the body
         // rectangle — the same geometry `count_ic_body_crossings` measures). This reads
