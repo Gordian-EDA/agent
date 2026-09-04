@@ -16,7 +16,7 @@ Work in small, legal blocks. Partial states are fine. After EVERY block, call `r
 
 Discover symbols once with `search_symbols({queries})`; top hits include pins, alternates and a validated footprint. Search footprints BY SYMBOL with `search_footprints({symbol, query?})`; use only compatible hits. Never invent IDs or pins.
 
-Build in order: power entry; regulator; MCU core with every supply-pin decoupler, crystal, reset and boot straps; interfaces; connectors and indicators. Use `place_parts({parts, layout, name?, intent?, block?, blocks?})` for only the current block, then use `connect`, `label`, `no_connect`, and `arrange({refs|bbox|block, layout})` for focused corrections. Pin keys accept number, name or alternate case-insensitively (`PH0-OSC_IN` works); `"nc"` means no-connect. Rails and ports accept left, right, top or bottom. YOU compose the layout, the engine only measures: pass `layout: {<block>: <tree>}` for every block, naming only that block's parts. A node is `{part, unit?, rot?, mirror?}`, `{row: [...]}` or `{col: [...]}`, with `gap` (grid units, 1 = 1.27 mm). A row is ONE signal path: neighbours must share a net, so they get a straight wire; unrelated parts never sit side by side. Whatever hangs off a node (shunt cap, pull-up, bias resistor) goes in a `col` with its series part. An IC sits between a col of input-side and a col of output-side parts, its OWN decoupling caps in a row after it, never one shared row for the sheet; a repeated channel repeats its own. Symmetric halves are two mirrored cols in one row. 3-12 parts per block; gaps 4-6 in a chain, 6-8 around an IC. Omit `rot` unless the default is wrong. Always pass `name` (the sheet's title) and name each `block` descriptively; add `blocks: {<block>: {title?, note?}}` with a one-line `note` wherever a human would explain a decision the netlist cannot show.
+Compose 2-6 functional blocks (POWER, MCU, CLOCK, USB, DEBUG, CONTROL, CONNECTORS, LEDS...), each holding ALL the parts of one sub-circuit; a crystal with its caps is never a block alone. Blocks meet only through net labels, so neither over-split a small circuit nor let one block span the sheet. Use `place_parts({parts, layout, name?, intent?, block?, blocks?})` for only the current block, then `connect`, `label`, `no_connect` and `arrange({refs|bbox|block, layout})` for corrections. Pin keys accept number, name or alternate, any case; `"nc"` means no-connect. Rails and ports take left/right/top/bottom. YOU compose the layout, the engine only measures: pass `layout: {<block>: <tree>}` per block, naming only its parts. A node is `{part, unit?, rot?, mirror?}`, `{row: [...]}` or `{col: [...]}`, with `gap` (1.27 mm grid units). A row is ONE signal path: neighbours must share a net (a straight wire); unrelated parts never sit side by side. Whatever hangs off a node (shunt cap, pull-up) goes in a `col` with its series part. An IC sits between a col of input-side and a col of output-side parts, its OWN decoupling caps in a row after it. Symmetric halves: two mirrored cols in one row. 3-12 parts per block; gaps 4-6 in a chain, 6-8 around an IC. Omit `rot` unless wrong. Always pass `name` (sheet title); name each `block` descriptively and give it `blocks: {<block>: {title?, note?}}` with a one-line `note` where a human would explain a choice.
 
 `place_parts` never refuses a whole payload: unresolvable parts return as `unplaced` ({ref, reason, did_you_mean}) with their nets open, everything else is placed, and it appends, so resubmit only the parts it named. A block that cannot be drawn truthfully is BENCHED (`benched`: wired by name, no layout); `add_parts({parts})` benches directly; `arrange({refs|block, layout})` lays them out and empties the bench. Checks report `bench: n`; `sync_board`/`export_fab` refuse while it is non-empty.
 
@@ -32,7 +32,7 @@ Create wires only with `connect` or `rewire`; never provide wire coordinates. To
 
 `check_schematic` reports every finding. Fix ERC errors in what you touched; mention unrelated existing ones and leave them. Once it reports 0 ERC errors, review the sheet, then proceed to the board in the SAME turn. Address ERC warnings only after the board is routed and DRC-clean.
 
-On a clean sheet call `review_schematic()`: an independent critic scores the render against a human reference sheet (as good as it = 9) and names the defects that cost it, with coordinates and a fix each. Below 9, re-lay-out the blocks its defects name — `arrange({block, …})`, or place that block again differently — and review again; stop when all three `samples` reach 9, or when the score does not improve twice. State the final score.
+On a clean sheet call `review_schematic()`: an independent critic scores the render against a human reference sheet (as good as it = 9) and names the defects that cost it, with coordinates and a fix each. Below 9, fix the blocks its defects name (reorder along the flow, widen gaps where text touches, split a sprawling block) with `arrange({block, layout})` and review again; stop when all three `samples` reach 9, or when the score does not improve twice. State the final score.
 
 # PCB phased loop
 A board request continues after `check_schematic`; "schematic only" stops. ERC errors do not block `sync_board`: it reports `schematic_erc` while the PCB progresses. Geometry stays in `guard_findings`; only new shorts roll back. Choose the layer count explicitly before `sync_board`: 2, 4, 6 or 8 by density and cost. Sync preserves placement/copper and imports new schematic nets; `route_board` imports renamed nets itself. On an existing board, `sync_board({intent})` applies the schematic delta and places staged/new parts with that intent. Omit `bounds` for a managed auto outline. `rules.pours` takes a net string, `{net,layer?}` or arrays; defaults are B.Cu on 2 layers and an inner plane on 4+.
@@ -78,7 +78,7 @@ mod tests {
         assert!(prompt.contains("netlist_fidelity"));
         assert!(prompt.contains("number, name or alternate"));
         assert!(prompt.contains("footprints_unresolved"));
-        assert!(prompt.contains("Rails and ports accept left, right, top or bottom"));
+        assert!(prompt.contains("Rails and ports take left/right/top/bottom"));
         assert!(!prompt.contains("YAML"));
     }
 
@@ -108,7 +108,7 @@ mod tests {
         for phrase in [
             "On a clean sheet call `review_schematic()`",
             "human reference sheet (as good as it = 9)",
-            "re-lay-out the blocks its defects name",
+            "fix the blocks its defects name",
             "stop when all three `samples` reach 9",
             "State the final score.",
         ] {
@@ -138,15 +138,10 @@ mod tests {
     fn prompt_teaches_incremental_schematic_phases() {
         let prompt = system_prompt();
         for phase in [
-            "power entry",
-            "regulator",
-            "MCU core",
-            "decoupler",
-            "crystal",
-            "reset",
-            "boot straps",
-            "interfaces",
-            "connectors and indicators",
+            "2-6 functional blocks",
+            "ALL the parts of one sub-circuit",
+            "never a block alone",
+            "meet only through net labels",
         ] {
             assert!(prompt.contains(phase), "prompt missing `{phase}`");
         }
