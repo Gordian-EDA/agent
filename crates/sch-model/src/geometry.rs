@@ -8,6 +8,7 @@ use kicad_symbol::geometry::PinGeom;
 
 use crate::ir::LayoutIr;
 use crate::item::Item;
+use crate::text::text_width;
 
 /// Column channel width (mm) — clears a wide IC's pin text.
 pub const COL_GAP: f64 = 6.35;
@@ -84,13 +85,10 @@ pub fn item_rect(it: &Item, at: impl Into<::geom::Point2>) -> ::geom::Rect {
 /// search before making this the drawn width.
 pub fn field_pad(it: &Item, w: f64, h: f64) -> [f64; 4] {
     const BAND: f64 = 2.24;
-    /// Width reserved per character of field text, mm.
-    const RESERVE_PER_CHAR: f64 = 1.1;
     if it.geom.pins.len() < 3 && w <= h {
         return [0.0; 4];
     }
-    let chars = it.value.chars().count().max(it.refdes.chars().count());
-    let text = RESERVE_PER_CHAR * chars as f64;
+    let text = text_width(&it.value).max(text_width(&it.refdes));
     let spill = (text / 2.0 - w / 2.0).max(0.0);
     [spill, spill, BAND, BAND]
 }

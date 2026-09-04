@@ -797,10 +797,11 @@ impl SchematicWriter {
     }
 
     /// Would a net label anchored at `at` facing `dir` read CLEAR of every
-    /// symbol body, pin text, field, and existing label? EXACTLY the lint's
-    /// geometry (`label_box` vs the same item boxes `layout_warnings` builds),
-    /// so a placement this approves never trips the lint. `own_refdes` exempts
+    /// symbol body, pin text, field, and existing label? `own_refdes` exempts
     /// the label's own symbol (a stub label legitimately hugs its own pin).
+    ///
+    /// Boxed by the one as-drawn model, like the lint it must agree with: a
+    /// landing this approves never trips `layout_warnings`.
     pub fn label_landing_clear(
         &self,
         at: geom::Point2,

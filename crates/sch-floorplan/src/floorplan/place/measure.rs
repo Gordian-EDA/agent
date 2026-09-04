@@ -206,19 +206,28 @@ impl CandidateEvaluator for RoutedEvaluator<'_> {
         }
     }
 
+    /// Both halves of truthfulness, exactly as the emit gate reads them: the
+    /// SHORT half from the drawn geometry, and the OPEN half from the finished
+    /// document. Measuring only shorts let the search ship a candidate whose
+    /// net comes back in islands — the gate then refused a placement nothing
+    /// in the search could see.
     fn truthfulness_breaks(&self, items: &[Item]) -> usize {
-        match self
+        let Ok(mut w) = self
             .realizer
             .realize_writer(None, items, RouteRealization::ShippedSheet)
-        {
-            Ok(w) => {
-                let wires = w.wires_with_nets();
-                count_merges(&wires, &w.junction_positions())
-                    + count_shorts(self.realizer.env, &w, items, self.realizer.inc, &wires)
-                    + count_foreign_taps(&wires)
-            }
-            Err(_) => usize::MAX,
-        }
+        else {
+            return usize::MAX;
+        };
+        let wires = w.wires_with_nets();
+        let shorts = count_merges(&wires, &w.junction_positions())
+            + count_shorts(self.realizer.env, &w, items, self.realizer.inc, &wires)
+            + count_foreign_taps(&wires);
+        w.set_frame(true);
+        let opens = match sch_doc::SchDoc::parse(&w.finish()) {
+            Ok(doc) => crate::live::verify(&doc, self.design).scattered.len(),
+            Err(_) => return usize::MAX,
+        };
+        shorts + opens
     }
 
     fn warning_messages(&self, items: &[Item]) -> Vec<String> {
