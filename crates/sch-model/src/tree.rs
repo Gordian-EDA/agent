@@ -24,8 +24,9 @@ use serde::{Deserialize, Serialize, Serializer};
 /// the unit every length in a tree is quoted in (an 0603 resistor is 6 units long).
 pub const UNIT_MM: f64 = 1.27;
 
-/// Default gap between siblings, in grid units.
-pub const DEFAULT_GAP: f64 = 8.0;
+/// Default gap between sibling DRAWINGS, in grid units — the wire a human leaves between
+/// two parts of one group, not the aisle between groups (`sch_flex`'s `GROUP_GAP`).
+pub const DEFAULT_GAP: f64 = 4.0;
 
 /// How wide a row may grow (grid units) before it wraps into stacked rows, and how tall a
 /// column may grow before it wraps into side-by-side columns. A container longer than the

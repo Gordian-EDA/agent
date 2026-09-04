@@ -20,9 +20,16 @@ use crate::part::{Part, Pose};
 
 /// Gap floor (grid units) around a part with many pins: an IC needs a channel its pin
 /// text does not spill across.
-const IC_GAP: f64 = 10.0;
+const IC_GAP: f64 = 6.0;
+/// Gap floor (grid units) between siblings that are themselves stacks: the aisle between
+/// two GROUPS. Parts that belong together read as a group only when the white space
+/// around the group is wider than the white space inside it, so this stays wide while
+/// [`sch_model::tree::DEFAULT_GAP`] — the wire between two parts of one group — is tight.
+const GROUP_GAP: f64 = 10.0;
 /// A part with at least this many pins is an IC for spacing and alignment purposes.
 const IC_PINS: usize = 3;
+/// Weight of the band-raggedness term in [`ribbon_cost`].
+const RAGGED_BAND: f64 = 1.0;
 
 /// A measured node: a box, an alignment line, and how it is built.
 pub struct Node {
@@ -239,10 +246,20 @@ fn container_node(c: &Container, parts: &[Part], index: &dyn Fn(&str, u8) -> Opt
 }
 
 /// The spacing a container is laid out with, which is what a band has to be measured
-/// against: one holding an IC is opened up to [`IC_GAP`].
+/// against. Siblings that are drawings sit a wire apart; one of them an IC opens the row
+/// to [`IC_GAP`], and siblings that are themselves stacks are groups and keep the wider
+/// [`GROUP_GAP`] aisle between them.
 fn spacing(c: &Container, children: &[Node], parts: &[Part]) -> f64 {
     let big = children.iter().any(|k| ic_leaf(k, parts));
-    c.gap.unwrap_or(DEFAULT_GAP).max(if big { IC_GAP } else { 0.0 }) * UNIT_MM
+    let grouped = children.iter().any(|k| matches!(k.kind, Kind::Stack { .. }));
+    let floor = if big {
+        IC_GAP
+    } else if grouped {
+        GROUP_GAP
+    } else {
+        0.0
+    };
+    c.gap.unwrap_or(DEFAULT_GAP).max(floor) * UNIT_MM
 }
 
 /// Break a container that has outgrown its page into bands of the same children, in
@@ -270,12 +287,15 @@ fn wrap(c: &Container, children: &[Node], parts: &[Part]) -> Option<Container> {
     if span <= limit {
         return None;
     }
+    let cost = |b: &[usize]| ribbon_cost(b, children, c.axis, gap, limit);
     let bands = (2..=children.len())
-        .map(|count| split(&sizes, gap, span / count as f64))
-        .min_by(|a, b| {
-            let cost = |b: &[usize]| ribbon_cost(b, children, c.axis, gap, limit);
-            cost(a).total_cmp(&cost(b))
-        })?;
+        .flat_map(|count| {
+            [
+                split(&sizes, gap, span / count as f64),
+                even_bands(children.len(), count),
+            ]
+        })
+        .min_by(|a, b| cost(a).total_cmp(&cost(b)))?;
     (bands.len() > 1).then(|| Container {
         axis: flip(c.axis),
         children: bands
@@ -300,6 +320,15 @@ fn wrap(c: &Container, children: &[Node], parts: &[Part]) -> Option<Container> {
     })
 }
 
+/// `n` children dealt into `count` bands of as near the same size as they divide.
+fn even_bands(n: usize, count: usize) -> Vec<usize> {
+    let (each, extra) = (n / count, n % count);
+    (0..count)
+        .map(|i| each + usize::from(i < extra))
+        .filter(|len| *len > 0)
+        .collect()
+}
+
 /// Child counts of the bands `sizes` falls into when each is filled up to `target` — a
 /// child longer than `target` takes a band of its own rather than being dropped.
 fn split(sizes: &[f64], gap: f64, target: f64) -> Vec<usize> {
@@ -319,8 +348,13 @@ fn split(sizes: &[f64], gap: f64, target: f64) -> Vec<usize> {
 }
 
 /// How badly a banding reads: how far the finished grid is from a page's proportions,
-/// plus how far its longest band overruns the page it has to fit across. Logarithmic on
-/// both counts, so twice as wide and half as wide are the same defect.
+/// how far its longest band overruns the page it has to fit across, and how ragged the
+/// bands are against each other. Logarithmic on all three, so twice as wide and half as
+/// wide are the same defect.
+///
+/// The raggedness term is what makes eight identical channels fold 4 and 4 rather than
+/// 6 and 2: a short trailing row reads as an unfinished drawing, and on a repeated
+/// structure it throws away the symmetry the sheet is read by.
 fn ribbon_cost(bands: &[usize], children: &[Node], axis: Axis, gap: f64, limit: f64) -> f64 {
     let (mut long, mut thick, mut from) = (0.0f64, 0.0f64, 0usize);
     for (i, len) in bands.iter().enumerate() {
@@ -336,7 +370,13 @@ fn ribbon_cost(bands: &[usize], children: &[Node], axis: Axis, gap: f64, limit: 
         Axis::Row => (long, thick),
         Axis::Col => (thick, long),
     };
-    ((w / h.max(1.0)) / SHEET_ASPECT).ln().abs() + 2.0 * (long / limit.max(1.0)).max(1.0).ln()
+    let ragged = match (bands.iter().min(), bands.iter().max()) {
+        (Some(few), Some(many)) => (*many as f64 / *few as f64).ln(),
+        _ => 0.0,
+    };
+    ((w / h.max(1.0)) / SHEET_ASPECT).ln().abs()
+        + 2.0 * (long / limit.max(1.0)).max(1.0).ln()
+        + RAGGED_BAND * ragged
 }
 
 fn flip(axis: Axis) -> Axis {
