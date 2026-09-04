@@ -154,3 +154,26 @@ correctness work is done; what stands between here and a green table is the crit
 Movement on individual cases since this morning: three-phase 4 to 7, STM32 3 to 6, H-bridge
 4 to 7, DDR 6 to 8, IBM 7 to 8, RP2040 6 to 7. Blue Pill went 8 to 6 and the 555 8 to 7,
 which is within the two-point read noise and the reason each case is now run twice.
+
+
+## The ribbon, and what it cost
+
+Every one of the 28 agent sheets in the acceptance run came out three to six times wider
+than tall, against the 1.4 of the page. The cause was `beside_the_fixed`: a design arrives
+one block per `place_parts` call, and each block was grafted to the right of everything
+already drawn. Five calls make a row.
+
+The corpus never showed it, because its fixtures are single-block sheets drawn in one pass.
+That is the whole reason a day of layout work aimed at compactness could not move it.
+
+With beside and below scored on the proportions they leave behind, over six runs of three
+multi-block cases:
+
+| | before | after |
+| --- | --- | --- |
+| sheet aspect | 1.67, 5.66, 3.17, 1.21, 5.59, 3.93 | 1.39, 1.45, 1.70, 1.62, 1.44, 1.11 |
+| critic, lower of two | ECG 5, Blue Pill 4, STM32 5 | ECG 7, Blue Pill 5, STM32 5 |
+
+One ECG attempt scored **10** — judged better than the human sheet it was extracted from —
+with the netlist exact, ERC clean and every check green. An STM32 attempt scored 8, also
+fully green. The same ECG case scored 6 this morning with five wires and 124 labels.
