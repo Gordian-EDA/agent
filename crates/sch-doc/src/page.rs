@@ -39,11 +39,13 @@ fn text_width(s: &str, size: f64) -> f64 {
 /// scored a point WORSE than the snug custom page it replaced. Standard sizes are what
 /// humans draw on (a `User` page is 3% of the reference corpus); starting small is what
 /// keeps the ink on the paper.
-pub const STANDARD_PAGES: [(&str, [f64; 2]); 4] = [
+pub const STANDARD_PAGES: [(&str, [f64; 2]); 6] = [
     ("A5", [210.0, 148.0]),
     ("A4", [297.0, 210.0]),
     ("A3", [420.0, 297.0]),
     ("A2", [594.0, 420.0]),
+    ("A1", [841.0, 594.0]),
+    ("A0", [1189.0, 841.0]),
 ];
 
 /// The smallest standard page holding content of `size` mm (margins already included),
@@ -592,8 +594,10 @@ mod tests {
         );
     }
 
+    /// A big drawing lands on the big standard sheet a person would print it on,
+    /// not on a strip of paper cut to its own extent.
     #[test]
-    fn content_past_a2_keeps_a_fitted_user_page() {
+    fn content_past_a2_lands_on_the_next_standard_page() {
         let mut doc = SchDoc::parse(
             "(kicad_sch\n\
              \t(version 20250114)\n\
@@ -603,7 +607,23 @@ mod tests {
         )
         .expect("parse");
         let fit = doc.refit_page(&BTreeSet::new()).expect("content to fit");
+        assert!(fit.standard, "A0 holds it");
+        assert_eq!(fit.page, [1189.0, 841.0]);
+    }
+
+    /// Past the largest sheet KiCAD names, the page is cut to the drawing.
+    #[test]
+    fn content_past_a0_keeps_a_fitted_user_page() {
+        let mut doc = SchDoc::parse(
+            "(kicad_sch\n\
+             \t(version 20250114)\n\
+             \t(paper \"A4\")\n\
+             \t(wire (pts (xy 0 0) (xy 1400 900)) (uuid \"w1\"))\n\
+             )\n",
+        )
+        .expect("parse");
+        let fit = doc.refit_page(&BTreeSet::new()).expect("content to fit");
         assert!(!fit.standard, "content this large has no standard page");
-        assert!(fit.page[0] > 900.0 && fit.page[1] > 500.0);
+        assert!(fit.page[0] > 1400.0 && fit.page[1] > 900.0);
     }
 }

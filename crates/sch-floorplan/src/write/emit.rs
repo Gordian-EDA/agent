@@ -587,13 +587,13 @@ mod tests {
     fn oversize_content_falls_back_to_a_fitted_user_page() {
         let mut w = SchematicWriter::new();
         w.add_junction_on_net([25.4, 25.4], "N1");
-        w.add_junction_on_net([900.0, 500.0], "N1");
+        w.add_junction_on_net([1400.0, 900.0], "N1");
 
         let text = w.finish();
         let paper = text
             .lines()
             .find(|line| line.contains("(paper \"User\""))
-            .expect("content past A2 keeps a fitted User page");
+            .expect("content past A0 keeps a fitted User page");
         let nums: Vec<f64> = paper
             .split_whitespace()
             .filter_map(|token| token.trim_end_matches(')').parse::<f64>().ok())
@@ -604,7 +604,7 @@ mod tests {
             "paper dimensions should parse from {paper:?}"
         );
         assert!(
-            nums[0] > 900.0 && nums[1] > 500.0,
+            nums[0] > 1400.0 && nums[1] > 900.0,
             "the page must hold the content, got {paper:?}"
         );
     }
