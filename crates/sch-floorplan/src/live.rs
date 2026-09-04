@@ -127,6 +127,11 @@ pub struct PlaceReport {
     /// Dangling net → the existing net whose name it most resembles.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub did_you_mean: BTreeMap<String, String>,
+    /// Authored net names this call wrote onto an EARLIER block's drawing, so the net
+    /// it declares and the one already there are one net. Each replaces a name KiCAD
+    /// had derived for that partition; the partition itself is unchanged.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub promoted: Vec<String>,
     /// Empty when the edit stands; otherwise the document was restored.
     pub mismatch: Mismatch,
     pub committed: bool,
@@ -372,6 +377,10 @@ fn place_parts_inner(
         unplaced: audit.unplaced,
         dangling: audit.dangling,
         did_you_mean: audit.did_you_mean.into_iter().collect(),
+        promoted: match committed {
+            true => promoted,
+            false => Vec::new(),
+        },
         mismatch,
         committed,
     })

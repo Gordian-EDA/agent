@@ -266,10 +266,12 @@ pub(crate) fn place_parts(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         .commit(
             json!(report),
             // Naming a previously auto-named net renames it; that is the point of an
-            // `@ref.pin` target, so the guard is told rather than surprised.
+            // `@ref.pin` target and of a net an earlier block drew unnamed, so the
+            // guard is told rather than surprised.
             Allow::nothing()
                 .parts(refs)
                 .joining_nets(resolved_nets.allowed.iter().cloned())
+                .promoting_nets(report.promoted.clone())
                 .creating(),
         )
         .context("committing placed parts")?;

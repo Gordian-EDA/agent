@@ -23,6 +23,7 @@ pub(crate) struct Allow {
     joined_nets: BTreeSet<String>,
     endpoint_nets: BTreeSet<String>,
     unnamed_nets: BTreeSet<String>,
+    promoted_nets: BTreeSet<String>,
     refs: BTreeSet<String>,
     /// The call may bring nets into existence it could not name in advance —
     /// a new part's hidden power pin, or a wire that names its own net.
@@ -70,6 +71,21 @@ impl Allow {
         self
     }
 
+    /// Permit these authored names to claim the GENERATED names the sheet had been
+    /// calling the same pins.
+    ///
+    /// A `place_parts` payload that declares a net an earlier call drew unnamed is
+    /// asking for exactly that, and it is safe in one direction only: a derived name
+    /// yields to the author's. The reverse — an authored name replaced by a derived
+    /// one — and two authored names becoming one are the accidents the guard exists
+    /// to catch, so neither is permitted here.
+    pub fn promoting_nets<I: Into<String>>(mut self, names: impl IntoIterator<Item = I>) -> Allow {
+        let names: Vec<String> = names.into_iter().map(Into::into).collect();
+        self.nets.extend(names.iter().cloned());
+        self.promoted_nets.extend(names);
+        self
+    }
+
     pub fn part(mut self, refdes: impl Into<String>) -> Allow {
         self.refs.insert(refdes.into());
         self
@@ -111,12 +127,27 @@ impl Allow {
             if is_auto(from) && self.nets.contains(from) {
                 continue;
             }
+            // The same partition, under the name its author gave it: a promotion
+            // writes an authored name over the one KiCAD derived, and nothing else.
+            if is_auto(from) && self.promoted_nets.contains(to) {
+                continue;
+            }
             offenders.extend([from, to].into_iter().filter(|n| unnamed(n)).cloned());
         }
         // On a merge or a split the *authored* names are what matter; the
         // generated name the survivor ends up with is a consequence.
         let unauthored = |name: &String| unnamed(name) && !is_auto(name);
         for (sources, target) in &delta.merged {
+            // Pieces of ONE authored net, joined under the name that says they are
+            // one. Every piece must be nameless for this: a partition that already
+            // answered to an authored name is not this call's to absorb.
+            if self.promoted_nets.contains(target)
+                && sources
+                    .iter()
+                    .all(|name| is_auto(name) || self.promoted_nets.contains(name))
+            {
+                continue;
+            }
             let endpoint_join = sources
                 .iter()
                 .all(|name| self.endpoint_nets.contains(name) || self.joined_nets.contains(name));
@@ -506,6 +537,65 @@ mod tests {
                 .violation(&delta, &[moved("R5", "2", Some("VCC"))])
                 .is_none()
         );
+    }
+
+    /// A promotion writes the author's name over the one KiCAD derived. Same pins,
+    /// better name — the caller asked for it by declaring the net.
+    #[test]
+    fn a_promotion_may_rename_a_derived_net() {
+        let delta = NetDelta {
+            renamed: vec![("Net-(C99-Pad1)".into(), "VRAIL".into())],
+            ..NetDelta::default()
+        };
+        assert!(
+            Allow::nothing()
+                .promoting_nets(["VRAIL".to_string()])
+                .violation(&delta, &[])
+                .is_none()
+        );
+    }
+
+    /// Only in that direction. An authored name replaced by a derived one is a name
+    /// the sheet LOST, and no promotion asks for that.
+    #[test]
+    fn a_promotion_does_not_permit_the_reverse_rename() {
+        let delta = NetDelta {
+            renamed: vec![("VRAIL".into(), "Net-(C99-Pad1)".into())],
+            ..NetDelta::default()
+        };
+        let offenders = Allow::nothing()
+            .promoting_nets(["VRAIL".to_string()])
+            .violation(&delta, &[])
+            .expect("losing an authored name must be refused");
+        assert!(offenders.contains("Net-(C99-Pad1)"), "{offenders}");
+    }
+
+    /// Nor does it let a promoted name swallow another AUTHORED net. Pieces of one
+    /// nameless partition may join under the author's name; two named nets may not.
+    #[test]
+    fn a_promotion_does_not_absorb_an_authored_net() {
+        let pieces = NetDelta {
+            merged: vec![(
+                vec!["Net-(C99-Pad1)".into(), "Net-(R1-Pad2)".into()],
+                "VRAIL".into(),
+            )],
+            ..NetDelta::default()
+        };
+        assert!(
+            Allow::nothing()
+                .promoting_nets(["VRAIL".to_string()])
+                .violation(&pieces, &[])
+                .is_none()
+        );
+        let authored = NetDelta {
+            merged: vec![(vec!["Net-(C99-Pad1)".into(), "GND".into()], "VRAIL".into())],
+            ..NetDelta::default()
+        };
+        let offenders = Allow::nothing()
+            .promoting_nets(["VRAIL".to_string()])
+            .violation(&authored, &[])
+            .expect("swallowing GND must be refused");
+        assert!(offenders.contains("GND"), "{offenders}");
     }
 
     /// Merely touching two nets does not authorize joining them.
