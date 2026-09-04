@@ -531,3 +531,47 @@ fn get_net_answers_a_pin_address() {
         "{result:#}"
     );
 }
+
+/// Parts in one section are wired; sections meet by NAME. `connect` was the last tool
+/// still willing to run a wire from an MCU pin to a series resistor three sections
+/// away — a 290 mm line across the page. It now names the net at both ends instead,
+/// and the two ends land on one net, which is the part a label pair has to get right.
+#[test]
+fn connect_across_sections_names_the_net_and_still_joins_it() {
+    let Some(ctx) = sheet() else {
+        eprintln!("SKIP: KiCad 10 not configured");
+        return;
+    };
+    for (block, parts) in [
+        ("mcu", json!([{"ref": "R1", "part": "Device:R", "pins": {"1": "IN", "2": "X"}}])),
+        ("header", json!([{"ref": "R2", "part": "Device:R", "pins": {"1": "Y", "2": "GND"}}])),
+    ] {
+        let placed = call(&ctx, "place_parts", json!({"block": block, "parts": parts}));
+        assert!(placed.get("error").is_none(), "{placed:#}");
+    }
+    let result = call(&ctx, "connect", json!({"from": "R1.2", "to": "R2.1"}));
+    assert!(result.get("error").is_none(), "{result:#}");
+    let changed = result["changed"].to_string();
+    assert!(
+        changed.contains("different sections"),
+        "a cross-section connect should have been named, not wired: {changed}"
+    );
+
+    let doc = sch_doc::SchDoc::read(ctx.sch_path()).unwrap();
+    let longest = doc
+        .wires()
+        .flat_map(|w| w.points.windows(2).map(|s| s[0].manhattan(s[1])).collect::<Vec<_>>())
+        .fold(0.0_f64, f64::max);
+    assert!(
+        longest <= sch_floorplan::floorplan::place::LONG_SIMPLE_LEN_MM,
+        "a {longest:.1} mm wire was drawn across sections"
+    );
+    let joined = sch_doc::connect::extract(&doc)
+        .nets
+        .into_iter()
+        .find(|net| {
+            let pins = format!("{:?}", net.pins);
+            pins.contains("R1") && pins.contains("R2")
+        });
+    assert!(joined.is_some(), "the label pair did not put R1.2 and R2.1 on one net");
+}

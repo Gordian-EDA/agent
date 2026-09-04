@@ -157,7 +157,28 @@ fn connect_one(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         .flatten()
         .map(str::to_string)
         .collect();
-    let drawn = sch_drag::redraw_wire(&mut edit.doc, a, out_a, b, ROUTING_NET, &own)
+    // The rule every other drawing path already keeps, and the one a person keeps
+    // without thinking: parts in one section are wired, sections meet by NAME. This
+    // was the last tool still willing to run a wire from an MCU pin to a series
+    // resistor three sections away — a 290 mm line across the page that the reference
+    // sheet never draws. A hop too long for the router to read as local is named for
+    // the same reason, whatever section it is in.
+    let section = |target: &Target| {
+        target.owner().and_then(|refdes| {
+            edit.doc
+                .symbols()
+                .find(|s| s.refdes() == refdes)?
+                .fields
+                .get(sch_model::result::AP_BLOCK)
+                .map(|f| f.value.clone())
+        })
+    };
+    let across = matches!((section(&from), section(&to)), (Some(x), Some(y)) if x != y);
+    let by_name =
+        across || a.manhattan(b) > sch_floorplan::floorplan::place::LONG_SIMPLE_LEN_MM;
+    let drawn = (!by_name)
+        .then(|| sch_drag::redraw_wire(&mut edit.doc, a, out_a, b, ROUTING_NET, &own))
+        .flatten()
         // Drawing a path is not the same as making a connection: if the two
         // ends did not end up on one partition, the wire is decoration.
         .filter(|_| joined(&edit.doc, a, b));
@@ -205,16 +226,20 @@ fn connect_one(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             for target in [&from, &to] {
                 edit.doc.add_label(scope, &net, pose(target.at()));
             }
+            let reason = if across {
+                "the ends sit in different sections"
+            } else if by_name {
+                "the ends are too far apart for a wire to read as local"
+            } else {
+                "no clear wire path"
+            };
             edit.warn(format!(
-                "no clear wire path; {} and {} were joined by a `{net}` label at each end",
+                "{reason}; {} and {} were joined by a `{net}` label at each end",
                 from.describe(),
                 to.describe()
             ));
             let result = edit.commit(
-                with_cleared(
-                    format!("labelled both ends `{net}` — no clear wire path"),
-                    cleared,
-                ),
+                with_cleared(format!("labelled both ends `{net}` — {reason}"), cleared),
                 allow,
             )?;
             Ok(with_resolved_net(
