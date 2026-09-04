@@ -27,8 +27,7 @@ mod part;
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use geom::{Point2, Rect};
-use sch_model::geometry::MARGIN;
+use geom::{PAGE_MARGIN as MARGIN, Point2, Rect};
 use sch_model::item::Item;
 use sch_model::tree::{Align, Axis, Container, Tree, Trees, UNIT_MM};
 

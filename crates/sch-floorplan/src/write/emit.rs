@@ -5,7 +5,8 @@
 use std::fmt::Write as _;
 
 use geom::stable_uuid;
-use sch_doc::{PAGE_MARGIN, STANDARD_PAGES, TITLE_BLOCK_BAND, standard_page};
+use geom::PAGE_MARGIN;
+use sch_doc::{STANDARD_PAGES, TITLE_BLOCK_BAND, standard_page};
 
 use super::{
     Dir, Instance, NoConnect, PinLabel, ROOT_SHEET_KEY, SchematicWriter, field_anchors,

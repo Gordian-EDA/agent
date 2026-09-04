@@ -226,7 +226,7 @@ fn slide_block(movable: &mut [Item], blockers: &[Rect]) {
     // block back — which it refuses to do when the block touches what is already drawn.
     // So the landing must be on the page; only if nothing on the page is free does an
     // off-page landing beat leaving the block on top of something.
-    let on_page = |r: &Rect| r.min_x >= sch_doc::PAGE_MARGIN && r.min_y >= sch_doc::PAGE_MARGIN;
+    let on_page = |r: &Rect| r.min_x >= geom::PAGE_MARGIN && r.min_y >= geom::PAGE_MARGIN;
     let search = |page_only: bool| {
         (1..=BLOCK_RINGS).find_map(|ring| {
             ring_offsets(ring)

@@ -224,7 +224,7 @@ mod tests {
         assert_eq!(before, after, "the seated wire moved");
         let bbox = doc.content_bbox().unwrap();
         assert!(
-            bbox.min_x >= sch_doc::PAGE_MARGIN && bbox.min_y >= sch_doc::PAGE_MARGIN,
+            bbox.min_x >= geom::PAGE_MARGIN && bbox.min_y >= geom::PAGE_MARGIN,
             "the block is still off the page: {bbox:?}"
         );
         let page = doc.page().expect("a page");

@@ -12,8 +12,6 @@ pub const COL_GAP: f64 = 6.35;
 /// Row pitch (mm) for a vertical stack. Tighter spacing lets a rotation move flip a
 /// clean vertical divider leg horizontal, so the conventional spacing is kept here.
 pub const ROW_GAP: f64 = 5.08;
-/// Sheet margin (mm) the normalized placement starts at.
-pub const MARGIN: f64 = 12.7;
 /// Quantization for comparing coordinates by grid cell.
 pub const GRID_KEY: f64 = GRID_50_MIL.pitch();
 

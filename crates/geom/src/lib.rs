@@ -20,7 +20,7 @@ mod union_find;
 
 pub use angle::snap_quadrant;
 pub use broadphase::{boxes_meet, candidate_pairs};
-pub use consts::{EPS, JOIN_EPS, STRICT_EPS};
+pub use consts::{EPS, JOIN_EPS, PAGE_MARGIN, STRICT_EPS};
 pub use grid::{GRID_50_MIL, Grid};
 pub use hash::{fnv1a, uuid_v5};
 pub use ids::stable_uuid;

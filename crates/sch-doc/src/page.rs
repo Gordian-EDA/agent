@@ -15,17 +15,12 @@
 
 use std::collections::BTreeSet;
 
-use geom::{GRID_50_MIL, Point2, Rect};
+use geom::{GRID_50_MIL, PAGE_MARGIN, Point2, Rect};
 
 use crate::body::body_rect;
 use crate::doc::SchDoc;
 use crate::model::{Item, Pose};
 use crate::sexpr::{num, quoted, tagged};
-
-/// Clearance kept between the drawn content and the page edge, in mm. Half an
-/// inch: KiCAD's own drawing frame border is 10 mm, so this keeps content off
-/// the border rule as well as off the paper edge.
-pub const PAGE_MARGIN: f64 = 12.7;
 
 /// Bottom band a KiCAD title block occupies inside the frame, in mm. Content
 /// that reaches into it is overprinted by the sheet metadata.
