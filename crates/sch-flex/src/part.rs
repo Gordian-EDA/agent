@@ -157,13 +157,21 @@ impl<'a> Part<'a> {
         r.min_y -= top;
         r.max_y += bottom;
         if self.is_connector() {
-            // A connector's fields go beside it, on whichever side its pins leave free —
-            // and a jack's value ("OUTPUT 3.5mm") is far wider than the symbol. Half of it
-            // (what `field_pad` reserves) is not the room the solver takes.
+            // A connector's fields go beside it, on the side its pins leave free — and a
+            // jack's value ("OUTPUT 3.5mm") is far wider than the symbol, so half of it
+            // (what `field_pad` reserves) is not the room the solver takes. Reserving that
+            // room on BOTH sides is what leaves a header block with a band of dead sheet
+            // between two connectors that face the same way.
             let text = sch_model::text::text_width(&self.item.value)
                 .max(sch_model::text::text_width(&self.item.refdes));
-            r.min_x -= text;
-            r.max_x += text;
+            match self.pins_face_west(pose) {
+                Some(true) => r.max_x += text,
+                Some(false) => r.min_x -= text,
+                None => {
+                    r.min_x -= text;
+                    r.max_x += text;
+                }
+            }
         }
         for a in attachments {
             r.min_x = r.min_x.min(a.x);
@@ -172,6 +180,26 @@ impl<'a> Part<'a> {
             r.max_y = r.max_y.max(a.y);
         }
         r
+    }
+
+    /// Whether this part's pins all leave to the WEST under `pose` (so its fields belong
+    /// to the east), all to the EAST, or neither — a connector whose pins face both ways
+    /// leaves no side free and keeps room on both.
+    fn pins_face_west(&self, pose: Pose) -> Option<bool> {
+        let mut west = false;
+        let mut east = false;
+        for pin in &self.pins {
+            match self.pin_dir(pin, pose) {
+                Dir::West => west = true,
+                Dir::East => east = true,
+                _ => return None,
+            }
+        }
+        match (west, east) {
+            (true, false) => Some(true),
+            (false, true) => Some(false),
+            _ => None,
+        }
     }
 
     /// Whether the two pins of a 2-pin part run left↔right under `pose`.

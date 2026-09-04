@@ -15,17 +15,12 @@
 
 use std::collections::BTreeSet;
 
-use geom::{GRID_50_MIL, Point2, Rect};
+use geom::{GRID_50_MIL, PAGE_MARGIN, Point2, Rect};
 
 use crate::body::body_rect;
 use crate::doc::SchDoc;
 use crate::model::{Item, Pose};
 use crate::sexpr::{num, quoted, tagged};
-
-/// Clearance kept between the drawn content and the page edge, in mm. Half an
-/// inch: KiCAD's own drawing frame border is 10 mm, so this keeps content off
-/// the border rule as well as off the paper edge.
-pub const PAGE_MARGIN: f64 = 12.7;
 
 /// Bottom band a KiCAD title block occupies inside the frame, in mm. Content
 /// that reaches into it is overprinted by the sheet metadata.
@@ -332,10 +327,12 @@ impl SchDoc {
     /// not touch the frozen one — before or after the shift. A re-wire of seated symbols
     /// draws straight to their pins and so is never slid at all.
     ///
-    /// The shift is one way and only as far as the margin: a drawing that already starts
-    /// inside the frame is not moved at all, so an untouched item still writes back from
-    /// its own bytes — the crate's round-trip guarantee — and a caller that read a
-    /// coordinate a moment ago still finds the part there.
+    /// While anything is frozen the shift is one way and only as far as the margin: a
+    /// drawing that already starts inside the frame is not moved at all, so an untouched
+    /// item still writes back from its own bytes — the crate's round-trip guarantee — and a
+    /// caller that read a coordinate a moment ago still finds the part there. With nothing
+    /// frozen the whole sheet is the fit's to place, and it is finally CENTRED on the page
+    /// it just chose, so the slack sits as a margin rather than as an empty lower-right.
     ///
     /// The shift is snapped to the 50 mil grid, so grid-aligned geometry stays
     /// grid-aligned (KiCAD's ERC rejects off-grid endpoints). `None` for an empty
@@ -376,6 +373,23 @@ impl SchDoc {
                 (need, false)
             }
         };
+        // With the page settled and nothing frozen, share the slack out instead of leaving
+        // it all along the bottom and right: a drawing pinned to the margin reads as a
+        // circuit stranded in the corner of a sheet too big for it, which is the defect the
+        // visual critic names on every under-filled page. The page is already chosen, so
+        // centring cannot buy a bigger one.
+        if frozen.is_empty() && standard && let Some(bbox) = self.content_bbox() {
+            let middle = |lo: f64, hi: f64| GRID_50_MIL.snap((hi - lo) / 2.0).clamp(-lo, hi);
+            let centre = [
+                middle(bbox.min_x - PAGE_MARGIN, page[0] - PAGE_MARGIN - bbox.max_x),
+                middle(bbox.min_y - PAGE_MARGIN, page[1] - PAGE_MARGIN - band - bbox.max_y),
+            ];
+            if centre != [0.0, 0.0] {
+                self.translate_where(centre[0], centre[1], |_| true);
+                shift = [shift[0] + centre[0], shift[1] + centre[1]];
+            }
+        }
+
         Some(PageFit {
             shift,
             page,

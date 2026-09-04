@@ -1,5 +1,5 @@
 //! `place::wire` — the orthogonal elbow router: per-net signal routing
-//! (`route_signal`/`route_local_tee`), port-exit geometry, and power-rail riser
+//! (`route_signal`/`route_trunk`), port-exit geometry, and power-rail riser
 //! planning + emission (`assign_rail_levels`, `plan_riser_offsets`, `emit_rail`).
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -156,8 +156,15 @@ pub(crate) fn wire(
     // dense ones: the wire-dense small references (555/uart/grid) are exactly where
     // literal long crossing wires read worst. Mirrors the spread-rail →
     // local-power-symbol distribution above.
+    // Fewest terminals first: a two-pin local hop claims its channel before a sprawling
+    // bus runs through it, so the short connections that carry a sheet's readability are
+    // drawn and the wide ones degrade to labels. Alphabetical order decided this before,
+    // which is to say nothing decided it.
     let label_policy = LabelPolicy::default();
-    for (net, eps) in &net_eps {
+    let mut order: Vec<&String> = net_eps.keys().collect();
+    order.sort_by_key(|net| (net_eps[*net].len(), (*net).clone()));
+    for net in order {
+        let eps = &net_eps[net];
         if ir.rails.contains_key(net) {
             continue;
         }
@@ -189,22 +196,27 @@ pub(crate) fn wire(
     Ok(())
 }
 
-/// When the orthogonal router should promote a signal hop to a net-LABEL pair
-/// instead of drawing the literal wire — the wire-vs-label decision, anchored to
-/// the human corpus (`tools/layout_metrics.py`: humans keep wires short, ~0% >50mm,
-/// and ~0 crossings; long literal crossing wires are the auto-layout "spaghetti"
-/// tell). A hop is labelled when EITHER:
-///   * its (direct or routed) length exceeds [`LABEL_LEN_MM`] — too long to draw; or
-///   * its DIRECT pin gap exceeds [`CROSS_LABEL_LEN_MM`], the literal route would CROSS
-///     a foreign wire, AND both endpoints could carry a body-clear label — a crossing
-///     reads as clutter, so name it instead (but never if naming would just move the
-///     defect to a label-over-body).
+/// When the orthogonal router should promote a signal hop to a net-LABEL pair instead of
+/// drawing the literal wire.
 ///
-/// Local short hops (the bulk of a human sheet) stay drawn, so `label_per_part`
-/// climbs toward the human ~0.76 without labelling everything.
+/// The judgement is about SHAPE, not length: a long straight run reads better than a short
+/// snake, so what a hop may spend is a [`geom::RouteShape`] budget, and how much it may
+/// spend depends only on how far apart its ends are.
+///
+///   * up to [`LABEL_LEN_MM`] — a LOCAL hop, [`geom::SHAPE_GENERAL`]: a Z, or one crossing
+///     on an otherwise direct run.
+///   * up to [`LONG_SIMPLE_LEN_MM`] — a LONG hop, [`geom::SHAPE_SIMPLE`]: straight, or one
+///     corner with no detour. Humans do draw these; what they never draw is a long snake.
+///   * beyond that, always a label.
+///
+/// Two riders. A hop shorter than [`CROSS_LABEL_LEN_MM`] keeps whatever legal route it has
+/// — a tight cluster must not fragment into label spam over one crossing. And an endpoint
+/// that could not seat a body-clear label forgives one crossing ([`CROWDED_FORGIVES`]),
+/// because naming such a pin only moves the defect onto a label over a body.
 #[derive(Clone, Copy)]
 pub(crate) struct LabelPolicy {
     pub len_mm: f64,
+    pub long_simple_len_mm: f64,
     pub cross_len_mm: f64,
 }
 
@@ -212,8 +224,38 @@ impl LabelPolicy {
     pub(crate) fn default() -> Self {
         LabelPolicy {
             len_mm: LABEL_LEN_MM,
+            long_simple_len_mm: LONG_SIMPLE_LEN_MM,
             cross_len_mm: CROSS_LABEL_LEN_MM,
         }
+    }
+
+    /// The shape budget for a hop whose ends are `direct` mm apart, or `None` when no
+    /// wire is acceptable at that distance.
+    fn budget(&self, direct: f64, label_clear: bool) -> Option<f64> {
+        let base = match direct {
+            d if d <= self.len_mm => geom::SHAPE_GENERAL,
+            d if d <= self.long_simple_len_mm => geom::SHAPE_SIMPLE,
+            _ => return None,
+        };
+        Some(base + if label_clear { 0.0 } else { CROWDED_FORGIVES })
+    }
+
+    /// Whether a routed path is worth drawing rather than naming.
+    fn keeps(&self, path: &[::geom::Point2], crossings: usize, label_clear: bool) -> bool {
+        let shape = geom::RouteShape::of(path, crossings);
+        let direct = match (path.first(), path.last()) {
+            (Some(a), Some(b)) => a.manhattan(*b),
+            _ => return false,
+        };
+        let drawn = direct + shape.detour_mm;
+        if drawn > self.long_simple_len_mm {
+            return false;
+        }
+        if direct <= self.cross_len_mm {
+            return true;
+        }
+        self.budget(direct, label_clear)
+            .is_some_and(|budget| shape.cost() <= budget)
     }
 }
 
@@ -265,7 +307,7 @@ pub(crate) fn route_signal(
             || (terms[0].0[0] - terms[pi].0[0]).abs() + (terms[0].0[1] - terms[pi].0[1]).abs()
                 <= 2.54 + EPS
     });
-    if local_tee_safe && route_local_tee(w, net, &terms, scene) {
+    if local_tee_safe && route_trunk(w, net, &terms, scene) {
         if let (Some(side), Some(pi)) = (port, port_idx) {
             w.add_cluster_label(net, terms[pi].0, side_dir(side), true);
         }
@@ -379,40 +421,16 @@ pub(crate) fn route_signal(
             (None, Some(d)) => (pts[j], d, pts[i]),
             (None, None) => (pts[i], dir_toward(pts[i], pts[j]), pts[j]),
         };
-        // A hop longer than the label policy's length is left unrouted so the union-find
+        // A hop the policy will not draw at any shape is left unrouted so the union-find
         // leaves its endpoints split — the label-bridge below then names each side,
         // turning a long literal wire into a net-label pair (the human idiom).
         let direct = (a[0] - b[0]).abs() + (a[1] - b[1]).abs();
-        if direct > label_policy.len_mm {
+        if direct > label_policy.long_simple_len_mm {
             continue;
         }
         if let Some(p) = router.route_edge(a, da, b, net, scene) {
-            // The DIRECT gap may be short while the only obstacle-free ROUTE is a sheet-wide
-            // DETOUR (two ICs whose shared bus pins face opposite ways, so the wire wraps the
-            // perimeter). A drawn wraparound reads far worse than naming each end, so discard a
-            // path whose routed length exceeds the policy length and leave the endpoints split.
-            let routed: f64 = p
-                .windows(2)
-                .map(|s| (s[0][0] - s[1][0]).abs() + (s[0][1] - s[1][1]).abs())
-                .sum();
-            if routed > label_policy.len_mm {
-                continue;
-            }
-            // CROSSING-DRIVEN promotion: a cross-block hop whose literal route would CROSS a
-            // foreign wire reads as spaghetti (humans keep ~0 crossings). Name it instead —
-            // leave the endpoints split for the label-bridge. Gated on the DIRECT pin-to-pin
-            // gap (not the routed length): a LOCAL node (terminals a few mm apart) keeps its
-            // wires even when the only obstacle-free route detours far around a body, so a
-            // tight cluster isn't fragmented into label spam. Only promote when BOTH endpoints
-            // could carry a body-CLEAR label (predictor matches the lint's geometry), so a pin
-            // whose label would land over a chip body or pin-name text — including after the
-            // stub-retraction — keeps its wire instead of becoming a lint-flagged label.
-            // Conservative on purpose: the TIER-1 references must stay 0-warning.
-            if direct > label_policy.cross_len_mm
-                && term_label_clear[i]
-                && term_label_clear[j]
-                && sch_model::route::path_crossings(&p, net, scene) > 0
-            {
+            let crossings = sch_model::route::path_crossings(&p, net, scene);
+            if !label_policy.keeps(&p, crossings, term_label_clear[i] && term_label_clear[j]) {
                 continue;
             }
             for seg in p.windows(2) {
@@ -718,6 +736,12 @@ fn subtract_collinear_overlap(
 /// which needs a foreign wire or pin over this pin's own tip, so only on a block drawn
 /// beside existing content — the default landing comes back reported as not clear, and
 /// the bridge picks another pin.
+///
+/// The pin TIP is not a rung. KiCAD draws the pin's number along the pin, so a label
+/// sitting on the tip overprints it — the clearance predictor is blind to the label's own
+/// symbol and so calls that landing clear, while the readability lint, which is not,
+/// reports it. A walled-in pin keeps the nearest outward landing instead, and the writer's
+/// own stub retraction still pulls it in where it must.
 fn label_stub(
     w: &SchematicWriter,
     env: &KicadInstallation,
@@ -740,7 +764,6 @@ fn label_stub(
     };
     let truthful: Vec<f64> = LADDER
         .into_iter()
-        .chain([0.0])
         .filter(|&s| !anchor_merges(scene, landing(s), net))
         .collect();
     match truthful
@@ -765,112 +788,184 @@ pub(crate) fn safe_forced_single_port_stub(
     short && axis_aligned && sch_model::route::path_ok(&[pin, exit], net, scene)
 }
 
-/// Draw a clustered net as a single-trunk tee (one straight trunk + a short
-/// stub from each terminal), returning true if it applied. Used when the
-/// terminals are close together AND the whole tee is clear of the scene, so a
-/// trunk is safe — far cleaner than an MST of overlapping elbows. Spread or
-/// obstacle-crossing nets return false and fall through to the router.
+/// Draw a multi-terminal node as one straight TRUNK with a drop from every terminal —
+/// the way a person draws a node, rather than an MST of independent elbows whose
+/// overlapping collinear runs over-junction it. Returns whether it applied; a node too
+/// spread out, or one no legal trunk serves, falls through to the router.
 ///
-/// "Clear" is the FULL [`sch_model::route::path_ok`] test, not just a body check: a trunk
+/// The trunk lines worth trying are every terminal's own coordinate, the coordinates two
+/// to eight grid OUTWARD along a terminal's pin, and four or six grid either side of a
+/// terminal whose pin points ALONG the trunk — a bus running past a resistor. A terminal
+/// facing the trunk drops straight onto it; one facing along it leaves its pin two grid
+/// first and then turns. The cheapest whole tee wins: its length, plus a crossing's worth
+/// of grid for every foreign wire it passes and a little for each extra wire it needs.
+///
+/// Nothing is drawn until the WHOLE tee — every drop and the trunk that joins them —
+/// passes the full [`sch_model::route::path_ok`] test. Not just a body check: a trunk
 /// drawn down an IC's pin column passes over the neighbouring pins, and KiCAD welds a
 /// wire to every pin it crosses — the `mixed-signal-adc-frontend` `SDA`/`SCL` short,
 /// where SCL's trunk ran from pin 10 straight down through pin 9 to its pull-up. The tee
 /// is a shortcut PAST the obstacle-aware router, so it owes everything the router's own
 /// edges owe.
-pub(crate) fn route_local_tee(
+pub(crate) fn route_trunk(
     w: &mut SchematicWriter,
     net: &str,
     terms: &[([f64; 2], Option<Dir>)],
     scene: &mut sch_model::route::RouteScene,
 ) -> bool {
-    const LOCAL: f64 = 30.48;
-    let xs: Vec<f64> = terms.iter().map(|t| t.0[0]).collect();
-    let ys: Vec<f64> = terms.iter().map(|t| t.0[1]).collect();
-    let (min_x, max_x) = (
-        xs.iter().cloned().fold(f64::MAX, f64::min),
-        xs.iter().cloned().fold(f64::MIN, f64::max),
-    );
-    let (min_y, max_y) = (
-        ys.iter().cloned().fold(f64::MAX, f64::min),
-        ys.iter().cloned().fold(f64::MIN, f64::max),
-    );
-    if max_x - min_x > LOCAL || max_y - min_y > LOCAL {
+    let span = |axis: usize| {
+        let (lo, hi) = terms.iter().fold((f64::MAX, f64::MIN), |(lo, hi), (p, _)| {
+            (lo.min(p[axis]), hi.max(p[axis]))
+        });
+        hi - lo
+    };
+    if terms.len() < 2 || span(0) + span(1) > TRUNK_SPAN_MM {
         return false;
     }
-    // A body strictly inside the terminal bbox would be cut by the trunk.
-    let bbox = [min_x, min_y, max_x, max_y];
-    let hits_body = scene.solids.iter().any(|r| {
-        r[0] < bbox[2] - EPS && bbox[0] < r[2] - EPS && r[1] < bbox[3] - EPS && bbox[1] < r[3] - EPS
-    });
-    if hits_body {
+    let plan = |horizontal: bool| {
+        let scene: &sch_model::route::RouteScene = scene;
+        trunk_lines(terms, horizontal)
+            .into_iter()
+            .filter_map(move |line| plan_trunk(terms, horizontal, line, net, scene))
+    };
+    let best = plan(true).chain(plan(false)).min_by(|a, b| a.0.total_cmp(&b.0));
+    let Some((_, paths, feet, horizontal, line)) = best else {
         return false;
-    }
-    // Trunk along the longer axis, on the (lower-)median terminal line so the
-    // most terminals sit on it without a stub.
-    let median = |mut v: Vec<f64>| {
-        v.sort_by(f64::total_cmp);
-        v[(v.len() - 1) / 2]
     };
-    let horizontal = (max_x - min_x) >= (max_y - min_y);
-    // Every wire the tee would draw, so the whole shape can be cleared against the
-    // scene before any of it is committed.
-    let trunk_line = if horizontal {
-        geom::GRID_50_MIL.snap(median(ys))
-    } else {
-        geom::GRID_50_MIL.snap(median(xs))
-    };
-    let foot = |p: &[f64; 2]| {
-        if horizontal {
-            [p[0], trunk_line]
-        } else {
-            [trunk_line, p[1]]
+    for path in &paths {
+        for seg in path.windows(2) {
+            emit_routed_segment(w, scene, net, seg[0], seg[1]);
         }
-    };
-    let trunk = if horizontal {
-        [[min_x, trunk_line], [max_x, trunk_line]]
-    } else {
-        [[trunk_line, min_y], [trunk_line, max_y]]
-    };
-    let clear = |path: [[f64; 2]; 2]| {
-        sch_model::route::path_ok(&[path[0].into(), path[1].into()], net, scene)
-    };
-    if !clear(trunk) || terms.iter().any(|(p, _)| !clear([*p, foot(p)])) {
-        return false;
     }
-    if horizontal {
-        let ty = trunk_line;
-        w.add_wire_on_net([min_x, ty], [max_x, ty], net);
-        scene.segments.push(sch_model::route::NetSegment::new(
-            [min_x, ty].into(),
-            [max_x, ty].into(),
-            net,
-        ));
-        for (p, _) in terms {
-            if (p[1] - ty).abs() > EPS {
-                w.add_wire_on_net(*p, [p[0], ty], net);
-            }
-            if p[0] > min_x + EPS && p[0] < max_x - EPS {
-                w.add_junction_on_net([p[0], ty], net);
-            }
-        }
-    } else {
-        let tx = trunk_line;
-        w.add_wire_on_net([tx, min_y], [tx, max_y], net);
-        scene.segments.push(sch_model::route::NetSegment::new(
-            [tx, min_y].into(),
-            [tx, max_y].into(),
-            net,
-        ));
-        for (p, _) in terms {
-            if (p[0] - tx).abs() > EPS {
-                w.add_wire_on_net(*p, [tx, p[1]], net);
-            }
-            if p[1] > min_y + EPS && p[1] < max_y - EPS {
-                w.add_junction_on_net([tx, p[1]], net);
-            }
+    let (lo, hi) = feet
+        .iter()
+        .fold((f64::MAX, f64::MIN), |(lo, hi), f| (lo.min(*f), hi.max(*f)));
+    for foot in feet {
+        if foot > lo + EPS && foot < hi - EPS {
+            let at = match horizontal {
+                true => [foot, line],
+                false => [line, foot],
+            };
+            w.add_junction_on_net(at, net);
         }
     }
     true
+}
+
+/// Candidate coordinates for a trunk on the given axis: every terminal's own line, the
+/// lines two to eight grid outward along a terminal that faces across the trunk, and four
+/// or six grid to either side of one that faces along it.
+fn trunk_lines(terms: &[([f64; 2], Option<Dir>)], horizontal: bool) -> Vec<f64> {
+    let axis = usize::from(horizontal);
+    let grid = geom::GRID_50_MIL;
+    let mut out = Vec::new();
+    for (p, dir) in terms {
+        out.push(grid.snap(p[axis]));
+        let along = dir.map(|d| match horizontal {
+            true => d.vec().y == 0.0,
+            false => d.vec().x == 0.0,
+        });
+        match (dir, along) {
+            (Some(d), Some(false)) => {
+                let step = match horizontal {
+                    true => d.vec().y,
+                    false => d.vec().x,
+                };
+                out.extend([2.0, 4.0, 6.0, 8.0].map(|k| grid.snap(p[axis] + step * k * 1.27)));
+            }
+            _ => out.extend(
+                [-6.0, -4.0, 4.0, 6.0].map(|k| grid.snap(p[axis] + k * 1.27)),
+            ),
+        }
+    }
+    out.sort_by(f64::total_cmp);
+    out.dedup_by(|a, b| (*a - *b).abs() < EPS);
+    out
+}
+
+/// The tee one candidate trunk line would draw: its cost, the paths, the feet along the
+/// trunk, and the line itself. `None` when a terminal cannot reach the line, or any wire
+/// the tee would draw is illegal.
+type Tee = (f64, Vec<Vec<::geom::Point2>>, Vec<f64>, bool, f64);
+fn plan_trunk(
+    terms: &[([f64; 2], Option<Dir>)],
+    horizontal: bool,
+    line: f64,
+    net: &str,
+    scene: &sch_model::route::RouteScene,
+) -> Option<Tee> {
+    /// Grid charged for a foreign wire the tee passes over, and for each extra wire drawn.
+    const CROSSING: f64 = 20.0 * 1.27;
+    const EXTRA_WIRE: f64 = 3.0 * 1.27;
+    /// A drop leaves its pin at least this far before it may turn.
+    const LEAD: f64 = 2.0 * 1.27;
+
+    let axis = usize::from(horizontal);
+    let other = 1 - axis;
+    let point = |along: f64, across: f64| match horizontal {
+        true => ::geom::Point2::new(along, across),
+        false => ::geom::Point2::new(across, along),
+    };
+    let mut paths: Vec<Vec<::geom::Point2>> = Vec::new();
+    let mut feet: Vec<f64> = Vec::new();
+    for (p, dir) in terms {
+        let at = point(p[other], p[axis]);
+        if (p[axis] - line).abs() <= EPS {
+            feet.push(p[other]);
+            continue;
+        }
+        let across = dir.map(|d| match horizontal {
+            true => d.vec().y,
+            false => d.vec().x,
+        });
+        match across {
+            // Facing across the trunk: straight out onto it, and only outward.
+            Some(step) if step != 0.0 => {
+                if (line - p[axis]) * step < LEAD - EPS {
+                    return None;
+                }
+                paths.push(vec![at, point(p[other], line)]);
+                feet.push(p[other]);
+            }
+            // Facing along it (or a virtual port with no pin): out along the pin first,
+            // then turn onto the trunk.
+            _ => {
+                let step = dir.map_or(1.0, |d| match horizontal {
+                    true => d.vec().x,
+                    false => d.vec().y,
+                });
+                let turn = p[other] + step * LEAD;
+                paths.push(vec![at, point(turn, p[axis]), point(turn, line)]);
+                feet.push(turn);
+            }
+        }
+    }
+    if feet.len() < 2 {
+        return None;
+    }
+    let (lo, hi) = feet
+        .iter()
+        .fold((f64::MAX, f64::MIN), |(lo, hi), f| (lo.min(*f), hi.max(*f)));
+    if hi - lo > EPS {
+        paths.push(vec![point(lo, line), point(hi, line)]);
+    }
+    if !paths
+        .iter()
+        .all(|path| sch_model::route::path_ok(path, net, scene))
+    {
+        return None;
+    }
+    let length: f64 = paths
+        .iter()
+        .flat_map(|path| path.windows(2).map(|s| s[0].manhattan(s[1])))
+        .sum();
+    let crossings: usize = paths
+        .iter()
+        .map(|path| sch_model::route::path_crossings(path, net, scene))
+        .sum();
+    let cost =
+        length + CROSSING * crossings as f64 + EXTRA_WIRE * paths.len() as f64;
+    Some((cost, paths, feet, horizontal, line))
 }
 
 /// A virtual port-exit point just past the net's pin extent on `side`.
@@ -1217,10 +1312,11 @@ pub(crate) const LABEL_LEN_MM: f64 = 50.0;
 /// risers or one of its lead-outs is a cross-sheet detour, and [`emit_rail`] gives the
 /// trunk up for distributed local power symbols instead.
 ///
-/// A rail wire is a wire, so it is held to the same corpus rule as a signal wire and
-/// simply IS [`LABEL_LEN_MM`] — humans keep ~0% of wires above it, whatever net they are
-/// on. Measured the same way too: on the geometry actually drawn, not on a pin-span proxy.
-pub(crate) const RAIL_SEGMENT_MAX: f64 = LABEL_LEN_MM;
+/// A rail wire is a wire, so it is held to the same corpus rule as a signal wire —
+/// humans keep ~0% of wires above 50mm, whatever net they are on. Measured the same way
+/// too: on the geometry actually drawn, not on a pin-span proxy. Its own literal, so that
+/// tuning the signal policy never silently redistributes a board's power.
+pub(crate) const RAIL_SEGMENT_MAX: f64 = 50.0;
 
 /// The CROSSING-driven label threshold (mm): a hop longer than this whose literal route
 /// would cross a foreign wire is named rather than drawn (see [`LabelPolicy`]). Lower than
@@ -1230,6 +1326,21 @@ pub(crate) const RAIL_SEGMENT_MAX: f64 = LABEL_LEN_MM;
 /// 19mm ≈ 7.5 grid: above the human wire-length median (~5mm) and p75, so only the longer,
 /// genuinely-crossing hops promote.
 pub(crate) const CROSS_LABEL_LEN_MM: f64 = 19.0;
+
+/// The longest hop still drawn as a wire (mm) — and only when its shape is SIMPLE
+/// (straight, or one corner with no detour). 60 grid: humans draw the occasional long
+/// clean run between two blocks; what they never draw is a long snake.
+pub(crate) const LONG_SIMPLE_LEN_MM: f64 = 76.2;
+
+/// How spread a node may be (mm, the sum of its terminal bbox's two sides) and still be
+/// drawn as one trunk with drops. 44 grid: past that the node is not a node any more, and
+/// the obstacle-aware router should draw it edge by edge.
+const TRUNK_SPAN_MM: f64 = 55.88;
+
+/// Shape budget added when an endpoint could not seat a body-clear net label: exactly one
+/// crossing. Naming a walled-in pin does not remove the defect, it moves it onto a label
+/// over a body — so such a hop is forgiven a crossing, and nothing more.
+const CROWDED_FORGIVES: f64 = 20.0;
 
 /// Assign each drawn rail (≥3 pins) a y. Rails in a band share a base y, but overlapping
 /// x-ranges are pushed to successive rows (away from the content) via greedy interval

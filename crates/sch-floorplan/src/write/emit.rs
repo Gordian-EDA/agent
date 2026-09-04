@@ -5,12 +5,33 @@
 use std::fmt::Write as _;
 
 use geom::stable_uuid;
-use sch_doc::{PAGE_MARGIN, TITLE_BLOCK_BAND, standard_page};
+use geom::PAGE_MARGIN;
+use sch_doc::{STANDARD_PAGES, TITLE_BLOCK_BAND, standard_page};
 
 use super::{
     Dir, Instance, NoConnect, PinLabel, ROOT_SHEET_KEY, SchematicWriter, field_anchors,
     justify_token,
 };
+
+/// The usable box of every page a finished sheet may be drawn on, smallest first: the
+/// standard ladder less the margin on each side and the band a title block prints in.
+///
+/// The typesetter packs the blocks into one of these, and [`SchematicWriter::page`] then
+/// buys the smallest page that holds what it drew — the same arithmetic from both ends, so
+/// the page the drawing was composed for is the page it lands on. The band is always
+/// reserved: a sheet that turns out to carry no title block has 33 mm of slack, which
+/// costs nothing, where the reverse overprints the drawing.
+pub(crate) fn usable_pages() -> Vec<[f64; 2]> {
+    STANDARD_PAGES
+        .iter()
+        .map(|(_, page)| {
+            [
+                page[0] - 2.0 * PAGE_MARGIN,
+                page[1] - 2.0 * PAGE_MARGIN - TITLE_BLOCK_BAND,
+            ]
+        })
+        .collect()
+}
 
 impl SchematicWriter {
     /// The page the drawn content needs: the smallest of A5/A4/A3/A2 landscape whose

@@ -782,8 +782,27 @@ impl SchematicWriter {
         };
         for inst in &self.instances {
             if inst.refdes.starts_with('#') {
-                // Power symbols: the single pin at the origin is the anchor.
+                // Power symbols: the single pin at the origin is the anchor, and the GLYPH
+                // itself is ink with real extent. A foreign wire drawn 2.54 mm off the
+                // anchor misses the pin and slices the triangle — a clean netlist that
+                // reads as a short, and the value text drops out to make room. So the
+                // glyph gets the same keepout the no-connect X gets: tagged with its own
+                // net, which its stub may reach and every other wire detours around.
                 scene.points.push((inst.at, inst.value.clone()));
+                // The glyph reaches ~2.5 mm from the anchor along the stub and is barely
+                // wider than the wire across it; the keepout is the drawn triangle plus a
+                // hair, not the symbol's padded placement box, so it never walls off the
+                // channel beside a rail.
+                let h = Point2::new(1.27, 3.175).rotated_half_extents(inst.angle);
+                scene.label_solids.push((
+                    Rect::new(
+                        inst.at[0] - h[0],
+                        inst.at[1] - h[1],
+                        inst.at[0] + h[0],
+                        inst.at[1] + h[1],
+                    ),
+                    inst.value.clone(),
+                ));
                 continue;
             }
             let h = inst.half_extents.rotated_half_extents(inst.angle);

@@ -4,14 +4,14 @@
 //! tscircuit's schematic-trace-solver, per the aesthetics spec §3): start
 //! with the simplest orientation-aware elbow between two terminals, then
 //! repair collisions by shifting one interior segment at a time to candidate
-//! offsets, best-first by total path length, until the path is collision-free
-//! or an expansion cap is hit. Outputs stay "schematic-shaped" (2–4 segments)
+//! offsets, best-first by [`geom::RouteShape`] — detour, bends and crossings —
+//! until the path reads clean. Outputs stay "schematic-shaped" (2–4 segments)
 //! by construction; a failed route falls back to label connectivity at the
 //! call site — never an error.
 
 use geom::Dir;
-use geom::{EPS, Point2, Polyline};
-use sch_model::route::{RouteScene, SchRouter, path_ok};
+use geom::{EPS, Point2, Polyline, RouteShape};
+use sch_model::route::{RouteScene, SchRouter, path_crossings, path_ok};
 
 /// Minimum lead length out of a pin before the first turn, mm.
 const LEAD_MM: f64 = 2.54;
@@ -61,12 +61,14 @@ fn path_len(p: &[Point2]) -> f64 {
 }
 
 /// Route one edge from `a` (a pin, leaving along `dir_a`) to `b` (any
-/// terminal). Tries the plain elbow first; on collision, searches the
-/// canonical 3/4-segment Manhattan families with detour coordinates derived
-/// from obstacle edges (±[`CLEAR_MM`]), grid-snapped, picking the shortest
-/// valid path (ties: fewer bends, then smaller coordinates — deterministic).
-/// Returns None when nothing in the family fits — the caller falls back to
-/// label connectivity.
+/// terminal). The plain elbow wins outright when it is legal and clean; a
+/// colliding OR CROSSING elbow sends the search into the canonical 3/4-segment
+/// Manhattan families, with detour coordinates derived from obstacle edges
+/// (±[`CLEAR_MM`]), grid-snapped, picking the path of least
+/// [`RouteShape`] — a couple of millimetres of detour to miss a foreign wire
+/// beats the shorter path that draws over it. Ties: shorter, then fewer bends,
+/// then smaller coordinates (deterministic). Returns None when nothing in the
+/// family fits — the caller falls back to label connectivity.
 pub fn route_edge(
     a: Point2,
     dir_a: Dir,
@@ -75,7 +77,7 @@ pub fn route_edge(
     scene: &RouteScene,
 ) -> Option<Vec<Point2>> {
     let quick = elbow(a, dir_a, b);
-    if path_ok(&quick, net, scene) {
+    if path_ok(&quick, net, scene) && path_crossings(&quick, net, scene) == 0 {
         return Some(quick);
     }
 
@@ -125,18 +127,21 @@ pub fn route_edge(
         Dir::South => y1 >= a.y + LEAD_MM - EPS,
     };
 
-    let mut best: Option<(f64, usize, Vec<Point2>)> = None;
-    let consider = |raw: Vec<Point2>, best: &mut Option<(f64, usize, Vec<Point2>)>| {
+    type Ranked = (f64, f64, usize, Vec<Point2>);
+    let mut best: Option<Ranked> = None;
+    let consider = |raw: Vec<Point2>, best: &mut Option<Ranked>| {
         let p = Polyline::new(raw).simplify().into_points();
         if p.len() < 2 || !path_ok(&p, net, scene) {
             return;
         }
-        let key = (path_len(&p), p.len());
+        let shape = RouteShape::of(&p, path_crossings(&p, net, scene));
+        let key = (shape.cost(), path_len(&p), p.len());
         match best {
-            Some((l, n, _)) if (*l, *n) <= key => {}
-            _ => *best = Some((key.0, key.1, p)),
+            Some((c, l, n, _)) if (*c, *l, *n) <= key => {}
+            _ => *best = Some((key.0, key.1, key.2, p)),
         }
     };
+    consider(quick, &mut best);
 
     match dir_a {
         Dir::East | Dir::West => {
@@ -186,7 +191,7 @@ pub fn route_edge(
             }
         }
     }
-    best.map(|(_, _, p)| p)
+    best.map(|(_, _, _, p)| p)
 }
 
 /// Minimum-spanning-tree edges over terminals by Manhattan distance (Prim's,

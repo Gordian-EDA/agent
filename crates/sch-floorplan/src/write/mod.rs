@@ -55,6 +55,7 @@ mod textsolve;
 pub use build::{pin_end0, point_key};
 pub use sch_model::geometry::quantize_dir;
 pub use emit::{escape_sexpr_string, fmt_coord};
+pub(crate) use emit::usable_pages;
 
 /// Stable key identifying *this* schematic sheet for root-uuid derivation.
 ///

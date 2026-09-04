@@ -260,7 +260,11 @@ pub(crate) fn prepare_writer(
     ir: Option<LayoutIr>,
 ) -> io::Result<(SchematicWriter, EmitOutput)> {
     let mut problem = place_problem(env, design, ir)?;
-    sch_flex::typeset(&mut problem.items, &problem.ir.trees);
+    sch_flex::typeset(
+        &mut problem.items,
+        &problem.ir.trees,
+        &crate::write::usable_pages(),
+    );
     let ir = problem.ir.clone();
 
     let realizer = RoutedSheetRealizer::new(env, &problem.inc, &ir);
