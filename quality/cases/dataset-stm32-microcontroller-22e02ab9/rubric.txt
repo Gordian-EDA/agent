@@ -1,6 +1,6 @@
 The delivered sheet must carry the given netlist exactly — the same parts on the
-same nets as the human original — pass KiCAD's ERC, and read as well as the human
-sheet it was extracted from.
+same nets as the human original — carry no ERC error the human original does not
+carry itself, and read as well as the sheet it was extracted from.
 expect: netlist_matches_reference == true
-expect: erc_errors == 0
+expect: erc_errors_beyond_reference == 0
 expect: critic_vs_reference >= 8

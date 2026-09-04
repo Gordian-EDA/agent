@@ -546,6 +546,50 @@ def reference_netlist_facts(case, facts, artifacts):
     }
 
 
+def by_type(report):
+    """Error violations of `report`, counted per type."""
+    counts = {}
+    for finding in violations(report):
+        if finding.get("severity") == "error":
+            kind = finding.get("type", "unknown")
+            counts[kind] = counts.get(kind, 0) + 1
+    return counts
+
+
+def reference_erc_facts(case, erc, artifacts):
+    """ERC errors this sheet has that the human original does not.
+
+    A `dataset-*` sheet is one page of a larger design, and the netlist it must
+    reproduce exactly is that page's. Its inputs are driven from other pages, so
+    KiCAD reports `pin_not_driven` on the human original itself — 10 of them on the
+    DDR sheet, 6 on the RS485 board. Requiring zero asks a faithful reproduction to
+    beat the sheet it reproduces, which it cannot do without changing the netlist
+    it was told not to change.
+
+    What it must not do is introduce errors of its own, so the comparison is per
+    type: a class the original already carries is excused up to the original's
+    count, and everything else is ours.
+    """
+    reference = case / "input" / "reference.kicad_sch"
+    if not reference.is_file():
+        return {}
+    report = run_check("sch", reference, artifacts / "reference-erc.json")
+    if not isinstance(report, dict) or "error" in report:
+        return {"reference_erc_error": "reference ERC not run"}
+    theirs, ours = by_type(report), by_type(erc)
+    beyond = {
+        kind: count - theirs.get(kind, 0)
+        for kind, count in ours.items()
+        if count > theirs.get(kind, 0)
+    }
+    return {
+        "reference_erc_error": None,
+        "reference_erc_errors": sum(theirs.values()),
+        "erc_errors_beyond_reference": sum(beyond.values()),
+        "erc_types_beyond_reference": beyond,
+    }
+
+
 def first_schematic(project):
     """The project's schematic, chosen deterministically so the ERC and the
     netlist export can never end up measuring different sheets."""
@@ -658,6 +702,7 @@ def deterministic_facts(case, project, before_project, artifacts, agent_result):
     }
     if sch.get("schematic_created"):
         facts.update(reference_netlist_facts(case, facts, artifacts))
+        facts.update(reference_erc_facts(case, erc, artifacts))
     return facts, detail
 
 
