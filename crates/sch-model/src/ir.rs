@@ -14,7 +14,11 @@ use crate::tree::Trees;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Band {
+    /// `left` is what a caller writes for a rail it pictures running down the side;
+    /// a rail band is horizontal, and the upper one is where a supply goes.
+    #[serde(alias = "left", alias = "above", alias = "up")]
     Top,
+    #[serde(alias = "right", alias = "below", alias = "down")]
     Bottom,
 }
 

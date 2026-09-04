@@ -6,9 +6,13 @@
 /// Ground-like net or pin-function name heuristic.
 pub fn is_ground(net: &str) -> bool {
     let u = net.trim_start_matches('/').to_ascii_uppercase();
-    matches!(u.as_str(), "GNDD" | "GNDA" | "VSS" | "VSSA" | "VSSD")
+    matches!(u.as_str(), "GNDD" | "GNDA")
         || u.starts_with("GND")
         || u.ends_with("GND")
+        // `VSS` names a ground the way `VDD` names a supply, and a part's own suffix
+        // rides along with it: `VSS_PA`, `VSSIO`. Left unrecognised, a sheet's whole
+        // return path is drawn as ordinary signal labels instead of one rail.
+        || u.starts_with("VSS")
 }
 
 /// A voltage-rail token: optional `+`/`-`, then a number with `V` as the decimal/unit
@@ -132,11 +136,14 @@ mod tests {
             "SGND",
             "VSSA",
             "GNDA",
+            "VSS_PA",
+            "VSS_DRIVE",
+            "VSSIO",
         ] {
             assert!(is_ground(net), "{net}");
             assert!(is_power_net(net), "{net}");
         }
-        for net in ["SIGNAL_GND_SENSE", "GROUND_FAULT", "NOT_GNDED", "VSS_DRIVE"] {
+        for net in ["SIGNAL_GND_SENSE", "GROUND_FAULT", "NOT_GNDED", "VSENSE"] {
             assert!(!is_ground(net), "{net}");
         }
     }

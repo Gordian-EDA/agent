@@ -16,6 +16,7 @@ fn pin(number: &str, name: &str, x: f64, y: f64, angle: f64) -> PinGeom {
         angle,
         length: 2.54,
         unit: 1,
+        text: Default::default(),
     }
 }
 

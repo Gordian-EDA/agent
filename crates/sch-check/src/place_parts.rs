@@ -247,8 +247,7 @@ impl PayloadAudit {
 /// [`LayoutIr`]. `rail_locals` (derived from the design's power-symbol count) and
 /// each block's authored tree (carried on the block itself, not here) are absent
 /// rather than silently accepted.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone, Default, Serialize, PartialEq)]
 pub struct Intent {
     /// Net → band, for nets to draw as spanning rails.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -256,6 +255,49 @@ pub struct Intent {
     /// Net → the sheet edge it exits toward.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub ports: BTreeMap<NetName, Side>,
+}
+
+/// A caller who writes `{"GND": "bottom"}` has said where a net goes, which is the
+/// whole of what this type carries — so it is read that way rather than refused for
+/// not naming `rails`. `top`/`bottom` place a rail, `left`/`right` a port.
+impl<'de> serde::Deserialize<'de> for Intent {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Intent, D::Error> {
+        use serde::de::Error;
+        let fields = BTreeMap::<String, serde_json::Value>::deserialize(d)?;
+        let mut intent = Intent::default();
+        for (key, value) in fields {
+            match key.as_str() {
+                "rails" => {
+                    intent.rails = serde_json::from_value(value).map_err(Error::custom)?;
+                }
+                "ports" => {
+                    intent.ports = serde_json::from_value(value).map_err(Error::custom)?;
+                }
+                net => {
+                    // `left`/`right` name a SIDE here, though `rails` also takes them as
+                    // words for its upper and lower band; a bare net against a side is a
+                    // port, which is the only reading that keeps both forms meaningful.
+                    let sideways = matches!(value.as_str(), Some("left" | "right"));
+                    if let Some(side) = sideways
+                        .then(|| serde_json::from_value::<Side>(value.clone()).ok())
+                        .flatten()
+                    {
+                        intent.ports.insert(net.to_string(), side);
+                    } else if let Ok(band) = serde_json::from_value::<Band>(value.clone()) {
+                        intent.rails.insert(net.to_string(), band);
+                    } else if let Ok(side) = serde_json::from_value::<Side>(value) {
+                        intent.ports.insert(net.to_string(), side);
+                    } else {
+                        return Err(Error::custom(format!(
+                            "unknown field `{net}`: `intent` takes `rails` and `ports`, or \
+                             a net name against `top`/`bottom` (a rail) or `left`/`right` (a port)"
+                        )));
+                    }
+                }
+            }
+        }
+        Ok(intent)
+    }
 }
 
 impl Intent {
@@ -266,6 +308,34 @@ impl Intent {
             ports: self.ports,
             ..Default::default()
         }
+    }
+}
+
+#[cfg(test)]
+mod intent_tests {
+    use super::*;
+
+    #[test]
+    fn a_bare_net_map_is_read_as_rails_and_ports() {
+        let intent: Intent =
+            serde_json::from_str(r#"{"GND":"bottom","+3V3":"top","AUDIO_OUT":"right"}"#).unwrap();
+        assert_eq!(intent.rails["GND"], Band::Bottom);
+        assert_eq!(intent.rails["+3V3"], Band::Top);
+        assert_eq!(intent.ports["AUDIO_OUT"], Side::Right);
+    }
+
+    #[test]
+    fn a_rail_named_by_a_side_still_lands_in_a_band() {
+        let intent: Intent = serde_json::from_str(r#"{"rails":{"VBUS":"left"}}"#).unwrap();
+        assert_eq!(intent.rails["VBUS"], Band::Top);
+    }
+
+    #[test]
+    fn a_field_that_names_neither_is_refused_with_both_forms() {
+        let err = serde_json::from_str::<Intent>(r#"{"GND":{"band":"bottom"}}"#)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("`rails` and `ports`"), "{err}");
     }
 }
 

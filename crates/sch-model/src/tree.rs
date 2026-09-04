@@ -157,6 +157,33 @@ struct Wire {
     wrap: Option<f64>,
 }
 
+impl Wire {
+    /// What this node actually said, so a refusal is a correction rather than a
+    /// restatement of the rule. A node carrying only spacing is the common near
+    /// miss: a gap belongs on the container, not beside its children.
+    fn said(&self) -> String {
+        let mut keys = Vec::new();
+        for (name, present) in [
+            ("part", self.part.is_some()),
+            ("unit", self.unit.is_some()),
+            ("rot", self.rot.is_some()),
+            ("row", self.row.is_some()),
+            ("col", self.col.is_some()),
+            ("gap", self.gap.is_some()),
+            ("align", self.align.is_some()),
+            ("wrap", self.wrap.is_some()),
+        ] {
+            if present {
+                keys.push(name);
+            }
+        }
+        if keys.is_empty() {
+            return "; this node said nothing".into();
+        }
+        format!("; this one said {}", keys.join(", "))
+    }
+}
+
 /// `mirror` written either as a flag or, as the reference sheets write it, the axis
 /// string `"y"`.
 #[derive(Default, Deserialize)]
@@ -190,9 +217,10 @@ impl<'de> Deserialize<'de> for Tree {
         .filter(|set| **set)
         .count();
         if named != 1 {
-            return Err(de::Error::custom(
-                "a layout node is exactly one of `part`, `row` or `col`",
-            ));
+            return Err(de::Error::custom(format!(
+                "a layout node is exactly one of `part`, `row` or `col`{}",
+                wire.said()
+            )));
         }
         if let Some(part) = wire.part {
             if !matches!(wire.rot, None | Some(0) | Some(90) | Some(180) | Some(270)) {
@@ -286,6 +314,14 @@ mod tests {
         );
         let back: Tree = serde_json::from_str(&serde_json::to_string(&tree).unwrap()).unwrap();
         assert_eq!(back, tree);
+    }
+
+    #[test]
+    fn a_node_naming_no_arrangement_is_told_what_it_said() {
+        let err = serde_json::from_str::<Tree>(r#"{"gap":4}"#)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("this one said gap"), "{err}");
     }
 
     #[test]

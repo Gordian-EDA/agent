@@ -5,16 +5,12 @@
 //! real emitted sheets — and the same metric compared across two revisions of
 //! the engine. It reports each sheet's net shorts and opens as it goes, so a
 //! placement experiment cannot look good by breaking the netlist.
-//!
-//! `SCH_ENGINE=spine` swaps the placement engine, as the netlist oracle does;
-//! the default is `anneal`, which is what the oracle gates.
 
 use std::path::{Path, PathBuf};
 
 use kicad::KicadInstallation;
 use kicad_symbol::SymbolTable;
 use sch_floorplan::floorplan;
-use sch_model::engine::PlacementEngine;
 
 fn corpus() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/validation")
@@ -56,11 +52,7 @@ fn main() {
             .clone()
             .map(sch_check::Intent::into_layout_ir)
             .unwrap_or_else(|| floorplan::baseline_ir(&design));
-        let engine: Box<dyn PlacementEngine> = match std::env::var("SCH_ENGINE").as_deref() {
-            Ok("spine") => Box::new(spine_place::SpinePlace),
-            _ => Box::new(anneal_place::Anneal),
-        };
-        match floorplan::emit_strategy(&env, &design, engine, Some(ir)) {
+        match floorplan::emit_strategy(&env, &design, Some(ir)) {
             Ok(result) => {
                 std::fs::write(out.join(format!("{name}.kicad_sch")), &result.sch).unwrap();
                 eprintln!(

@@ -29,7 +29,42 @@ struct SelectionInput {
     bbox: Option<[f64; 4]>,
     block: Option<String>,
     intent: Option<sch_check::Intent>,
-    layout: Option<sch_model::tree::Tree>,
+    layout: Option<ArrangeLayout>,
+}
+
+/// `arrange` lays out ONE selection, so its `layout` is one tree — but `place_parts`
+/// takes a tree PER BLOCK, and a caller moving between the two writes the block map
+/// here often enough that refusing it just costs a round trip. A map of one block is
+/// that block's tree; a map of several is their trees in a row, which is what
+/// arranging them together means.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum ArrangeLayout {
+    Tree(Box<sch_model::tree::Tree>),
+    Blocks(BTreeMap<String, sch_model::tree::Tree>),
+}
+
+impl ArrangeLayout {
+    fn tree(self) -> Option<sch_model::tree::Tree> {
+        use sch_model::tree::{Align, Axis, Container, Tree};
+        match self {
+            ArrangeLayout::Tree(tree) => Some(*tree),
+            ArrangeLayout::Blocks(blocks) => {
+                let mut children: Vec<Tree> = blocks.into_values().collect();
+                match children.len() {
+                    0 => None,
+                    1 => children.pop(),
+                    _ => Some(Tree::Container(Container {
+                        axis: Axis::Row,
+                        children,
+                        gap: None,
+                        align: Align::Center,
+                        wrap: None,
+                    })),
+                }
+            }
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -712,7 +747,8 @@ fn guarded_place_parts(
 /// Re-typeset a selection: `sch_floorplan::live::arrange` places it, gated on the
 /// module's truthfulness invariant (see its module docs) before anything is kept.
 pub(crate) fn arrange(input: Value, ctx: &AgentRuntime) -> Result<Value> {
-    let input: SelectionInput = typed(input, "arrange")?;
+    let mut input: SelectionInput = typed(input, "arrange")?;
+    let layout = input.layout.take().and_then(ArrangeLayout::tree);
     let mut selection = selection(&input)?;
     let mut edit = Edit::open(ctx)?;
     let selection_notes = resolve_arrangeable_refs(&edit.doc, &mut selection);
@@ -728,7 +764,7 @@ pub(crate) fn arrange(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         &mut edit.doc,
         &selection,
         input.intent.clone(),
-        input.layout.clone(),
+        layout,
     )?;
     timing.done(if report.committed {
         "committed"
