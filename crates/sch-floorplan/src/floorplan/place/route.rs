@@ -447,7 +447,18 @@ pub(crate) fn route_signal(
         }
         if let Some(p) = router.route_edge(a, da, b, net, scene) {
             let crossings = sch_model::route::path_crossings(&p, net, scene);
-            if !label_policy.keeps(net, &p, crossings, term_label_clear[i] && term_label_clear[j]) {
+            // A hop between two SECTIONS of the sheet is a bus wire, and thirty of them
+            // between one MCU and its headers is a braid nobody can follow. A person names
+            // those at both ends. A tool-invented name is worth nothing as a name, so it
+            // still takes the wire.
+            let across = !is_unnamed(net)
+                && match (&term_pin[i], &term_pin[j]) {
+                    (Some((a, _)), Some((b, _))) => items[*a].block != items[*b].block,
+                    _ => false,
+                };
+            if across
+                || !label_policy.keeps(net, &p, crossings, term_label_clear[i] && term_label_clear[j])
+            {
                 continue;
             }
             for seg in p.windows(2) {
