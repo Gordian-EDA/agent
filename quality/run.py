@@ -2283,11 +2283,19 @@ def typical(reports):
         critic = (report.get("critic_schematic") or {}).get("score")
         return (-len(checks.get("fail") or []), critic if critic is not None else -1)
 
+    # An attempt that never produced a measurement — a provider that dropped the
+    # connection, a crash — is not a WORSE run, it is no run. Ranked as the worst it
+    # becomes the median of two and hides a real result: one keyboard-interface attempt
+    # passed every check at critic 9 while the other died mid-response, and the case was
+    # reported as unmeasured.
+    measured = [r for r in reports if (r.get("critic_schematic") or {}).get("score") is not None]
+    judged = measured or reports
     # The LOWER middle: with an even number of runs there is no middle one, and taking
     # the upper of the two reports the better attempt, which flatters the engine exactly
     # where the spread is widest.
-    ordered = sorted(reports, key=rank)
+    ordered = sorted(judged, key=rank)
     middle = ordered[(len(ordered) - 1) // 2]
+    middle["attempts_unmeasured"] = len(reports) - len(measured)
     middle["attempts"] = [
         {
             "critic": (r.get("critic_schematic") or {}).get("score"),
