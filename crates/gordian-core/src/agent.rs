@@ -629,6 +629,13 @@ pub struct Agent<P: Provider = GenaiProvider> {
     /// Timed-out tool tasks a later mutation must wait for.
     settling: SettlingTools,
     tool_seq: AtomicU64,
+    /// The best score a review has reported this session, and the round it came
+    /// from. Revision is not monotone — a sheet that reviewed 8 comes back a 4 two
+    /// rounds later, and the run ships whatever it ended on — so every review says
+    /// when the sheet is now worse than one the model already had.
+    review_best: AtomicU64,
+    review_best_round: AtomicU64,
+    review_round: AtomicU64,
 }
 
 impl<P: Provider> Agent<P> {
@@ -647,6 +654,9 @@ impl<P: Provider> Agent<P> {
             max_requests: None,
             settling: SettlingTools::default(),
             tool_seq: AtomicU64::new(0),
+            review_best: AtomicU64::new(0),
+            review_best_round: AtomicU64::new(0),
+            review_round: AtomicU64::new(0),
         }
     }
 
@@ -677,7 +687,7 @@ impl<P: Provider> Agent<P> {
         };
         let graded = gordian_tools_sch::review::review(&self.client, &subject);
         match tokio::time::timeout(CRITIC_TIMEOUT, graded).await {
-            Ok(result) => into_outcome(result),
+            Ok(result) => into_outcome(result.map(|value| self.against_the_best(value))),
             Err(_) => into_outcome(Ok(json!({
                 "error": format!(
                     "the visual critic did not answer within {}s; try review_schematic again",
@@ -685,6 +695,33 @@ impl<P: Provider> Agent<P> {
                 ),
             }))),
         }
+    }
+
+    /// Tell a review how it compares with the best one this session has seen.
+    ///
+    /// Re-laying-out a block to answer one defect regularly costs more elsewhere
+    /// than it wins, and the model cannot tell: each review arrives on its own. So
+    /// a round that comes back below the best is named as the regression it is,
+    /// with the round to go back to — the model owns the layout trees, so it can.
+    fn against_the_best(&self, mut value: Value) -> Value {
+        let Some(score) = value.get("score").and_then(Value::as_f64) else {
+            return value;
+        };
+        let round = self.review_round.fetch_add(1, Ordering::Relaxed) + 1;
+        value["round"] = json!(round);
+        let best = f64::from_bits(self.review_best.load(Ordering::Relaxed));
+        if score > best {
+            self.review_best.store(score.to_bits(), Ordering::Relaxed);
+            self.review_best_round.store(round, Ordering::Relaxed);
+            return value;
+        }
+        if score < best {
+            let best_round = self.review_best_round.load(Ordering::Relaxed);
+            value["worse_than_round"] = json!(best_round);
+            value["best_score"] = json!(best);
+            value["note"] = json!(regression_note(round, score, best, best_round));
+        }
+        value
     }
 
     /// The project's tool context (so callers can inspect the `.kicad_sch` path
@@ -2093,6 +2130,15 @@ async fn check_schematic_review(
 /// structured `{error: …}` value (the model self-repairs), images are pulled out
 /// of the value via [`take_images`] (which also surfaces the render PNG's path for
 /// inline UI display).
+/// What a review that came back below the session's best has to say for itself.
+fn regression_note(round: u64, score: f64, best: f64, best_round: u64) -> String {
+    format!(
+        "Round {round} scores {score}, below the {best} this sheet reached at round \
+         {best_round}: the layout changes since then cost more than they won. Restore that \
+         arrangement before trying a different fix, and do not finish on this one."
+    )
+}
+
 fn into_outcome(result: Result<Value>) -> ToolOutcome {
     match result {
         Ok(mut value) => {
@@ -2659,6 +2705,14 @@ fn pop_n(history: &mut Vec<ChatMessage>, turn_starts: &mut Vec<usize>, k: usize)
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_review_below_the_session_best_names_the_round_to_go_back_to() {
+        let note = super::regression_note(4, 4.0, 8.0, 2);
+        assert!(note.contains("Round 4 scores 4"), "{note}");
+        assert!(note.contains("reached at round 2"), "{note}");
+        assert!(note.contains("Restore that arrangement"), "{note}");
+    }
     use super::*;
     use crate::prompts::system_prompt;
     use crate::testing::ScriptedClient;
