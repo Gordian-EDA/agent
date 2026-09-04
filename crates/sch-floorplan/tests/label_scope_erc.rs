@@ -195,6 +195,38 @@ fn joining_a_local_net_by_name_leaves_it_local() {
     );
 }
 
+/// An author's own global label is not the engine's to demote. The engine draws
+/// plain, but a pennant it FINDS on the sheet stays a pennant — and pulls the
+/// later block's plain labels for that net up to it, rather than splitting the
+/// scope.
+#[test]
+fn an_authored_pennant_keeps_its_scope_through_a_later_block() {
+    let Some(env) = KicadInstallation::detect() else {
+        eprintln!("SKIP: no KiCad environment detected");
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("authored.kicad_sch");
+    let mut doc = SchDoc::parse(BLANK).unwrap();
+    place(&env, &mut doc, &ported_block());
+    assert!(
+        doc.set_label_scope("BOOT0", LabelKind::Global) > 0,
+        "the fixture must draw BOOT0 for the author to promote"
+    );
+
+    place(&env, &mut doc, &joining_block());
+    doc.write(&path).unwrap();
+
+    let after = scopes(&doc);
+    assert_eq!(
+        after.get("BOOT0").copied(),
+        Some("global"),
+        "the authored pennant was demoted or split: {after:?}"
+    );
+    let counts = erc_counts(&env, &path);
+    assert_eq!(counts.get("same_local_global_label"), None, "{counts:?}");
+}
+
 /// Nothing the writer draws is shorter than one grid step: a wire that cannot be
 /// seen is a wire whose free end KiCAD reports and nobody can find.
 #[test]
