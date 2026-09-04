@@ -177,3 +177,39 @@ multi-block cases:
 One ECG attempt scored **10** — judged better than the human sheet it was extracted from —
 with the netlist exact, ERC clean and every check green. An STM32 attempt scored 8, also
 fully green. The same ECG case scored 6 this morning with five wires and 124 labels.
+
+
+## Full suite after the ribbon fix — and the ribbon fix does NOT show up in it
+
+`--repeat 2`, lower median reported.
+
+| case | attempts | reported |
+| --- | --- | --- |
+| dataset-ibm-m122-261071e7 | 8, 9 | **8 — passes** |
+| dataset-ddr-memory-411be040 | 7, 7 | 7 |
+| dataset-current-sense-2995e0dd | 6, 6 | 6 |
+| dataset-stm32-microcontroller-22e02ab9 | 6, 6 | 6 |
+| prompt-555-blinker-ldo | 6, 7 | 6 |
+| prompt-bjt-preamp | 6, 6 | 6 |
+| prompt-sallen-key-gain | 6, 6 | 6 |
+| dataset-ecg-sensor-07aabb42 | 5, 9 | 5 |
+| dataset-rp2040-mocon2040-0ea574f3 | 5, 6 | 5 |
+| dataset-light-accessory-266db471 | 5, 5 | 5 |
+| dataset-three-phase-0cdac5a0 | 5, 5 | 5 |
+| prompt-arduino-uno | 5, 6 | 5 |
+| prompt-hbridge | 5, 6 | 5 |
+| prompt-blue-pill | 4, 6 | 4 |
+
+**1 of 14 passes; mean 5.64.** Against the previous run's 0 of 14 and 5.79 — passes up by
+one, mean slightly DOWN. So the ribbon fix, whose mechanical effect is not in doubt (sheet
+aspect 3.5 → 1.45 across six runs, every sheet now near the page's proportions), **does not
+show as a score gain over fourteen cases**.
+
+Its apparent +2 on the ECG case in the three-case sample was itself variance: the same
+binary gave that case 7 there and 5 here.
+
+It is kept anyway, and the reason is not the score. A sheet 613 mm wide and 173 mm tall,
+with five blocks strung in an unbounded row because each was grafted to the right of the
+last, is wrong however it is graded. But nobody should cite it as a scoring win.
+
+The spread remains the story: ECG 5 and 9, Blue Pill 4 and 6, on identical runs.
