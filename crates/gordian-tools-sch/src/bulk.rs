@@ -176,6 +176,7 @@ pub(crate) fn place_parts(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         }
     }
     warnings.extend(crowded_blocks(&design));
+    warnings.extend(unrelated_neighbours(&design));
     let (_, diags, mut audit) = sch_check::into_design(&payload, ctx.provider(), &existing);
     audit.input_errors = diags
         .0
@@ -296,6 +297,64 @@ fn crowded_blocks(design: &sch_check::model::Design) -> Vec<String> {
             )
         })
         .collect()
+}
+
+/// Neighbours in a row that share no net at all.
+///
+/// A row is one signal path, so the pair either side of a gap in it should be joined
+/// by something. When they are not, the router has nothing to draw between them and
+/// falls back to naming both ends — which is how a sheet ends up with half the wire a
+/// person would draw on it and reads as a parts bin rather than a circuit.
+///
+/// Sharing ANY net counts, power included: a row of decoupling capacitors shares only
+/// its rails and is exactly what the convention asks for.
+fn unrelated_neighbours(design: &sch_check::model::Design) -> Vec<String> {
+    let mut said = Vec::new();
+    for (name, block) in &design.blocks {
+        let Some(tree) = &block.layout else { continue };
+        let nets = |leaf: &sch_model::tree::Leaf| -> BTreeSet<String> {
+            block
+                .components
+                .get(&leaf.part)
+                .into_iter()
+                .flat_map(|comp| comp.pins.values())
+                .filter_map(|target| match target {
+                    sch_check::model::PinTarget::Net(net) => Some(net.clone()),
+                    sch_check::model::PinTarget::NoConnect => None,
+                })
+                .collect()
+        };
+        for (left, right) in row_neighbours(tree) {
+            let (a, b) = (nets(left), nets(right));
+            if !a.is_empty() && !b.is_empty() && a.is_disjoint(&b) {
+                said.push(format!(
+                    "in block `{name}`, `{}` and `{}` sit side by side in a row but share \
+                     no net: a row is one signal path, so put each next to the part it \
+                     connects to, or give it its own row. Neighbours with nothing between \
+                     them are drawn as labels at both ends instead of a wire.",
+                    left.part, right.part
+                ));
+            }
+        }
+    }
+    said
+}
+
+/// Every adjacent pair of LEAVES within one row of the tree.
+fn row_neighbours(tree: &sch_model::tree::Tree) -> Vec<(&sch_model::tree::Leaf, &sch_model::tree::Leaf)> {
+    use sch_model::tree::{Axis, Tree};
+    let Tree::Container(container) = tree else {
+        return Vec::new();
+    };
+    let mut pairs: Vec<_> = container.children.iter().flat_map(row_neighbours).collect();
+    if container.axis == Axis::Row {
+        for window in container.children.windows(2) {
+            if let (Tree::Leaf(left), Tree::Leaf(right)) = (&window[0], &window[1]) {
+                pairs.push((left, right));
+            }
+        }
+    }
+    pairs
 }
 
 fn nothing_placed_response(unplaced: Value, warnings: &[String]) -> Value {
@@ -1216,6 +1275,7 @@ impl Timing {
 mod block_size_tests {
     use sch_check::model::{Block, Component, Design};
 
+
     fn design_with(parts: usize) -> Design {
         let mut block = Block::default();
         for n in 0..parts {
@@ -1229,6 +1289,31 @@ mod block_size_tests {
     #[test]
     fn a_section_of_a_dozen_parts_is_left_alone() {
         assert!(super::crowded_blocks(&design_with(12)).is_empty());
+    }
+
+    /// Two parts on one net are a signal path; two parts on none are a parts bin.
+    #[test]
+    fn neighbours_in_a_row_that_share_nothing_are_named() {
+        use sch_check::model::PinTarget;
+        use sch_model::tree::Tree;
+
+        let mut block = Block::default();
+        for (refdes, net) in [("R1", "SIG"), ("R2", "SIG"), ("R3", "OTHER")] {
+            let mut part = Component::default();
+            part.pins.insert("1".into(), PinTarget::Net(net.into()));
+            block.components.insert(refdes.into(), part);
+        }
+        block.layout = Some(Tree::row_of([
+            ("R1".to_string(), 1),
+            ("R2".to_string(), 1),
+            ("R3".to_string(), 1),
+        ]));
+        let mut design = Design::default();
+        design.blocks.insert("chain".into(), block);
+
+        let said = super::unrelated_neighbours(&design);
+        assert_eq!(said.len(), 1, "{said:?}");
+        assert!(said[0].contains("`R2` and `R3`"), "{said:?}");
     }
 
     #[test]
