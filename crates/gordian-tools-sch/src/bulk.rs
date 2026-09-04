@@ -286,10 +286,12 @@ fn crowded_blocks(design: &sch_check::model::Design) -> Vec<String> {
         .filter(|(_, block)| block.components.len() > ROOMY)
         .map(|(name, block)| {
             format!(
-                "block `{name}` holds {} parts: split it into sections of 3-{ROOMY} \
-                 (power entry, regulator, MCU core, each interface, each repeated \
-                 channel) and give each its own `layout` tree, or it will draw as a \
-                 field of parts joined by labels rather than a circuit.",
+                "block `{name}` holds {} parts, too many to read as one section: it will \
+                 draw as a field of parts joined by labels rather than a circuit. Sections \
+                 of 3-{ROOMY} are power entry, regulator, MCU core, each interface, each \
+                 repeated channel — one `place_parts` call each, with its own `block` name \
+                 and `layout` tree. To re-cut a block already on the sheet, \
+                 `remove_region({{block}})` and place its sections back.",
                 block.components.len()
             )
         })
@@ -1234,6 +1236,7 @@ mod block_size_tests {
         let said = super::crowded_blocks(&design_with(24));
         assert_eq!(said.len(), 1);
         assert!(said[0].contains("holds 24 parts"), "{said:?}");
-        assert!(said[0].contains("split it into sections"), "{said:?}");
+        assert!(said[0].contains("too many to read as one section"), "{said:?}");
+        assert!(said[0].contains("remove_region"), "{said:?}");
     }
 }
