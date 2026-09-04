@@ -847,8 +847,13 @@ impl SchematicWriter {
     }
 
     /// Would a net label anchored at `at` facing `dir` read CLEAR of every
-    /// symbol body, pin text, field, and existing label? `own_refdes` exempts
-    /// the label's own symbol (a stub label legitimately hugs its own pin).
+    /// symbol body, pin text, field, and existing label?
+    ///
+    /// `own_refdes` exempts only the label's own BODY — a stub label legitimately
+    /// hugs the pin it names, and the body's bbox is generous enough to swallow
+    /// the pin tip. Its own symbol's PIN TEXT is not exempt: a net label printed
+    /// over the pin number it is meant to explain is exactly what the lint
+    /// reports, and the caller has a ladder of longer stubs to reach past it.
     ///
     /// Boxed by the one as-drawn model, like the lint it must agree with: a
     /// landing this approves never trips `layout_warnings`.
@@ -862,19 +867,21 @@ impl SchematicWriter {
         use sch_model::text::{label_box, pin_text_boxes};
         let b = label_box(at, dir, net);
         for inst in &self.instances {
-            if inst.refdes.starts_with('#') || inst.refdes == own_refdes {
+            if inst.refdes.starts_with('#') {
                 continue;
             }
-            let h = inst.half_extents.rotated_half_extents(inst.angle);
-            let body: Rect = [
-                inst.at[0] - h[0],
-                inst.at[1] - h[1],
-                inst.at[0] + h[0],
-                inst.at[1] + h[1],
-            ]
-            .into();
-            if body.overlaps(&b) {
-                return false;
+            if inst.refdes != own_refdes {
+                let h = inst.half_extents.rotated_half_extents(inst.angle);
+                let body: Rect = [
+                    inst.at[0] - h[0],
+                    inst.at[1] - h[1],
+                    inst.at[0] + h[0],
+                    inst.at[1] + h[1],
+                ]
+                .into();
+                if body.overlaps(&b) {
+                    return false;
+                }
             }
             if let Some(pins) = self.sym_pins.get(&inst.lib_id) {
                 for pg in pins {

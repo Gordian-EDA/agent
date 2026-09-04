@@ -3,7 +3,11 @@
 
 The critic reads about two points apart on one unchanged sheet, so a single
 fixture moving by a point says nothing. This grades a set of fixtures, prints each
-one, and prints the mean — which is what a placement change has to move.
+one, and prints the mean — which is what a placement change has to move. Each
+sheet is the mean of SAMPLES reads, the same statistic `quality/run.py` uses.
+
+Score only the sheets a change actually moves: render against a baseline and diff
+the bytes first, because an identical sheet can only re-measure the noise.
 
     tools/corpus_critic.py <dir-of-kicad_sch> [fixture ...]
 
@@ -20,7 +24,7 @@ import tomllib
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 ANCHOR = ROOT / "quality/anchor/schematic-9.png"
 KICAD = ROOT / ".local/kicad-10.0.4/AppDir/usr/bin/kicad-cli"
-SAMPLES = 3
+SAMPLES = 7
 
 
 def gateway():

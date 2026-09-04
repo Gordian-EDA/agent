@@ -764,11 +764,9 @@ fn subtract_collinear_overlap(
 /// beside existing content — the default landing comes back reported as not clear, and
 /// the bridge picks another pin.
 ///
-/// The pin TIP is not a rung. KiCAD draws the pin's number along the pin, so a label
-/// sitting on the tip overprints it — the clearance predictor is blind to the label's own
-/// symbol and so calls that landing clear, while the readability lint, which is not,
-/// reports it. A walled-in pin keeps the nearest outward landing instead, and the writer's
-/// own stub retraction still pulls it in where it must.
+/// The pin TIP is not a rung: KiCAD draws the pin's number along the pin, so a label
+/// sitting on the tip overprints it. A walled-in pin keeps the nearest outward landing
+/// instead, and the writer's own stub retraction still pulls it in where it must.
 fn label_stub(
     w: &SchematicWriter,
     env: &KicadInstallation,

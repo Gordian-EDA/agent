@@ -33,7 +33,9 @@ const NOTE_SIZE: f64 = 1.27;
 const WRAP_MIN: f64 = 45.0;
 const WRAP_MAX: f64 = 90.0;
 /// How far a caption may be pushed away from its frame looking for clear air.
-const PUSH_STEPS: usize = 4;
+/// Two rungs: a caption further off than that has stopped looking like it
+/// belongs to the block, which is worse than the overlap it bought.
+const PUSH_STEPS: usize = 2;
 
 impl SchematicWriter {
     /// Draw one dashed frame per block, captioned with its title and note.
@@ -63,78 +65,39 @@ impl SchematicWriter {
         let mut taken: Vec<Rect> = framed.iter().map(|(_, f)| *f).collect();
         for (i, frame) in &framed {
             let block = &blocks[*i];
-            let title = self.seat(
+            let corners = title_corners(*frame, &boxed(block.title, TITLE_SIZE));
+            let (_, anchor, title) = best_seat(block.title, TITLE_SIZE, &corners, &ink, &taken);
+            self.add_text(
                 block.title,
+                anchor,
                 TITLE_SIZE,
                 true,
                 &format!("{}:title", block.title),
-                &title_corners(*frame, &boxed(block.title, TITLE_SIZE)),
-                &ink,
-                &taken,
             );
             taken.push(title);
             let Some(note) = block.note.filter(|n| !n.is_empty()) else {
                 continue;
             };
-            for text in wrappings(note, *frame) {
-                let corners = note_corners(*frame, title, &boxed(&text, NOTE_SIZE));
-                let seated = self.seat(
-                    &text,
-                    NOTE_SIZE,
-                    false,
-                    &format!("{}:note", block.title),
-                    &corners,
-                    &ink,
-                    &taken,
-                );
-                taken.push(seated);
-                break;
-            }
-        }
-    }
-
-    /// Seat one caption at the first corner that touches nothing, falling back to
-    /// the corner it fouls least. Returns the box it was seated in.
-    #[allow(clippy::too_many_arguments)]
-    fn seat(
-        &mut self,
-        text: &str,
-        size: f64,
-        bold: bool,
-        key: &str,
-        corners: &[Point2],
-        ink: &[Rect],
-        taken: &[Rect],
-    ) -> Rect {
-        let shape = boxed(text, size);
-        let mut best: Option<(f64, Point2, Rect)> = None;
-        for corner in corners {
-            let anchor = GRID_50_MIL.snap_point(Point2::new(
-                corner.x - shape.min_x,
-                corner.y - shape.min_y,
-            ));
-            let at = Rect::new(
-                anchor.x + shape.min_x,
-                anchor.y + shape.min_y,
-                anchor.x + shape.max_x,
-                anchor.y + shape.max_y,
+            // Widest wrap first; a narrower column is only worth it if the wide
+            // one has nowhere clear to sit.
+            let seated = wrappings(note, *frame)
+                .into_iter()
+                .map(|text| {
+                    let corners = note_corners(*frame, title, &boxed(&text, NOTE_SIZE));
+                    let (fouled, anchor, at) = best_seat(&text, NOTE_SIZE, &corners, &ink, &taken);
+                    (fouled, text, anchor, at)
+                })
+                .min_by(|a, b| a.0.total_cmp(&b.0))
+                .expect("a note has at least one wrapping");
+            self.add_text(
+                &seated.1,
+                seated.2,
+                NOTE_SIZE,
+                false,
+                &format!("{}:note", block.title),
             );
-            let fouled: f64 = ink
-                .iter()
-                .chain(taken)
-                .filter_map(|o| at.intersection(o).map(|i| i.area()))
-                .sum();
-            if fouled <= 0.0 {
-                best = Some((0.0, anchor, at));
-                break;
-            }
-            if best.as_ref().is_none_or(|(f, ..)| fouled < *f) {
-                best = Some((fouled, anchor, at));
-            }
+            taken.push(seated.3);
         }
-        let (_, anchor, at) = best.expect("every caption has at least one candidate corner");
-        self.add_text(text, anchor, size, bold, key);
-        at
     }
 
     /// The box around a block's parts: their bodies and their solved field text.
@@ -153,7 +116,7 @@ impl SchematicWriter {
         for inst in self
             .instances
             .iter()
-            .filter(|i| members.iter().any(|m| *m == i.refdes))
+            .filter(|i| members.contains(&i.refdes))
         {
             let h = inst.half_extents.rotated_half_extents(inst.angle);
             grow(Rect::new(
@@ -214,6 +177,42 @@ impl SchematicWriter {
     }
 }
 
+/// The least-fouled seat for `text` among `corners`, as (fouled area, anchor,
+/// box). Corners are tried in order and the first clear one wins, so the
+/// preference the caller encoded in that order decides every uncontested case.
+fn best_seat(
+    text: &str,
+    size: f64,
+    corners: &[Point2],
+    ink: &[Rect],
+    taken: &[Rect],
+) -> (f64, Point2, Rect) {
+    let shape = boxed(text, size);
+    let mut best: Option<(f64, Point2, Rect)> = None;
+    for corner in corners {
+        let anchor =
+            GRID_50_MIL.snap_point(Point2::new(corner.x - shape.min_x, corner.y - shape.min_y));
+        let at = Rect::new(
+            anchor.x + shape.min_x,
+            anchor.y + shape.min_y,
+            anchor.x + shape.max_x,
+            anchor.y + shape.max_y,
+        );
+        let fouled: f64 = ink
+            .iter()
+            .chain(taken)
+            .filter_map(|o| at.intersection(o).map(|i| i.area()))
+            .sum();
+        if fouled <= 0.0 {
+            return (0.0, anchor, at);
+        }
+        if best.as_ref().is_none_or(|(f, ..)| fouled < *f) {
+            best = Some((fouled, anchor, at));
+        }
+    }
+    best.expect("every caption has at least one candidate corner")
+}
+
 /// The box a caption of `text` covers when anchored at the origin.
 fn boxed(text: &str, size: f64) -> Rect {
     super::sheet_text_box(&SheetText {
@@ -225,49 +224,55 @@ fn boxed(text: &str, size: f64) -> Rect {
     })
 }
 
+/// The two x positions a caption may take against `frame`: aligned with its left
+/// edge, or with its right. A caption wider than its frame only gets the left one
+/// — sliding it left to right-align would carry it out of the block it names.
+fn spans(frame: Rect, w: f64) -> Vec<f64> {
+    match frame.width() >= w {
+        true => vec![frame.min_x, frame.max_x - w],
+        false => vec![frame.min_x],
+    }
+}
+
 /// Min corners for a title, best first. A title belongs over its frame's top-left
 /// corner, so that corner is tried at increasing heights before the other three
 /// are considered: a sheet whose titles all sit in the same corner reads as one
 /// drawing, and moving a title is a bigger change than lifting it.
 fn title_corners(frame: Rect, shape: &Rect) -> Vec<Point2> {
     let (w, h) = (shape.width(), shape.height());
-    let (left, right) = (frame.min_x, frame.max_x - w);
     let mut out = Vec::new();
-    for x in [left, right] {
+    for x in spans(frame, w) {
         for push in 0..PUSH_STEPS {
             out.push((x, frame.min_y - GAP - h - push as f64 * (h + GAP)));
         }
     }
-    out.extend([(left, frame.max_y + GAP), (right, frame.max_y + GAP)]);
+    out.extend(spans(frame, w).into_iter().map(|x| (x, frame.max_y + GAP)));
     out.into_iter().map(|(x, y)| Point2::new(x, y)).collect()
 }
 
-/// Min corners for a note, best first: under its frame, then beside it, and only
-/// then over it.
+/// Min corners for a note, best first: under its frame, then over it, and only
+/// then out beside it.
 ///
-/// Over the frame means over the title too — the frame's top edge belongs to the
-/// title — which leaves a reader meeting the explanation before the heading, so
-/// those corners come last and are rarely reached. Under the frame is tried at
-/// only two depths before the sides, so a note never settles deep in the gap
-/// between two frames where it could belong to either.
+/// Every corner but the last two keeps the note within its frame's own x-span, so
+/// a reader never has to guess which block it explains — the failure that costs
+/// more than the overlap it was avoiding. Over the frame means over the title
+/// too, which leaves the explanation reading before the heading, so those come
+/// second; beside the frame is the last resort.
 fn note_corners(frame: Rect, title: Rect, shape: &Rect) -> Vec<Point2> {
     let (w, h) = (shape.width(), shape.height());
     let mut out = Vec::new();
-    for push in 0..2 {
+    for push in 0..PUSH_STEPS {
         let below = frame.max_y + GAP + push as f64 * (h + GAP);
-        out.extend([(frame.min_x, below), (frame.max_x - w, below)]);
-    }
-    for push in 0..2 {
-        let d = push as f64 * (w + GAP);
-        out.extend([
-            (frame.max_x + GAP + d, frame.min_y),
-            (frame.min_x - GAP - w - d, frame.min_y),
-        ]);
+        out.extend(spans(frame, w).into_iter().map(|x| (x, below)));
     }
     for push in 0..PUSH_STEPS {
         let above = title.min_y - GAP - h - push as f64 * (h + GAP);
-        out.extend([(frame.min_x, above), (frame.max_x - w, above)]);
+        out.extend(spans(frame, w).into_iter().map(|x| (x, above)));
     }
+    out.extend([
+        (frame.max_x + GAP, frame.min_y),
+        (frame.min_x - GAP - w, frame.min_y),
+    ]);
     out.into_iter().map(|(x, y)| Point2::new(x, y)).collect()
 }
 
