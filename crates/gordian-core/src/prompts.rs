@@ -20,7 +20,7 @@ Build in order: power entry; regulator; MCU core with every supply-pin decoupler
 
 `place_parts` never refuses a whole payload: unresolvable parts return as `unplaced` ({ref, reason, did_you_mean}) with their nets open, everything else is placed, and it appends, so resubmit only the parts it named. A block that cannot be drawn truthfully is BENCHED (`benched`: wired by name, no layout); `add_parts({parts})` benches directly; `arrange({refs|block, layout})` lays them out and empties the bench. Checks report `bench: n`; `sync_board`/`export_fab` refuse while it is non-empty.
 
-`dangling` pins are reported, not fatal: close each with `connect`, or declare real board I/O in `intent.ports`. Write `"@R1.2"` as a net to join that pin's net. Resolve `completeness.gaps` with one follow-up `place_parts` of only the missing parts; gaps are advisory for deliberately minimal designs. When the request fixes the part list, add nothing: pass `strict: true` (no gaps) and empty `netlist_fidelity` (extra parts, mis-netted pins).
+`dangling` pins are reported, not fatal: close each with `connect`, or declare real board I/O in `intent.ports`. Write `"@R1.2"` as a net to join that pin's net. Resolve `completeness.gaps` with one follow-up `place_parts` of only the missing parts; gaps are advisory for deliberately minimal designs. When the request fixes the part list, add nothing: pass `strict: true` (no gaps) and drive `netlist_fidelity.matches` true.
 
 Unknown or pad-incompatible footprints are cleared into `footprints_unresolved` (repair with one `assign_footprints`); they never block PCB work: `sync_board` stages them.
 

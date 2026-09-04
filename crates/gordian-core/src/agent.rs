@@ -662,8 +662,7 @@ impl<P: Provider> Agent<P> {
             })));
         }
         let ctx = Arc::clone(&self.runtime);
-        let render =
-            tokio::task::spawn_blocking(move || gordian_tools_sch::review::prepare(&ctx));
+        let render = tokio::task::spawn_blocking(move || gordian_tools_sch::review::prepare(&ctx));
         let subject = match tokio::time::timeout(RENDER_TIMEOUT, render).await {
             Err(_) => {
                 return into_outcome(Err(anyhow::anyhow!(tool_timeout_message(
@@ -845,8 +844,8 @@ impl<P: Provider> Agent<P> {
     }
 
     /// Persist what the request permits, so every tool call in the project reads
-    /// the same intent. A project that cannot be written is not worth failing a
-    /// turn over: the tools then simply see the permissive default.
+    /// the same intent. A failed write leaves the previous turn's scope standing
+    /// rather than failing the turn, which is why it is warned about.
     fn record_request_scope(&self, request: &str) {
         let scope = gordian_runtime::workspace::RequestScope {
             no_additions: request_forbids_additions(request),
@@ -1162,7 +1161,9 @@ impl<P: Provider> Agent<P> {
                 let parsed = parse_or_null(&content);
                 // Only a read that actually answered is spent: a failed one left
                 // the state unchanged and told the model to try again.
-                if dispatched && is_state_scoped_read(&call.fn_name) && parsed.get("error").is_none()
+                if dispatched
+                    && is_state_scoped_read(&call.fn_name)
+                    && parsed.get("error").is_none()
                 {
                     state_read_uses.insert(call.fn_name.clone(), tool_state_generation);
                 }

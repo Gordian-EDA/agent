@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 /// Written once per turn from the request itself, so every tool call in the
 /// project reads the same intent instead of each one guessing.
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub struct RequestScope {
     /// The request fixes the part list — a netlist to reproduce, "do not add
     /// parts". Advisory findings that would have the model add support
