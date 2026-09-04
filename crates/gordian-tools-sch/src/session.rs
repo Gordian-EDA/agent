@@ -225,6 +225,9 @@ pub(crate) struct Edit {
     /// this edit mints may take one.
     reserved: BTreeSet<String>,
     joined_nets: BTreeSet<String>,
+    /// Symbol bodies already drawn on top of each other when the edit opened. An edit
+    /// is answerable for the overlaps it CREATES, not for the ones it inherits.
+    overlaps: Vec<[String; 2]>,
     pub doc: SchDoc,
     pub warnings: Vec<String>,
 }
@@ -238,6 +241,7 @@ impl Edit {
         let mut doc =
             SchDoc::parse(&original).with_context(|| format!("parsing {}", path.display()))?;
         let before = connect::extract(&doc);
+        let overlaps = sch_floorplan::visual::body_overlaps(&doc);
         let rollback = doc.snapshot();
         Ok(Edit {
             path,
@@ -246,6 +250,7 @@ impl Edit {
             rollback,
             reserved: ctx.reservations().reserved()?,
             joined_nets: BTreeSet::new(),
+            overlaps,
             doc,
         })
     }
@@ -253,6 +258,7 @@ impl Edit {
     /// Begin an edit for a project that does not have a schematic yet.
     pub fn create(ctx: &AgentRuntime, mut doc: SchDoc) -> Edit {
         let before = connect::extract(&doc);
+        let overlaps = sch_floorplan::visual::body_overlaps(&doc);
         let rollback = doc.snapshot();
         Edit {
             path: ctx.sch_path().to_path_buf(),
@@ -261,6 +267,7 @@ impl Edit {
             rollback,
             reserved: ctx.reservations().reserved().unwrap_or_default(),
             joined_nets: BTreeSet::new(),
+            overlaps,
             doc,
         }
     }
@@ -306,6 +313,23 @@ impl Edit {
                     "segment": fault.segment,
                     "kind": format!("{:?}", fault.kind).to_lowercase(),
                 })).collect::<Vec<_>>(),
+            }));
+        }
+        // A symbol drawn on top of another is never a legal partial state, so it is
+        // refused exactly as a connectivity change the call did not name is: the pins,
+        // fields and wires of both parts land inside one body and no later call can
+        // tell them apart.
+        let landed_on = sch_floorplan::live::Overlaps(
+            sch_floorplan::visual::body_overlaps(&self.doc)
+                .into_iter()
+                .filter(|pair| !self.overlaps.contains(pair))
+                .collect(),
+        );
+        if !landed_on.0.is_empty() {
+            self.doc.restore(self.rollback)?;
+            return Ok(json!({
+                "error": landed_on.to_string(),
+                "body_overlaps": landed_on.0,
             }));
         }
         let after = connect::extract(&self.doc);

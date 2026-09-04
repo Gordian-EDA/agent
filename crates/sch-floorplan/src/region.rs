@@ -228,7 +228,15 @@ fn seat_beside(movable: &mut [Item], taken: &[Rect], drawn: &[Rect]) {
         .into_iter()
         .find_map(|page| best(page[0], Some(page)))
         .or_else(|| best(f64::INFINITY, None));
-    let Some(at) = landed else { return };
+    // No landing at all — the corner lattice had nothing clear on any page. Leaving the
+    // group where the typesetter drew it, which is what this did, drops the whole block
+    // on top of the sheet: the block draws from its own origin, so "unmoved" means "on
+    // top of whatever is already at the origin". Below everything already down is always
+    // free, so that is the fallback.
+    let at = landed.unwrap_or_else(|| {
+        let there = hull(taken).expect("taken is not empty");
+        Point2::new(geom::PAGE_MARGIN, there.max_y + BLOCK_GAP)
+    });
     // ONE snapped delta for the whole group: snapping each part independently would move
     // them by different amounts and break the arrangement the typesetter just computed.
     let delta = Point2::new(
@@ -365,7 +373,8 @@ pub fn arrange(problem: RegionProblem) -> RegionOutput {
     seat_beside(&mut all[..movable], &taken, &drawn);
 
     // With nothing to avoid, the typeset arrangement is authoritative — walking parts
-    // apart here would only undo the alignment it just computed.
+    // apart here would only undo the alignment it just computed. A collision the
+    // typesetter drew into a block is caught by the caller's body-overlap gate instead.
     let stuck = if taken.is_empty() {
         0
     } else {

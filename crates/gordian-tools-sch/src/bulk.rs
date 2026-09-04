@@ -244,6 +244,12 @@ pub(crate) fn place_parts(input: Value, ctx: &AgentRuntime) -> Result<Value> {
                 &renamed,
             ));
         }
+        Err(sch_floorplan::live::Error::BodyOverlap(overlaps)) => {
+            return Ok(with_renamed(
+                overlap_refusal(&overlaps, &warnings),
+                &renamed,
+            ));
+        }
         Err(error) => return Err(error.into()),
     };
     if !report.committed {
@@ -955,6 +961,17 @@ fn sanitize_place_parts_input(input: &mut Value) -> Vec<String> {
     warnings
 }
 
+/// The refusal a placement that would draw a symbol on a symbol comes back as.
+fn overlap_refusal(overlaps: &sch_floorplan::live::Overlaps, warnings: &[String]) -> Value {
+    with_warnings(
+        json!({
+            "error": overlaps.to_string(),
+            "body_overlaps": overlaps.0,
+        }),
+        warnings,
+    )
+}
+
 enum GuardedPlacement {
     Completed(Box<sch_floorplan::live::Result<PlaceReport>>),
     Panicked,
@@ -1011,13 +1028,20 @@ pub(crate) fn arrange(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         })));
     }
     let timing = Timing::start("arrange", edit.doc.symbols().count());
-    let report = sch_floorplan::live::arrange(
+    let report = match sch_floorplan::live::arrange(
         ctx.env(),
         &mut edit.doc,
         &selection,
         input.intent.clone(),
         layout,
-    )?;
+    ) {
+        Ok(report) => report,
+        Err(sch_floorplan::live::Error::BodyOverlap(overlaps)) => {
+            timing.done("refused");
+            return Ok(overlap_refusal(&overlaps, &warnings));
+        }
+        Err(error) => return Err(error.into()),
+    };
     timing.done(if report.committed {
         "committed"
     } else {

@@ -86,6 +86,48 @@ pub enum Error {
     EmptySelection,
     #[error("invalid payload")]
     InvalidPayload(Box<PayloadAudit>),
+    #[error("{0}")]
+    BodyOverlap(Overlaps),
+}
+
+/// Symbol bodies an edit would have left drawn on top of each other.
+///
+/// A symbol on a symbol is never a legal partial state: its pins, its fields and its
+/// wires all land inside a body that is not its own, and no later call can tell the two
+/// apart. So it is refused the way a netlist mismatch is — the document is restored and
+/// the caller is told which parts collided and what to do instead.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Overlaps(pub Vec<[String; 2]>);
+
+impl std::fmt::Display for Overlaps {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let pairs: Vec<String> = self.0.iter().map(|[a, b]| format!("{a} on {b}")).collect();
+        write!(
+            f,
+            "the layout would draw {} on top of another symbol ({}); nothing was changed. \
+             Arrange the whole block so the typesetter can seat it clear \
+             (`arrange({{\"block\": \"…\"}})` with the block's layout tree), or place fewer \
+             parts at a time so the block has room",
+            match self.0.len() {
+                1 => "a symbol".to_string(),
+                n => format!("{n} symbols"),
+            },
+            pairs.join(", ")
+        )
+    }
+}
+
+/// The overlapping body pairs `doc` has that `before` did not.
+///
+/// Only pairs the edit CREATED are its fault: a sheet that already carries an overlap
+/// must still be repairable, and refusing every edit until it is gone would leave the
+/// caller with no move that works.
+fn overlaps_created(before: &[[String; 2]], doc: &SchDoc) -> Vec<[String; 2]> {
+    let before: BTreeSet<&[String; 2]> = before.iter().collect();
+    crate::visual::body_overlaps(doc)
+        .into_iter()
+        .filter(|pair| !before.contains(pair))
+        .collect()
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -237,6 +279,7 @@ fn place_parts_inner(
     // Every edit from here on is undone by this snapshot, the join included: a payload
     // the audit refuses must not leave a label behind for a net it never draws.
     let snapshot = doc.snapshot();
+    let overlaps_before = crate::visual::body_overlaps(doc);
     let promoted = promote_authored_nets(doc, input, &before);
     if !promoted.is_empty() {
         tracing::info!(?promoted, "named an earlier block's nets so this block can join them");
@@ -366,6 +409,13 @@ fn place_parts_inner(
     });
     mismatch.disturbed = disturbed(&before, &connect::extract(doc));
     let committed = mismatch.is_empty();
+    if committed {
+        let landed_on = overlaps_created(&overlaps_before, doc);
+        if !landed_on.is_empty() {
+            doc.restore(snapshot)?;
+            return Err(Error::BodyOverlap(Overlaps(landed_on)));
+        }
+    }
     match committed {
         true => record_authored_nets(doc, &placed),
         false => doc.restore(snapshot)?,
@@ -646,6 +696,7 @@ fn rearrange_inner(
         ir.trees.insert(block, tree);
     }
     let snapshot = doc.snapshot();
+    let overlaps_before = crate::visual::body_overlaps(doc);
     // Read before the erase: a net whose only labels belong to the selection would
     // otherwise have no scope on record by the time the redraw needs one.
     let was_global = global_label_nets(doc);
@@ -724,8 +775,14 @@ fn rearrange_inner(
         disturbed: disturbed(&before, &connect::extract(doc)),
         ..Default::default()
     });
+    // Both fallbacks below restore the snapshot, so they undo the PLACEMENT as well as
+    // the redraw: nothing the typesetter decided reaches the sheet. A report that still
+    // listed the parts as moved is how a caller comes to believe it has re-laid a block
+    // out call after call while the drawing never changes.
+    let mut laid_out = true;
     if !mismatch.is_empty() {
         doc.restore(snapshot)?;
+        laid_out = false;
         let fallback = label_selection_debits(doc, &before, &chosen);
         enforce_label_scopes(doc, &BTreeSet::new(), &was_global);
         mismatch = Mismatch {
@@ -734,7 +791,7 @@ fn rearrange_inner(
         };
         if mismatch.is_empty() {
             warnings.push(format!(
-                "wire redraw could not preserve the netlist cleanly; kept the original routes and added {} same-named pin labels",
+                "wire redraw could not preserve the netlist cleanly; NOTHING WAS MOVED — kept the original positions and routes and added {} same-named pin labels",
                 fallback
             ));
             redrawn = 0;
@@ -742,7 +799,7 @@ fn rearrange_inner(
         } else {
             doc.restore(snapshot)?;
             warnings.push(
-                "wire redraw and its label fallback could not improve the selection; left the original drawing unchanged"
+                "wire redraw and its label fallback could not improve the selection; nothing was moved and the original drawing stands"
                     .to_string(),
             );
             redrawn = 0;
@@ -750,8 +807,17 @@ fn rearrange_inner(
             mismatch = Mismatch::default();
         }
     }
+    let landed_on = overlaps_created(&overlaps_before, doc);
+    if !landed_on.is_empty() {
+        doc.restore(snapshot)?;
+        return Err(Error::BodyOverlap(Overlaps(landed_on)));
+    }
     Ok(ArrangeReport {
-        left_bench,
+        // The restore put every benched symbol back on the bench too.
+        left_bench: match laid_out {
+            true => left_bench,
+            false => Vec::new(),
+        },
         labelled,
         nets: before
             .nets
@@ -762,12 +828,15 @@ fn rearrange_inner(
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect(),
-        moved: placed
-            .iter()
-            .map(|it| it.refdes.clone())
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .collect(),
+        moved: match laid_out {
+            true => placed
+                .iter()
+                .map(|it| it.refdes.clone())
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect(),
+            false => Vec::new(),
+        },
         redrawn,
         warnings,
         mismatch,

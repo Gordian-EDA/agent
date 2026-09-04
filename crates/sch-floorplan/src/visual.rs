@@ -63,6 +63,15 @@ pub fn measure(doc: &SchDoc) -> VisualFacts {
     }
 }
 
+/// The pairs of PLACED symbol bodies that overlap on `doc`, each pair in refdes order.
+///
+/// A symbol drawn on top of another is never a legal sheet — its pins, its fields and
+/// its wires all land inside a body that is not its own — so every edit that moves a
+/// symbol is gated on this, exactly as it is gated on the netlist.
+pub fn body_overlaps(doc: &SchDoc) -> Vec<[String; 2]> {
+    body_overlap_pairs(&symbol_bodies(doc))
+}
+
 fn body_overlap_pairs(bodies: &BTreeMap<(String, u32), Rect>) -> Vec<[String; 2]> {
     let bodies: Vec<_> = bodies.iter().collect();
     let mut pairs = BTreeSet::new();

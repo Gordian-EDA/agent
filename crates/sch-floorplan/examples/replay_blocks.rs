@@ -148,12 +148,20 @@ fn report(
     // nothing to be scattered from, so a net dropped in the SEAM between two calls passes
     // every per-call gate and only shows up here.
     let mismatch = live::verify(doc, design);
+    // A symbol landed on another symbol is never a legal sheet: the seatings each see
+    // only what is already down, so this is the other seam defect the whole-sheet corpus
+    // cannot show.
+    let overlaps = sch_floorplan::visual::measure(doc).body_overlaps;
     print!(
         "{name}: blocks={blocks} symbols={symbols} page={page} labels={labels} wires={wires} \
-         scattered={} shorted={}",
+         scattered={} shorted={} body_overlaps={}",
         mismatch.scattered.len(),
-        mismatch.shorted.len()
+        mismatch.shorted.len(),
+        overlaps.len()
     );
+    if !overlaps.is_empty() {
+        print!(" overlapping={overlaps:?}");
+    }
     if !mismatch.scattered.is_empty() {
         let mut show = mismatch.scattered.clone();
         show.truncate(4);
