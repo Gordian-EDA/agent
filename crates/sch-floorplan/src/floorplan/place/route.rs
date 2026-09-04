@@ -509,8 +509,7 @@ pub(crate) fn route_signal(
             // the too-long MST hop already does, and as the sibling SDA pin already gets. The local
             // op-amp feedback case (pins a few mm apart) is well under the length, so it still forces
             // its clean loop.
-            if (pts[0][0] - pts[k][0]).abs() + (pts[0][1] - pts[k][1]).abs() > label_policy.len_mm
-            {
+            if (pts[0][0] - pts[k][0]).abs() + (pts[0][1] - pts[k][1]).abs() > label_policy.len_mm {
                 continue;
             }
             let (pa, da) = (pts[0], terms[0].1);
@@ -828,7 +827,9 @@ pub(crate) fn route_trunk(
             .into_iter()
             .filter_map(move |line| plan_trunk(terms, horizontal, line, net, scene))
     };
-    let best = plan(true).chain(plan(false)).min_by(|a, b| a.0.total_cmp(&b.0));
+    let best = plan(true)
+        .chain(plan(false))
+        .min_by(|a, b| a.0.total_cmp(&b.0));
     let Some((_, paths, feet, horizontal, line)) = best else {
         return false;
     };
@@ -873,9 +874,7 @@ fn trunk_lines(terms: &[([f64; 2], Option<Dir>)], horizontal: bool) -> Vec<f64> 
                 };
                 out.extend([2.0, 4.0, 6.0, 8.0].map(|k| grid.snap(p[axis] + step * k * 1.27)));
             }
-            _ => out.extend(
-                [-6.0, -4.0, 4.0, 6.0].map(|k| grid.snap(p[axis] + k * 1.27)),
-            ),
+            _ => out.extend([-6.0, -4.0, 4.0, 6.0].map(|k| grid.snap(p[axis] + k * 1.27))),
         }
     }
     out.sort_by(f64::total_cmp);
@@ -963,8 +962,7 @@ fn plan_trunk(
         .iter()
         .map(|path| sch_model::route::path_crossings(path, net, scene))
         .sum();
-    let cost =
-        length + CROSSING * crossings as f64 + EXTRA_WIRE * paths.len() as f64;
+    let cost = length + CROSSING * crossings as f64 + EXTRA_WIRE * paths.len() as f64;
     Some((cost, paths, feet, horizontal, line))
 }
 
@@ -1633,7 +1631,7 @@ pub(crate) fn emit_rail(
     used_lanes: &mut Vec<(f64, f64, f64, String)>,
 ) -> io::Result<()> {
     let Some(rail_y) = rail_y.filter(|_| eps.len() >= 3) else {
-        return emit_local_power(env, w, net, eps, flag, power_keepouts);
+        return emit_local_power(env, w, net, eps, flag, power_keepouts, foreign_pins);
     };
     // A rail's whole geometry — every riser column, the trunk and its span — follows from
     // the row it sits on, so the row is what is searched: the assigned row first, then
@@ -1666,7 +1664,7 @@ pub(crate) fn emit_rail(
             clear.then_some((y, attaches, span))
         })
     else {
-        return emit_local_power(env, w, net, eps, flag, power_keepouts);
+        return emit_local_power(env, w, net, eps, flag, power_keepouts, foreign_pins);
     };
     // The trunk and its risers are drawn literally, with no router and no length
     // policy of their own, so a rail whose pins are spread across the sheet becomes
@@ -1682,7 +1680,7 @@ pub(crate) fn emit_rail(
         .chain(std::iter::once(span_hi - span_lo))
         .fold(0.0, f64::max);
     if longest > RAIL_SEGMENT_MAX {
-        return emit_local_power(env, w, net, eps, flag, power_keepouts);
+        return emit_local_power(env, w, net, eps, flag, power_keepouts, foreign_pins);
     }
     for (ep, &ax) in eps.iter().map(|(p, _)| p).zip(&attaches) {
         used_lanes.push((ax, ep[1].min(rail_y), ep[1].max(rail_y), net.to_string()));
@@ -1833,8 +1831,20 @@ fn emit_local_power(
     eps: &[([f64; 2], Dir)],
     flag: Option<&mut BTreeMap<String, ([f64; 2], f64)>>,
     power_keepouts: &[Rect],
+    foreign_pins: &[([f64; 2], String)],
 ) -> io::Result<()> {
     let lib = power_lib_id(net);
+    let foreign_segs: Vec<(geom::Point2, geom::Point2)> = w
+        .wires_with_nets()
+        .into_iter()
+        .filter_map(|s| (s.net.as_deref() != Some(net)).then_some((s.segment.a, s.segment.b)))
+        .chain(
+            w.beside_wires()
+                .into_iter()
+                .filter(|(_, n)| n != net)
+                .map(|(s, _)| (s.a, s.b)),
+        )
+        .collect();
     // One power symbol per pin — but MERGE a pin into a nearby, COLLINEAR
     // already-placed symbol (≤2 grid, same x or y) via a short connecting wire
     // instead of stamping a second symbol. Two adjacent same-net pins (e.g. the
@@ -1872,12 +1882,18 @@ fn emit_local_power(
             w.add_junction_on_net(near, net);
             continue;
         }
-        // A GND symbol on an E/W pin points SIDEWAYS (angle 90/270), reading as a dangling port.
-        // Re-orient it to point DOWN (angle 0 — the conventional GND triangle) IN PLACE: a pure
-        // angle change adds no wire, so the measured crossing geometry the SA scores on is
-        // unchanged and the placement is not perturbed. The triangle's connection point stays at
-        // the pin tip, so connectivity is identical.
-        let angle = choose_power_angle(net, *dir, *ep, power_keepouts);
+        // Conventional sheets NEVER rotate a supply glyph: the rail arrow points up, the
+        // ground triangle down. A side (E/W) pin therefore leads out one grid and turns
+        // vertically to an upright glyph; only when that elbow is blocked do we fall back
+        // to rotating the glyph in place at the pin tip.
+        let upright =
+            upright_power_elbow(net, *ep, *dir, power_keepouts, foreign_pins, &foreign_segs);
+        let angle = if upright.is_some() {
+            0.0
+        } else {
+            choose_power_angle(net, *dir, *ep, power_keepouts)
+        };
+        let at = upright.map_or(*ep, |(_, sym)| sym);
         if let Some((flag_idx, symbol_idx)) = split_flag
             && k == symbol_idx
         {
@@ -1888,8 +1904,12 @@ fn emit_local_power(
             rail_taps.push(flag_ep);
             first_flag.get_or_insert((flag_ep, flag_angle(power_glyph_dir(net, angle))));
         }
-        w.add_power_symbol(env, &lib, &format!("#PWR_{net}_{idx}"), net, *ep, angle)?;
-        first_flag.get_or_insert((*ep, flag_angle(power_glyph_dir(net, angle))));
+        if let Some((corner, sym)) = upright {
+            w.add_wire_on_net(*ep, corner, net);
+            w.add_wire_on_net(corner, sym, net);
+        }
+        w.add_power_symbol(env, &lib, &format!("#PWR_{net}_{idx}"), net, at, angle)?;
+        first_flag.get_or_insert((at, flag_angle(power_glyph_dir(net, angle))));
         rail_taps.push(*ep);
         idx += 1;
     }
@@ -1902,6 +1922,77 @@ fn emit_local_power(
         flag_points.entry(net.to_string()).or_insert((ep, angle));
     }
     Ok(())
+}
+
+/// The elbow that lets a side (E/W) pin reach an UPRIGHT power glyph: `(corner, symbol)`.
+///
+/// The pin leads out one grid horizontally, then turns to a glyph at angle 0 — arrow up
+/// for a rail, triangle down for a ground — which is the only orientation conventional
+/// sheets use. `None` when the pin does not face sideways, or when the elbow or the glyph
+/// it lands on would cross a symbol body or weld onto a foreign pin; the caller then keeps
+/// the rotated in-place glyph.
+fn upright_power_elbow(
+    net: &str,
+    ep: [f64; 2],
+    dir: Dir,
+    keepouts: &[Rect],
+    foreign_pins: &[([f64; 2], String)],
+    foreign_segs: &[(geom::Point2, geom::Point2)],
+) -> Option<([f64; 2], [f64; 2])> {
+    const LEAD: f64 = 2.54;
+    let lead = match dir {
+        Dir::East => LEAD,
+        Dir::West => -LEAD,
+        _ => return None,
+    };
+    let rise = if is_ground(net) { LEAD } else { -LEAD };
+    let corner = [ep[0] + lead, ep[1]];
+    let sym = [corner[0], corner[1] + rise];
+    let run = Rect::new(
+        ep[0].min(corner[0]),
+        ep[1] - EPS,
+        ep[0].max(corner[0]),
+        ep[1] + EPS,
+    );
+    let riser = Rect::new(
+        sym[0] - EPS,
+        corner[1].min(sym[1]),
+        sym[0] + EPS,
+        corner[1].max(sym[1]),
+    );
+    let glyph = power_glyph_box(net, sym, 0.0);
+    let blocked = |r: &Rect| {
+        keepouts.iter().any(|b| {
+            r.intersection(b)
+                .is_some_and(|i| i.width() > EPS && i.height() > EPS)
+        })
+    };
+    if blocked(&run) || blocked(&riser) || blocked(&glyph) {
+        return None;
+    }
+    let welds = |p: [f64; 2]| {
+        foreign_pins.iter().any(|(q, pin_net)| {
+            pin_net != net && (q[0] - p[0]).abs() < EPS && (q[1] - p[1]).abs() < EPS
+        })
+    };
+    if welds(corner) || welds(sym) {
+        return None;
+    }
+    // Any contact at all with another net's wire — a crossing included — is refused: a
+    // stub is cheap, a merged rail is a short.
+    let hits = |r: &Rect| {
+        foreign_segs.iter().any(|(a, b)| {
+            let seg = Rect::new(a.x.min(b.x), a.y.min(b.y), a.x.max(b.x), a.y.max(b.y));
+            r.min_x <= seg.max_x + EPS
+                && seg.min_x <= r.max_x + EPS
+                && r.min_y <= seg.max_y + EPS
+                && seg.min_y <= r.max_y + EPS
+        })
+    };
+    if hits(&run) || hits(&riser) || hits(&glyph) {
+        return None;
+    }
+    Some((corner, sym))
 }
 
 /// Angle for a non-ground per-pin power symbol given the pin's outward direction.
@@ -2024,7 +2115,6 @@ mod tests {
             "+3V3",
             [105.41, 2.54].into(),
             [105.41, 24.13].into(),
-            
         );
         emit_routed_segment(
             &mut writer,
@@ -2032,7 +2122,6 @@ mod tests {
             "+3V3",
             [105.41, 24.13].into(),
             [105.41, 21.59].into(),
-            
         );
 
         assert_eq!(writer.wires_with_nets().len(), 1);
@@ -2053,7 +2142,6 @@ mod tests {
             "5V_FUSED",
             [105.41, 21.59].into(),
             [105.41, 24.13].into(),
-            
         );
         emit_routed_segment(
             &mut writer,
@@ -2061,7 +2149,6 @@ mod tests {
             "5V_FUSED",
             [105.41, 24.13].into(),
             [105.41, 2.54].into(),
-            
         );
 
         assert_eq!(writer.wires_with_nets().len(), 2);
@@ -2096,7 +2183,6 @@ mod tests {
             "SIG",
             [12.7, 10.16].into(),
             [17.78, 10.16].into(),
-            
         );
 
         assert!(writer.wires_with_nets().is_empty());
@@ -2228,7 +2314,7 @@ mod tests {
         ];
         let mut w = SchematicWriter::new();
         let mut flags = BTreeMap::new();
-        emit_local_power(&env, &mut w, "3V3", &eps, Some(&mut flags), &[]).unwrap();
+        emit_local_power(&env, &mut w, "3V3", &eps, Some(&mut flags), &[], &[]).unwrap();
 
         let pairs: BTreeSet<_> = w
             .wires_with_nets()
