@@ -328,3 +328,6 @@ re-place." Quality first; time later via parallel subagents; schematic too.
   budgets/relations/idioms/tidy deleted (−17k lines); found+fixed a silent-open (off-lattice block
   origins). Not ported yet: shape-based route acceptance; sheet balance/page fill is the critic's
   top remaining defect. BluePill sample run started for the user.
+- Sprint lanes running: text-box-model, route-shape-pagefill (shape acceptance
+  `(len−manhattan)+6·bends+20·crossings ≤ 8.5|30.5`, trunk lines; page fill/sheet balance),
+  dataset-discipline (strict mode: no gaps when the request fixes the part list; `netlist_fidelity`).
