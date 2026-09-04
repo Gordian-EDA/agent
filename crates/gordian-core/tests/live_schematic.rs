@@ -36,7 +36,10 @@ async fn the_loop_reads_swaps_and_checks_a_live_schematic() {
             json!({"ref": "R1", "lib_id": "Device:R_Small"}),
         ),
         tool_call("t4", "check_schematic", json!({})),
+        // The loop asks a part-creating turn to check its part list against the
+        // request before its summary stands, so "done" is said twice.
         final_text("done"),
+        final_text("done: R1 and R2 are on the sheet"),
     ];
     let mut agent = Agent::new(ScriptedClient::new(script), ctx, system_prompt());
     let outcome = agent
@@ -84,6 +87,7 @@ async fn moving_a_symbol_preserves_connectivity() {
         ),
         tool_call("t3", "check_schematic", json!({})),
         final_text("done"),
+        final_text("done: R1 and R2 are on the sheet"),
     ];
     let mut agent = Agent::new(ScriptedClient::new(script), ctx, system_prompt());
     agent.run_turn("move R2 away", None).await.unwrap();

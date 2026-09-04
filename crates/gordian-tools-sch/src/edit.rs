@@ -3,6 +3,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::Result;
+use fuzzy_matcher::FuzzyMatcher;
+use fuzzy_matcher::skim::SkimMatcherV2;
 use geom::{EPS, Point2, Rect, Segment};
 use gordian_runtime::AgentRuntime;
 use sch_doc::{LabelKind, Pose, SchDoc, body_rect, placed_pins};
@@ -861,28 +863,85 @@ fn removed_items(before: &SchDoc, after: &SchDoc) -> RemovedItems {
     removed
 }
 
-fn symbol_targets(doc: &SchDoc, targets: &[String]) -> (Vec<String>, Vec<String>) {
-    let mut uuids = Vec::new();
-    let mut missing = Vec::new();
+/// What a caller's list of symbol names resolved to.
+struct SymbolTargets {
+    uuids: Vec<String>,
+    missing: Vec<String>,
+    /// Names read as a symbol other than what was written, reported so a caller sees
+    /// which part it actually named.
+    read_as: BTreeMap<String, String>,
+}
+
+/// Resolve caller-named symbols to uuids.
+///
+/// `"#PWR_GND_1.1"` is the PIN address every other tool result prints, and the model
+/// reads one back and hands it here. It is read as its symbol only when the suffix is
+/// really one of that symbol's pins — so `U1.VDD` names `U1` and a genuinely unknown
+/// `U1.9` stays missing rather than deleting the part.
+fn symbol_targets(doc: &SchDoc, targets: &[String]) -> SymbolTargets {
+    let mut found = SymbolTargets {
+        uuids: Vec::new(),
+        missing: Vec::new(),
+        read_as: BTreeMap::new(),
+    };
     for target in targets {
         if let Some(symbol) = doc.symbol(target) {
-            uuids.push(symbol.uuid.clone());
+            found.uuids.push(symbol.uuid.clone());
             continue;
+        }
+        let mut named = target.as_str();
+        if !doc.symbols().any(|symbol| symbol.refdes() == named)
+            && let Ok(pin) = refs::pin(doc, target)
+        {
+            found.read_as.insert(target.clone(), pin.refdes.clone());
+            named = &target[..target.len() - pin.number.len() - 1];
         }
         let matched = doc
             .symbols()
-            .filter(|symbol| symbol.refdes() == target)
+            .filter(|symbol| symbol.refdes() == named)
             .map(|symbol| symbol.uuid.clone())
             .collect::<Vec<_>>();
         if matched.is_empty() {
-            missing.push(target.clone());
+            found.read_as.remove(target);
+            found.missing.push(target.clone());
         } else {
-            uuids.extend(matched);
+            found.uuids.extend(matched);
         }
     }
-    uuids.sort();
-    uuids.dedup();
-    (uuids, missing)
+    found.uuids.sort();
+    found.uuids.dedup();
+    found
+}
+
+/// The designators on the sheet closest to each name it does not carry, so a
+/// refusal points somewhere instead of only saying no.
+fn closest_refs(doc: &SchDoc, missing: &[String]) -> BTreeMap<String, Vec<String>> {
+    let matcher = SkimMatcherV2::default().ignore_case();
+    let on_sheet: Vec<&str> = doc
+        .symbols()
+        .map(sch_doc::SymbolInst::refdes)
+        .filter(|refdes| !refdes.starts_with('#'))
+        .collect();
+    missing
+        .iter()
+        .filter_map(|name| {
+            let mut ranked: Vec<(i64, &str)> = on_sheet
+                .iter()
+                .filter_map(|candidate| {
+                    let score = matcher
+                        .fuzzy_match(candidate, name)
+                        .into_iter()
+                        .chain(matcher.fuzzy_match(name, candidate))
+                        .max()?;
+                    Some((score, *candidate))
+                })
+                .collect();
+            ranked.sort_by(|left, right| right.0.cmp(&left.0).then_with(|| left.1.cmp(right.1)));
+            ranked.truncate(3);
+            let near: Vec<String> = ranked.into_iter().map(|(_, r)| r.to_string()).collect();
+            (!near.is_empty()).then(|| (name.clone(), near))
+        })
+        .collect()
 }
 
 fn welded_flags(doc: &SchDoc, pins: &[Point2], removed_owners: &[String]) -> Vec<String> {
@@ -981,11 +1040,16 @@ pub fn remove_symbols(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     }
     let mut edit = Edit::open(ctx)?;
     let original = edit.doc.clone();
-    let (mut uuids, missing) = symbol_targets(&edit.doc, &targets);
+    let SymbolTargets {
+        mut uuids,
+        missing,
+        read_as,
+    } = symbol_targets(&edit.doc, &targets);
     if uuids.is_empty() {
         return Ok(json!({
             "error": format!("not on the sheet: {}", missing.join(", ")),
             "missing": missing,
+            "did_you_mean": closest_refs(&edit.doc, &missing),
         }));
     }
 
@@ -1051,6 +1115,7 @@ pub fn remove_symbols(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             },
             "now_loose": loose,
             "missing": missing,
+            "read_as": read_as,
         }),
         allow,
     )

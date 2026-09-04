@@ -54,7 +54,13 @@ pub(crate) fn target(doc: &SchDoc, value: &Value) -> Result<Target, String> {
 }
 
 /// Resolve a `"<ref>.<pin number or name>"` pin reference.
+///
+/// A leading [`NET_OF_PIN`] is accepted and ignored. Tool results spell a pin's net
+/// as `@R1.2`, so the model reads that form back and writes it wherever a pin goes;
+/// as an ENDPOINT the net and the pin are the same place, and refusing it only cost
+/// a request.
 pub(crate) fn pin(doc: &SchDoc, spec: &str) -> Result<PlacedPin, String> {
+    let spec = spec.strip_prefix(NET_OF_PIN).unwrap_or(spec);
     let (refdes, key) = spec
         .rsplit_once('.')
         .ok_or_else(|| format!("`{spec}` is not a pin reference; write it as \"U1.VDD\""))?;
@@ -95,6 +101,7 @@ pub(crate) fn pin_suggestions(
     spec: &str,
     symbol_dir: std::path::PathBuf,
 ) -> Vec<String> {
+    let spec = spec.strip_prefix(NET_OF_PIN).unwrap_or(spec);
     let Some((refdes, key)) = spec.rsplit_once('.') else {
         return Vec::new();
     };

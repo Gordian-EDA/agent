@@ -362,7 +362,11 @@ pub fn into_design(
         name: input.name.clone(),
         ..Design::default()
     };
-    let default_block = input.block.as_deref().unwrap_or(DEFAULT_BLOCK);
+    let default_block = input.block.as_deref().unwrap_or(DEFAULT_BLOCK).to_string();
+    for diag in adopt_layout_regions(&mut input, &default_block) {
+        diags.push(diag);
+    }
+    let default_block = default_block.as_str();
     // A part nothing can resolve leaves before lowering, so the `decouple` caps it
     // would have grown never appear and the placement never has to draw it.
     let (dropped, unplaced) = unresolvable(&input, provider);
@@ -895,9 +899,75 @@ fn expand_decouple(
     }
 }
 
-/// JSON Schema for the tool's `input_schema`. Deliberately terse: the LLM needs
-/// the shape and the rules that are not obvious (`"nc"`, that a pin key may be a
-/// name or a number, and that anything left out is a no-connect).
+/// A declared part named in another region's layout tree joins THAT region.
+///
+/// The tree is where the author states the drawing, and it is composed after each
+/// part's `block` was chosen, so when the two disagree the tree is the later and more
+/// considered statement of where the part belongs. Refusing over the disagreement cost
+/// a whole block per call; the tree wins, and the move is reported so the next payload
+/// says it once.
+///
+/// A part named by two regions is a genuine contradiction and stays where it was.
+///
+/// Only a region some part already declares can adopt. A `layout` key matching no
+/// declared block is a payload that named its one region twice — `block: "power_entry"`
+/// against `layout.power` — and moving every part to the layout's spelling would
+/// silently rename the region, dropping its `blocks` title and the name the caller
+/// will `arrange` and `remove_region` by.
+fn adopt_layout_regions(input: &mut PlacePartsInput, default_block: &str) -> Vec<Diagnostic> {
+    let declared: BTreeSet<BlockName> = input
+        .parts
+        .iter()
+        .map(|part| {
+            part.block
+                .clone()
+                .unwrap_or_else(|| default_block.to_string())
+        })
+        .collect();
+    let mut claims: BTreeMap<RefDes, Vec<BlockName>> = BTreeMap::new();
+    for (region, tree) in input.layout.iter().filter(|(r, _)| declared.contains(*r)) {
+        for (refdes, _unit) in tree.keys() {
+            let regions = claims.entry(refdes).or_default();
+            if !regions.contains(region) {
+                regions.push(region.clone());
+            }
+        }
+    }
+    let mut out = Vec::new();
+    for part in &mut input.parts {
+        let Some(refdes) = part.refdes.clone() else {
+            continue;
+        };
+        let Some(regions) = claims.get(&refdes) else {
+            continue;
+        };
+        let held = part.block.as_deref().unwrap_or(default_block);
+        match regions.as_slice() {
+            [region] if region != held => {
+                out.push(Diagnostic::warning(
+                    "layout-adopted-part",
+                    format!(
+                        "`{refdes}` was declared in region `{held}` but `layout.{region}` places \
+                         it; drawn in `{region}`. Give the part `block: \"{region}\"` to say so \
+                         directly."
+                    ),
+                ));
+                part.block = Some(region.clone());
+            }
+            [first, rest @ ..] if !rest.is_empty() => out.push(Diagnostic::error(
+                "layout-contested-part",
+                format!(
+                    "`{refdes}` is placed by the layout of regions `{first}` and `{}`; every part \
+                     is drawn in exactly one region",
+                    rest.join("`, `")
+                ),
+            )),
+            _ => {}
+        }
+    }
+    out
+}
+
 /// What is wrong with a region's layout tree: a leaf naming a part that is not in the
 /// region, or the same part placed twice. Both would silently lose a part off the drawing,
 /// so they refuse the payload rather than surprise the author.
@@ -941,7 +1011,9 @@ fn tree_faults(
             );
             out.push(Diagnostic::error(
                 "layout-unknown-part",
-                format!("`layout.{name}` places `{refdes}`, which is not a part of that region{hint}"),
+                format!(
+                    "`layout.{name}` places `{refdes}`, which is not a part of that region{hint}"
+                ),
             ));
         } else if !seen.insert((refdes.clone(), unit)) {
             out.push(Diagnostic::error(
@@ -1010,6 +1082,9 @@ fn layout_tree_schema() -> Value {
     })
 }
 
+/// JSON Schema for the tool's `input_schema`. Deliberately terse: the LLM needs
+/// the shape and the rules that are not obvious (`"nc"`, that a pin key may be a
+/// name or a number, and that anything left out is a no-connect).
 pub fn place_parts_input_schema() -> Value {
     json!({
         "type": "object",

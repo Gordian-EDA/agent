@@ -125,6 +125,9 @@ pub(crate) fn place_parts(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         payload = %serde_json::to_string(&payload).unwrap_or_default(),
         "place_parts"
     );
+    if payload.parts.is_empty() {
+        return Ok(with_warnings(empty_payload_refusal(&payload), &warnings));
+    }
     let mut edit = if ctx.sch_path().is_file() {
         Edit::open(ctx).context("opening the existing schematic")?
     } else {
@@ -184,6 +187,18 @@ pub(crate) fn place_parts(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         .filter(|diagnostic| diagnostic.severity == sch_check::Severity::Error)
         .map(|diagnostic| format!("{}: {}", diagnostic.code, diagnostic.message))
         .collect();
+    // Layout warnings say what the drawing did with a tree the payload got slightly
+    // wrong — a region adopted, a hint dropped. They only reach the author here.
+    warnings.extend(
+        diags
+            .0
+            .iter()
+            .filter(|diagnostic| diagnostic.severity == sch_check::Severity::Warning)
+            .filter(|diagnostic| {
+                diagnostic.code.starts_with("layout-") || diagnostic.code == "unknown-block"
+            })
+            .map(|diagnostic| format!("{}: {}", diagnostic.code, diagnostic.message)),
+    );
     if !audit.is_valid() || diags.has_errors() {
         return Ok(with_renamed(
             invalid_payload_response(audit, &warnings),
@@ -225,7 +240,7 @@ pub(crate) fn place_parts(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         }
         Err(sch_floorplan::live::Error::Nothing) => {
             return Ok(with_renamed(
-                nothing_placed_response(non_placeable_parts(&payload), &warnings),
+                nothing_placed_response(non_placeable_parts(&payload, &audit), &warnings),
                 &renamed,
             ));
         }
@@ -286,14 +301,17 @@ fn crowded_blocks(design: &sch_check::model::Design) -> Vec<String> {
         .iter()
         .filter(|(_, block)| block.components.len() > ROOMY)
         .map(|(name, block)| {
+            let mut members: Vec<&str> = block.components.keys().map(String::as_str).collect();
+            members.truncate(24);
             format!(
-                "block `{name}` holds {} parts, too many to read as one section: it will \
+                "block `{name}` holds {} parts ({}), too many to read as one section: it will \
                  draw as a field of parts joined by labels rather than a circuit. Sections \
                  of 3-{ROOMY} are power entry, regulator, MCU core, each interface, each \
                  repeated channel — one `place_parts` call each, with its own `block` name \
-                 and `layout` tree. To re-cut a block already on the sheet, \
-                 `remove_region({{block}})` and place its sections back.",
-                block.components.len()
+                 and `layout` tree. Re-cut it now: `remove_region({{\"block\": \"{name}\"}})`, \
+                 then place those parts back as two or more named sections.",
+                block.components.len(),
+                members.join(", ")
             )
         })
         .collect()
@@ -341,7 +359,9 @@ fn unrelated_neighbours(design: &sch_check::model::Design) -> Vec<String> {
 }
 
 /// Every adjacent pair of LEAVES within one row of the tree.
-fn row_neighbours(tree: &sch_model::tree::Tree) -> Vec<(&sch_model::tree::Leaf, &sch_model::tree::Leaf)> {
+fn row_neighbours(
+    tree: &sch_model::tree::Tree,
+) -> Vec<(&sch_model::tree::Leaf, &sch_model::tree::Leaf)> {
     use sch_model::tree::{Axis, Tree};
     let Tree::Container(container) = tree else {
         return Vec::new();
@@ -357,6 +377,36 @@ fn row_neighbours(tree: &sch_model::tree::Tree) -> Vec<(&sch_model::tree::Leaf, 
     pairs
 }
 
+/// `place_parts` with no `parts` at all.
+///
+/// It CREATES parts, so an empty list has nothing to do — and the way it arrives is
+/// a payload that carries only a `layout` for parts already on the sheet, which is
+/// what `arrange` is for. Saying "nothing could be placed" there named no part and
+/// no reason, because there was no part to name.
+fn empty_payload_refusal(payload: &sch_check::PlacePartsInput) -> Value {
+    let wanted: Vec<&str> = payload
+        .layout
+        .values()
+        .flat_map(sch_model::tree::Tree::leaves)
+        .map(|leaf| leaf.part.as_str())
+        .collect();
+    let clause = if wanted.is_empty() {
+        "This payload declares no parts and no layout.".to_string()
+    } else {
+        format!(
+            "This payload declares no parts, only a layout over {}. `place_parts` \
+             CREATES parts; to re-lay-out parts already on the sheet call \
+             `arrange({{refs|block, layout}})` instead.",
+            wanted.join(", ")
+        )
+    };
+    json!({
+        "ok": false,
+        "code": "no_parts",
+        "error": format!("{clause} `parts` must list at least one part to create."),
+    })
+}
+
 fn nothing_placed_response(unplaced: Value, warnings: &[String]) -> Value {
     with_warnings(
         json!({
@@ -370,20 +420,36 @@ fn nothing_placed_response(unplaced: Value, warnings: &[String]) -> Value {
     )
 }
 
-fn non_placeable_parts(payload: &sch_check::PlacePartsInput) -> Value {
+/// Every part of a payload the typesetter drew nothing from, with the reason the
+/// audit already knows where it has one.
+///
+/// The typesetter reports only that it produced nothing; a caller needs it per part,
+/// because the repair is per part.
+fn non_placeable_parts(
+    payload: &sch_check::PlacePartsInput,
+    audit: &sch_check::place_parts::PayloadAudit,
+) -> Value {
     Value::Array(
         payload
             .parts
             .iter()
             .map(|part| {
+                let refdes = part.refdes.clone().unwrap_or_else(|| part.part.clone());
+                let audited = audit
+                    .unplaced
+                    .iter()
+                    .find(|unplaced| unplaced.refdes == refdes);
                 json!({
-                    "ref": part.refdes.clone().unwrap_or_else(|| part.part.clone()),
+                    "ref": refdes,
                     "part": part.part,
-                    "reason": if part.part.starts_with("power:") || part.part.starts_with("label:") {
-                        "connectivity furniture is generated by wiring and cannot be placed as a part"
-                    } else {
-                        "no placeable symbol geometry was produced"
+                    "reason": match audited {
+                        Some(unplaced) => unplaced.reason.clone(),
+                        None if part.part.starts_with("power:") || part.part.starts_with("label:") =>
+                            "connectivity furniture is generated by wiring and cannot be placed as \
+                             a part: name the rail on a pin instead, or use add_power".to_string(),
+                        None => "no placeable symbol geometry was produced".to_string(),
                     },
+                    "did_you_mean": audited.map(|u| u.did_you_mean.clone()).unwrap_or_default(),
                 })
             })
             .collect(),
@@ -715,9 +781,93 @@ fn with_warnings(mut value: Value, warnings: &[String]) -> Value {
     value
 }
 
+/// Whether a layout node names something to draw.
+fn draws_something(node: &Value) -> bool {
+    ["part", "row", "col"]
+        .iter()
+        .any(|key| node.get(key).is_some_and(|value| !value.is_null()))
+}
+
+/// Rewrite the layout nodes the grammar does not have into ones it does.
+///
+/// Two near misses recur: a node carrying BOTH `row` and `col`, which reads as the row
+/// with what the `col` says stacked under it, and a bare `{gap: n}` sitting between
+/// siblings, which is spacing written as a child. Both have one honest reading, and
+/// refusing the payload over spelling costs a whole block; the rewrite is reported so
+/// the next call is written the way the grammar reads.
+fn normalize_layout_node(node: &mut Value, path: &str, warnings: &mut Vec<String>) {
+    let Some(object) = node.as_object_mut() else {
+        return;
+    };
+    split_row_and_col(object, path, warnings);
+    for axis in ["row", "col"] {
+        let Some(children) = object.get_mut(axis).and_then(Value::as_array_mut) else {
+            continue;
+        };
+        for (index, child) in children.iter_mut().enumerate() {
+            normalize_layout_node(child, &format!("{path}.{axis}[{index}]"), warnings);
+        }
+        let mut lifted_gap = None;
+        children.retain(|child| {
+            if draws_something(child) {
+                return true;
+            }
+            if lifted_gap.is_none() {
+                lifted_gap = child.get("gap").cloned();
+            }
+            warnings.push(format!(
+                "{path}: dropped a `{axis}` child that names no part, row or col ({child}); \
+                 spacing is the container's own `gap`, not a child"
+            ));
+            false
+        });
+        if let Some(gap) = lifted_gap
+            && !object.contains_key("gap")
+        {
+            object.insert("gap".into(), gap);
+        }
+    }
+}
+
+/// A node saying both `row` and `col` becomes a col of [that row, the col's entries].
+///
+/// The node's own spacing and alignment were written for the row it names, so they
+/// travel with it rather than governing the stacking that did not exist before.
+fn split_row_and_col(
+    object: &mut serde_json::Map<String, Value>,
+    path: &str,
+    warnings: &mut Vec<String>,
+) {
+    if !object.get("row").is_some_and(Value::is_array)
+        || !object.get("col").is_some_and(Value::is_array)
+    {
+        return;
+    }
+    let mut inner = serde_json::Map::new();
+    inner.insert("row".into(), object.remove("row").expect("just checked"));
+    for attribute in ["gap", "align", "wrap"] {
+        if let Some(value) = object.remove(attribute) {
+            inner.insert(attribute.into(), value);
+        }
+    }
+    let stacked = object.remove("col").expect("just checked");
+    let mut children = vec![Value::Object(inner)];
+    children.extend(stacked.as_array().cloned().expect("just checked"));
+    object.insert("col".into(), Value::Array(children));
+    warnings.push(format!(
+        "{path}: a node is one of `part`, `row` or `col`; this one said both, read as \
+         the row with the `col` entries stacked under it"
+    ));
+}
+
 /// Drop isolated layout-hint defects without weakening the electrical part schema.
 fn sanitize_place_parts_input(input: &mut Value) -> Vec<String> {
     let mut warnings = Vec::new();
+    if let Some(layout) = input.get_mut("layout").and_then(Value::as_object_mut) {
+        for (block, tree) in layout.iter_mut() {
+            normalize_layout_node(tree, &format!("layout.{block}"), &mut warnings);
+        }
+    }
     if let Some(parts) = input.get_mut("parts").and_then(Value::as_array_mut) {
         for (index, part) in parts.iter_mut().enumerate() {
             if part
@@ -834,6 +984,19 @@ fn guarded_place_parts(
 /// Re-typeset a selection: `sch_floorplan::live::arrange` places it, gated on the
 /// module's truthfulness invariant (see its module docs) before anything is kept.
 pub(crate) fn arrange(input: Value, ctx: &AgentRuntime) -> Result<Value> {
+    let mut input = input;
+    let mut warnings = Vec::new();
+    match input.get_mut("layout") {
+        Some(Value::Object(blocks))
+            if !blocks.contains_key("row") && !blocks.contains_key("col") =>
+        {
+            for (block, tree) in blocks.iter_mut() {
+                normalize_layout_node(tree, &format!("layout.{block}"), &mut warnings);
+            }
+        }
+        Some(tree) => normalize_layout_node(tree, "layout", &mut warnings),
+        None => {}
+    }
     let mut input: SelectionInput = typed(input, "arrange")?;
     let layout = input.layout.take().and_then(ArrangeLayout::tree);
     let mut selection = selection(&input)?;
@@ -858,7 +1021,10 @@ pub(crate) fn arrange(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     } else {
         "refused"
     });
-    Ok(selection_notes.finish(finish_arrangement(edit, report, ctx)?))
+    Ok(with_warnings(
+        selection_notes.finish(finish_arrangement(edit, report, ctx)?),
+        &warnings,
+    ))
 }
 
 #[derive(Default)]
@@ -1275,11 +1441,12 @@ impl Timing {
 mod block_size_tests {
     use sch_check::model::{Block, Component, Design};
 
-
     fn design_with(parts: usize) -> Design {
         let mut block = Block::default();
         for n in 0..parts {
-            block.components.insert(format!("R{n}"), Component::default());
+            block
+                .components
+                .insert(format!("R{n}"), Component::default());
         }
         let mut design = Design::default();
         design.blocks.insert("everything".into(), block);
@@ -1321,7 +1488,10 @@ mod block_size_tests {
         let said = super::crowded_blocks(&design_with(24));
         assert_eq!(said.len(), 1);
         assert!(said[0].contains("holds 24 parts"), "{said:?}");
-        assert!(said[0].contains("too many to read as one section"), "{said:?}");
+        assert!(
+            said[0].contains("too many to read as one section"),
+            "{said:?}"
+        );
         assert!(said[0].contains("remove_region"), "{said:?}");
     }
 }

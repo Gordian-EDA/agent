@@ -259,6 +259,21 @@ fn discovery_rounds_for_intent(intent: &str) -> usize {
     MAX_DISCOVERY_ROUNDS_PER_STATE + floor / 24
 }
 
+/// One chance, before a turn's final prose, to check what is DRAWN against what the
+/// request asked for.
+///
+/// Every other finish gate reads a tool's own report — clean ERC, no completeness
+/// gaps, the board's quality artifacts. None of them has ever seen the request, so a
+/// sheet that lost most of its parts to failed repairs passes all of them and the
+/// turn ends with a confident summary of six parts. Only the model can compare the
+/// two, and it does not unless it is asked.
+///
+/// It is asked only of a turn that CREATED parts — a focused edit names no part list
+/// to be short of — and, unlike the other nudges, it is NOT re-armed by later work in
+/// the turn. Asking again after every mutation the answer provokes is a loop, and the
+/// question is about the request, which does not change while the turn runs.
+const MAX_COVERAGE_NUDGES: usize = 1;
+
 /// One chance for a model that has not touched the requested PCB workflow to
 /// start it before final prose is rejected by the end-to-end quality gate.
 const MAX_PCB_COMPLETION_NUDGES: usize = 1;
@@ -926,6 +941,7 @@ impl<P: Provider> Agent<P> {
         let mut successful_place_parts = 0usize;
         let mut check_nudges_left = MAX_ERC_CLEANUP_NUDGES;
         let mut pcb_completion_nudges_left = MAX_PCB_COMPLETION_NUDGES;
+        let mut coverage_nudges_left = MAX_COVERAGE_NUDGES;
         let mut provider_requests = self.turn_requests;
         let mut provider_error_retries_left = MAX_PROVIDER_ERROR_RETRIES;
         let mut stream_transport_available = true;
@@ -1076,6 +1092,15 @@ impl<P: Provider> Agent<P> {
                             .push(ChatMessage::user(pcb_completion_nudge(&missing)));
                         continue;
                     }
+                }
+                if successful_place_parts > 0 && coverage_nudges_left > 0 {
+                    coverage_nudges_left -= 1;
+                    let drawn = drawn_parts(self.ctx());
+                    self.history.push(ChatMessage::user(coverage_nudge(
+                        &drawn,
+                        explicit_minimum_physical_components(authoritative_intent),
+                    )));
+                    continue;
                 }
                 return Ok(TurnOutcome {
                     applied,
@@ -1926,6 +1951,50 @@ fn explicit_minimum_physical_components(intent: &str) -> Option<usize> {
 
 const OUTPUT_TRUNCATION_NUDGE: &str = "Your previous response hit the output-token limit before completing a usable tool call. Retry now with exactly one compact tool call and no prose. For a new schematic or multi-part block, use one place_parts call.";
 
+/// The designators the sheet actually carries: power furniture aside, and the bench
+/// aside — a benched part is wired by name but not drawn, which is the exact claim
+/// this list exists to keep the model from making.
+fn drawn_parts(ctx: &AgentRuntime) -> Vec<String> {
+    let Ok(doc) = sch_doc::SchDoc::read(ctx.sch_path()) else {
+        return Vec::new();
+    };
+    let mut refs: Vec<String> = doc
+        .symbols()
+        .filter(|symbol| !sch_floorplan::bench::is_benched(symbol))
+        .map(|symbol| symbol.refdes().to_owned())
+        .filter(|refdes| !refdes.is_empty() && !refdes.starts_with('#'))
+        .collect();
+    refs.sort();
+    refs.dedup();
+    refs
+}
+
+fn coverage_nudge(drawn: &[String], floor: Option<usize>) -> String {
+    let short = floor.filter(|required| *required > drawn.len()).map_or_else(
+        String::new,
+        |required| {
+            format!(
+                " The request states a floor of {required} parts and the sheet has {}, so something it named is missing.",
+                drawn.len()
+            )
+        },
+    );
+    format!(
+        "Before you finish: the sheet carries these {} parts — {}.{short} Go back over the \
+         request and list every part it named, block by block. For each one either \
+         point at the designator above that is it, or place it now with place_parts \
+         and connect it. Only then write your summary, saying which requested parts \
+         are on the sheet and which you deliberately left out and why. Do not claim \
+         work the part list above does not show.",
+        drawn.len(),
+        if drawn.is_empty() {
+            "none".to_string()
+        } else {
+            drawn.join(", ")
+        }
+    )
+}
+
 fn pcb_completion_nudge(missing: &[&str]) -> String {
     format!(
         "The requested PCB workflow is not complete. Missing authoritative quality gates: {}. Continue with the actual board tools now; final prose cannot substitute for these artifacts.",
@@ -2774,6 +2843,63 @@ mod tests {
             outcome.final_text
         );
         assert!(!outcome.final_text.contains("Partial state"));
+    }
+
+    /// A turn that drew a sheet may not end on its first "done": nothing else in
+    /// the loop has seen the request, so the model is asked to check the drawn part
+    /// list against it before its summary stands.
+    #[tokio::test]
+    async fn a_finished_schematic_turn_is_asked_what_the_request_named() {
+        let Some(ctx) = AgentRuntime::detect_for_test() else {
+            eprintln!("SKIP: no KiCAD detected");
+            return;
+        };
+        let script = vec![
+            crate::testing::tool_call(
+                "place",
+                "place_parts",
+                json!({"parts": [
+                    {"ref": "R1", "part": "Device:R", "pins": {"1": "IN", "2": "MID"}},
+                    {"ref": "R2", "part": "Device:R", "pins": {"1": "MID", "2": "GND"}}
+                ]}),
+            ),
+            crate::testing::final_text("Done: the divider is drawn."),
+            crate::testing::final_text("Done: the divider is drawn."),
+            crate::testing::final_text("Done: the divider is drawn."),
+            crate::testing::final_text("R1 and R2 are on the sheet; nothing else was asked for."),
+        ];
+        let (client, seen) = ScriptedClient::recording(script);
+        let mut agent = Agent::new(client, ctx, system_prompt());
+
+        let outcome = agent
+            .run_turn("Draw a two-resistor divider.", None)
+            .await
+            .unwrap();
+
+        assert_eq!(outcome.stop_reason, StopReason::Completed);
+        let asked = seen
+            .lock()
+            .unwrap()
+            .iter()
+            .flatten()
+            .flat_map(|message| {
+                message
+                    .content
+                    .texts()
+                    .into_iter()
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            asked.contains("list every part it named"),
+            "the coverage check never ran: {asked}"
+        );
+        assert!(
+            asked.contains("R1, R2"),
+            "the nudge did not show the parts drawn: {asked}"
+        );
     }
 
     #[test]

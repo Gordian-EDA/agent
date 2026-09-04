@@ -697,6 +697,19 @@ pub fn get_net(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         return Ok(json!({ "error": "get_net needs `name`" }));
     };
     let (doc, netlist) = Edit::read(ctx)?;
+    // Every tool result prints a pin as `R8.2` and its net as `@R8.2`, so the model
+    // asks for the net by the pin it read. That is a question this can answer.
+    if netlist.nets.iter().all(|net| net.name != name)
+        && let Ok(pin) = crate::refs::pin(&doc, name)
+        && let Some(found) = crate::refs::net_of(&netlist, &pin.refdes, &pin.number)
+    {
+        let found = found.to_string();
+        return Ok(json!({
+            "resolved_from": name,
+            "name": found,
+            "report": get_net(json!({"name": found}), ctx)?,
+        }));
+    }
     let power_only = || {
         let pins = placed_pins(&doc)
             .into_iter()

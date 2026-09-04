@@ -281,3 +281,253 @@ fn place_parts_contract_advertises_repairable_inputs() {
         json!(["left", "right", "top", "bottom"])
     );
 }
+
+/// A payload with an empty `parts` list used to answer "nothing could be placed",
+/// naming no part and no reason because there was none to name.
+#[test]
+fn a_layout_only_payload_says_place_parts_creates_parts() {
+    let Some(ctx) = sheet() else {
+        eprintln!("SKIP: KiCad 10 not configured");
+        return;
+    };
+    let result = call(
+        &ctx,
+        "place_parts",
+        json!({
+            "parts": [],
+            "block": "cleanup",
+            "layout": {"cleanup": {"row": [{"part": "J1"}, {"part": "C1"}]}}
+        }),
+    );
+    assert_eq!(result["code"], "no_parts", "{result:#}");
+    let error = result["error"].as_str().unwrap();
+    assert!(error.contains("J1") && error.contains("C1"), "{error}");
+    assert!(error.contains("arrange"), "{error}");
+}
+
+/// A layout node saying both `row` and `col`, and a bare `{gap}` between siblings,
+/// are the two near misses the model keeps writing; both have one honest reading.
+#[test]
+fn near_miss_layout_nodes_are_rewritten_rather_than_refused() {
+    let Some(ctx) = sheet() else {
+        eprintln!("SKIP: KiCad 10 not configured");
+        return;
+    };
+    let result = call(
+        &ctx,
+        "place_parts",
+        json!({
+            "parts": [
+                {"ref": "R1", "part": "Device:R", "pins": {"1": "IN", "2": "MID"}},
+                {"ref": "R2", "part": "Device:R", "pins": {"1": "MID", "2": "OUT"}},
+                {"ref": "C1", "part": "Device:C", "pins": {"1": "MID", "2": "GND"}}
+            ],
+            "block": "divider",
+            "layout": {"divider": {
+                "row": [{"part": "R1"}, {"gap": 6}, {"part": "R2"}],
+                "col": [{"part": "C1"}]
+            }}
+        }),
+    );
+    assert!(result.get("error").is_none(), "{result:#}");
+    let warnings = result["warnings"].as_array().expect("{result:#}").clone();
+    let text = warnings
+        .iter()
+        .filter_map(Value::as_str)
+        .collect::<Vec<_>>()
+        .join(" | ");
+    assert!(text.contains("said both"), "{text}");
+    assert!(text.contains("names no part, row or col"), "{text}");
+    let doc = sch_doc::SchDoc::read(ctx.sch_path()).unwrap();
+    for refdes in ["R1", "R2", "C1"] {
+        assert!(
+            doc.symbols().any(|symbol| symbol.refdes() == refdes),
+            "`{refdes}` was not drawn"
+        );
+    }
+}
+
+/// The layout tree is where the author states the drawing; a part it places in
+/// another region joins that region instead of refusing the whole payload.
+#[test]
+fn a_layout_tree_adopts_a_part_declared_in_another_region() {
+    let Some(ctx) = sheet() else {
+        eprintln!("SKIP: KiCad 10 not configured");
+        return;
+    };
+    let result = call(
+        &ctx,
+        "place_parts",
+        json!({
+            "parts": [
+                {"ref": "R1", "part": "Device:R", "block": "input", "pins": {"1": "IN", "2": "MID"}},
+                {"ref": "R2", "part": "Device:R", "block": "input", "pins": {"1": "MID", "2": "OUT"}},
+                {"ref": "C1", "part": "Device:C", "block": "output", "pins": {"1": "OUT", "2": "GND"}}
+            ],
+            "layout": {
+                "input": {"row": [{"part": "R1"}]},
+                "output": {"row": [{"part": "R2"}, {"part": "C1"}]}
+            }
+        }),
+    );
+    assert!(result.get("error").is_none(), "{result:#}");
+    let warnings = result["warnings"].as_array().expect("{result:#}").clone();
+    assert!(
+        warnings
+            .iter()
+            .filter_map(Value::as_str)
+            .any(|warning| warning.contains("layout-adopted-part") && warning.contains("R2")),
+        "the move was never reported: {result:#}"
+    );
+    let doc = sch_doc::SchDoc::read(ctx.sch_path()).unwrap();
+    assert!(doc.symbols().any(|symbol| symbol.refdes() == "R2"));
+}
+
+/// A `layout` key no part declares is the payload naming its one region twice, not a
+/// second region: adopting there would rename the block out from under `arrange`.
+#[test]
+fn a_layout_key_no_part_declares_does_not_move_the_parts() {
+    let Some(ctx) = sheet() else {
+        eprintln!("SKIP: KiCad 10 not configured");
+        return;
+    };
+    let result = call(
+        &ctx,
+        "place_parts",
+        json!({
+            "parts": [
+                {"ref": "R1", "part": "Device:R", "block": "power_entry", "pins": {"1": "IN", "2": "MID"}},
+                {"ref": "R2", "part": "Device:R", "block": "power_entry", "pins": {"1": "MID", "2": "GND"}}
+            ],
+            "blocks": {"power_entry": {"title": "Power entry"}},
+            "layout": {"power": {"row": [{"part": "R1"}, {"part": "R2"}]}}
+        }),
+    );
+    assert!(result.get("error").is_none(), "{result:#}");
+    let arranged = call(&ctx, "arrange", json!({"block": "power_entry"}));
+    assert!(arranged.get("error").is_none(), "{arranged:#}");
+    assert_ne!(
+        arranged["changed"], "no arrangeable parts selected",
+        "the declared block was renamed away: {arranged:#}"
+    );
+}
+
+/// `@R1.2` is how every tool result spells the net on a pin, so the model writes it
+/// back as an endpoint. As an endpoint the pin and its net are the same place.
+#[test]
+fn connect_accepts_the_at_prefix_a_tool_result_taught_it() {
+    let Some(ctx) = sheet() else {
+        eprintln!("SKIP: KiCad 10 not configured");
+        return;
+    };
+    let placed = call(
+        &ctx,
+        "place_parts",
+        json!({"parts": [
+            {"ref": "R1", "part": "Device:R", "pins": {"1": "IN", "2": "MID"}},
+            {"ref": "R2", "part": "Device:R", "pins": {"1": "OUT", "2": "GND"}}
+        ]}),
+    );
+    assert!(placed.get("error").is_none(), "{placed:#}");
+    let result = call(&ctx, "connect", json!({"from": "R1.2", "to": "@R2.1"}));
+    assert!(result.get("error").is_none(), "{result:#}");
+}
+
+/// A pin address is what every tool result prints, so the model hands one back to a
+/// tool that takes references. A designator never contains a `.`; it names one symbol.
+#[test]
+fn remove_symbols_reads_a_pin_address_as_its_symbol() {
+    let Some(ctx) = sheet() else {
+        eprintln!("SKIP: KiCad 10 not configured");
+        return;
+    };
+    let placed = call(
+        &ctx,
+        "place_parts",
+        json!({"parts": [
+            {"ref": "R1", "part": "Device:R", "pins": {"1": "IN", "2": "MID"}},
+            {"ref": "R2", "part": "Device:R", "pins": {"1": "MID", "2": "GND"}}
+        ]}),
+    );
+    assert!(placed.get("error").is_none(), "{placed:#}");
+    let result = call(&ctx, "remove_symbols", json!({"refs": ["R2.1"]}));
+    assert!(result.get("error").is_none(), "{result:#}");
+    assert_eq!(result["changed"]["read_as"]["R2.1"], "R2", "{result:#}");
+    let doc = sch_doc::SchDoc::read(ctx.sch_path()).unwrap();
+    assert!(!doc.symbols().any(|symbol| symbol.refdes() == "R2"));
+}
+
+/// The pin suffix is read only when it is really one of that symbol's pins: a part is
+/// far too much to delete on a name the sheet does not actually carry.
+#[test]
+fn remove_symbols_keeps_a_part_named_by_a_pin_it_does_not_have() {
+    let Some(ctx) = sheet() else {
+        eprintln!("SKIP: KiCad 10 not configured");
+        return;
+    };
+    let placed = call(
+        &ctx,
+        "place_parts",
+        json!({"parts": [
+            {"ref": "R1", "part": "Device:R", "pins": {"1": "IN", "2": "MID"}},
+            {"ref": "R2", "part": "Device:R", "pins": {"1": "MID", "2": "GND"}}
+        ]}),
+    );
+    assert!(placed.get("error").is_none(), "{placed:#}");
+    let result = call(&ctx, "remove_symbols", json!({"refs": ["R2.9"]}));
+    assert!(result["error"].is_string(), "{result:#}");
+    let doc = sch_doc::SchDoc::read(ctx.sch_path()).unwrap();
+    assert!(doc.symbols().any(|symbol| symbol.refdes() == "R2"));
+}
+
+/// A reference nothing on the sheet carries is refused with the sheet's nearest
+/// designators, so the next call has somewhere to go.
+#[test]
+fn remove_symbols_names_the_closest_references_it_does_carry() {
+    let Some(ctx) = sheet() else {
+        eprintln!("SKIP: KiCad 10 not configured");
+        return;
+    };
+    let placed = call(
+        &ctx,
+        "place_parts",
+        json!({"parts": [
+            {"ref": "R1", "part": "Device:R", "pins": {"1": "IN", "2": "MID"}},
+            {"ref": "R2", "part": "Device:R", "pins": {"1": "MID", "2": "GND"}}
+        ]}),
+    );
+    assert!(placed.get("error").is_none(), "{placed:#}");
+    let result = call(&ctx, "remove_symbols", json!({"refs": ["R12"]}));
+    assert!(result["error"].is_string(), "{result:#}");
+    let near = result["did_you_mean"]["R12"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{result:#}"));
+    assert!(!near.is_empty(), "{result:#}");
+}
+
+/// Every result prints a pin as `R1.2`, so the model asks for "the net on R1.2" by
+/// that address. It is a question the netlist can answer.
+#[test]
+fn get_net_answers_a_pin_address() {
+    let Some(ctx) = sheet() else {
+        eprintln!("SKIP: KiCad 10 not configured");
+        return;
+    };
+    let placed = call(
+        &ctx,
+        "place_parts",
+        json!({"parts": [
+            {"ref": "R1", "part": "Device:R", "pins": {"1": "IN", "2": "MID"}},
+            {"ref": "R2", "part": "Device:R", "pins": {"1": "MID", "2": "GND"}}
+        ]}),
+    );
+    assert!(placed.get("error").is_none(), "{placed:#}");
+    let result = call(&ctx, "get_net", json!({"name": "R1.2"}));
+    assert!(result.get("error").is_none(), "{result:#}");
+    assert_eq!(result["resolved_from"], "R1.2", "{result:#}");
+    assert_eq!(result["name"], "Net-(R1-Pad2)", "{result:#}");
+    assert!(
+        result["report"].as_str().unwrap().contains("R2.1"),
+        "{result:#}"
+    );
+}

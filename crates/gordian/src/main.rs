@@ -992,6 +992,7 @@ mod tests {
             ),
             tool_call("check", "check_schematic", json!({})),
             final_text("first phase saved"),
+            final_text("first phase saved: R1 and R2 are on the sheet"),
         ];
         let mut first = Agent::new(ScriptedClient::new(first_script), ctx, system_prompt());
         first.run_turn(&prompts[0], None).await.unwrap();
