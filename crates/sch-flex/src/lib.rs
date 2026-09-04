@@ -41,7 +41,7 @@ const BLOCK_GAP: f64 = 6.0 * UNIT_MM;
 const FRAME_PAD: f64 = 4.0 * UNIT_MM;
 /// The width-to-height ratio a graft aims for when no page is named — a landscape page's
 /// usable area.
-const SHEET_ASPECT: f64 = 1.5;
+pub(crate) const SHEET_ASPECT: f64 = 1.5;
 /// Usable width (mm) of the page a graft starts on; a pack wider than this grows the
 /// paper, which reads worse than a taller sheet.
 const PAGE_WIDTH: f64 = 260.0;

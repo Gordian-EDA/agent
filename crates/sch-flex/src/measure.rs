@@ -13,6 +13,8 @@ use std::collections::BTreeSet;
 use geom::{Dir, Point2};
 use sch_model::tree::{Align, Axis, Container, DEFAULT_GAP, Tree, UNIT_MM, WRAP_HEIGHT, WRAP_WIDTH};
 
+use crate::SHEET_ASPECT;
+
 use crate::orient::{authored_pose, default_pose};
 use crate::part::{Part, Pose};
 
@@ -243,9 +245,17 @@ fn spacing(c: &Container, children: &[Node], parts: &[Part]) -> f64 {
     c.gap.unwrap_or(DEFAULT_GAP).max(if big { IC_GAP } else { 0.0 }) * UNIT_MM
 }
 
-/// A container longer than a page is not something a reader can follow: break it into
-/// bands of the same children, in order, stacked across its own axis. A row wraps into
-/// stacked rows, a column into side-by-side columns. `None` when it already fits.
+/// Break a container that has outgrown its page into bands of the same children, in
+/// order, stacked across its own axis — a row into stacked rows, a column into
+/// side-by-side columns. `None` when it already fits.
+///
+/// WHICH split is taken is decided by the shape it leaves behind, not by filling each
+/// band to the limit. A greedy first fit optimises one band at a time: it leaves the last
+/// band short, and the stack it hands back overflows the OTHER axis, wraps again, and
+/// flips axis on every pass until the block is a ribbon several sheets wide (a 53-part
+/// block measured 918 mm across). Scoring the whole grid instead — proportions first,
+/// with a band longer than the page penalised — settles it in one pass, and the bands are
+/// marked as final so nothing re-wraps them.
 fn wrap(c: &Container, children: &[Node], parts: &[Part]) -> Option<Container> {
     if c.children.len() < 2 {
         return None;
@@ -255,48 +265,78 @@ fn wrap(c: &Container, children: &[Node], parts: &[Part]) -> Option<Container> {
         Axis::Col => WRAP_HEIGHT,
     }) * UNIT_MM;
     let gap = spacing(c, children, parts);
-    let span: f64 = children.iter().map(|k| main(k, c.axis)).sum::<f64>()
-        + gap * (children.len() - 1) as f64;
+    let sizes: Vec<f64> = children.iter().map(|k| main(k, c.axis)).collect();
+    let span: f64 = sizes.iter().sum::<f64>() + gap * (children.len() - 1) as f64;
     if span <= limit {
         return None;
     }
-    let mut bands: Vec<Vec<Tree>> = vec![Vec::new()];
-    let mut used = 0.0;
-    for (child, node) in c.children.iter().zip(children) {
-        let size = main(node, c.axis);
-        let band = bands.last_mut().expect("one band exists");
-        if !band.is_empty() && used + gap + size > limit {
-            bands.push(vec![child.clone()]);
-            used = size;
-        } else {
-            used += if band.is_empty() { size } else { gap + size };
-            band.push(child.clone());
-        }
-    }
-    // A container that overflows on BOTH axes would otherwise wrap forever, flipping axis
-    // each time. One child per band is that state: splitting further cannot shorten it.
-    if bands.len() < 2 || bands.len() == c.children.len() {
-        return None;
-    }
-    Some(Container {
+    let bands = (2..=children.len())
+        .map(|count| split(&sizes, gap, span / count as f64))
+        .min_by(|a, b| {
+            let cost = |b: &[usize]| ribbon_cost(b, children, c.axis, gap, limit);
+            cost(a).total_cmp(&cost(b))
+        })?;
+    (bands.len() > 1).then(|| Container {
         axis: flip(c.axis),
         children: bands
-            .into_iter()
-            .map(|band| {
-                Tree::Container(Container {
+            .iter()
+            .scan(0, |from, len| {
+                let band = c.children[*from..*from + len].to_vec();
+                *from += len;
+                Some(Tree::Container(Container {
                     axis: c.axis,
                     children: band,
                     gap: c.gap,
                     align: c.align,
-                    // Already sized to the limit: a second pass must not split it again.
                     wrap: Some(f64::INFINITY),
-                })
+                }))
             })
             .collect(),
         gap: Some(DEFAULT_GAP),
         align: Align::Start,
-        wrap: None,
+        // The bands were chosen against the finished grid's proportions; measuring that
+        // grid again on the flipped axis is what started the ribbon.
+        wrap: Some(f64::INFINITY),
     })
+}
+
+/// Child counts of the bands `sizes` falls into when each is filled up to `target` — a
+/// child longer than `target` takes a band of its own rather than being dropped.
+fn split(sizes: &[f64], gap: f64, target: f64) -> Vec<usize> {
+    let mut bands = vec![0usize];
+    let mut used = 0.0;
+    for size in sizes {
+        let band = bands.last_mut().expect("one band exists");
+        if *band > 0 && used + gap + size > target {
+            bands.push(1);
+            used = *size;
+        } else {
+            used += if *band == 0 { *size } else { gap + size };
+            *band += 1;
+        }
+    }
+    bands
+}
+
+/// How badly a banding reads: how far the finished grid is from a page's proportions,
+/// plus how far its longest band overruns the page it has to fit across. Logarithmic on
+/// both counts, so twice as wide and half as wide are the same defect.
+fn ribbon_cost(bands: &[usize], children: &[Node], axis: Axis, gap: f64, limit: f64) -> f64 {
+    let (mut long, mut thick, mut from) = (0.0f64, 0.0f64, 0usize);
+    for (i, len) in bands.iter().enumerate() {
+        let band = &children[from..from + len];
+        long = long.max(
+            band.iter().map(|k| main(k, axis)).sum::<f64>() + gap * (len - 1) as f64,
+        );
+        thick += band.iter().map(|k| cross(k, axis)).fold(0.0, f64::max)
+            + if i > 0 { DEFAULT_GAP * UNIT_MM } else { 0.0 };
+        from += len;
+    }
+    let (w, h) = match axis {
+        Axis::Row => (long, thick),
+        Axis::Col => (thick, long),
+    };
+    ((w / h.max(1.0)) / SHEET_ASPECT).ln().abs() + 2.0 * (long / limit.max(1.0)).max(1.0).ln()
 }
 
 fn flip(axis: Axis) -> Axis {
