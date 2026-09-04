@@ -351,6 +351,7 @@ impl SchDoc {
     /// grid-aligned (KiCAD's ERC rejects off-grid endpoints). `None` for an empty
     /// sheet, which keeps whatever page it declares.
     pub fn refit_page(&mut self, frozen: &BTreeSet<String>) -> Option<PageFit> {
+        self.drop_empty_frames();
         // An item with no UUID cannot be told apart from one the caller froze, so it is
         // treated as frozen: the denylist fails closed.
         let movable = |item: &Item| item.uuid().is_some_and(|u| !frozen.contains(u));
@@ -453,6 +454,44 @@ impl SchDoc {
             }
         }
         w
+    }
+
+    /// Drop every block frame with nothing inside it, and the caption and note drawn
+    /// with it.
+    ///
+    /// A frame says "these parts belong together". One with no parts in it says nothing:
+    /// on a Sallen-Key sheet all THREE frames were empty captioned boxes filling the top
+    /// half while the circuit sat at the bottom. Frames are only ever replaced when a new
+    /// one overlaps them, so a block whose parts moved afterwards leaves its old rectangle
+    /// behind — and doing this check on one write path let every other path keep making
+    /// them. It belongs here, where every path that finishes a sheet passes through.
+    fn drop_empty_frames(&mut self) {
+        let symbols: Vec<Point2> = self.symbols().map(|s| s.at.point()).collect();
+        let stale: Vec<Rect> = self
+            .items()
+            .iter()
+            .filter_map(|item| match item {
+                Item::Rectangle(r) => Some(Rect::from_points(r.start, r.end)),
+                _ => None,
+            })
+            .filter(|frame| !symbols.iter().any(|at| frame.contains(*at)))
+            .collect();
+        if stale.is_empty() {
+            return;
+        }
+        // A caption sits just above its frame's top-left corner, a note just below its
+        // bottom-left, both within a line of it.
+        const LINE: f64 = 5.08;
+        let orphaned = |at: Point2| {
+            stale.iter().any(|f| {
+                (at.x - f.min_x).abs() <= LINE && at.y >= f.min_y - LINE && at.y <= f.max_y + LINE
+            })
+        };
+        self.retain_drawing(|item| match item {
+            Item::Rectangle(r) => !stale.contains(&Rect::from_points(r.start, r.end)),
+            Item::Text(t) => !orphaned(t.at.point()),
+            _ => true,
+        });
     }
 
     pub(crate) fn has_title_block(&self) -> bool {
