@@ -108,6 +108,7 @@ pub fn graft(doc: &mut SchDoc, writer: SchematicWriter) -> sch_doc::Result<Vec<S
     replace_frames(doc, &sheet);
     let seated = seated_uuids(doc);
     let adopted = doc.adopt(&sheet)?;
+    drop_empty_frames(doc);
     debug_assert_unique_wire_segments(doc);
     doc.refit_page(&seated);
     Ok(adopted)
@@ -146,6 +147,47 @@ fn replace_frames(doc: &mut SchDoc, sheet: &SchDoc) {
             .iter()
             .any(|f| f.overlaps(&geom::Rect::from_points(r.start, r.end))),
         sch_doc::Item::Text(t) => !captions.contains(t.text.as_str()),
+        _ => true,
+    });
+}
+
+/// Drop every block frame with nothing inside it, and the caption and note drawn with it.
+///
+/// A frame is only replaced when a new one OVERLAPS it, so a block whose parts later moved
+/// — re-arranged, or placed again somewhere better — leaves its old rectangle behind with
+/// its title still on it. More than half the frames on a Blue Pill sheet were these: a
+/// captioned empty box, which reads as a section someone forgot to draw.
+///
+/// The test is the meaning of a frame rather than the history of one: a block frame says
+/// "these parts belong together", and one with no parts in it says nothing.
+fn drop_empty_frames(doc: &mut SchDoc) {
+    let symbols: Vec<geom::Point2> = doc.symbols().map(|s| s.at.point()).collect();
+    let stale: Vec<geom::Rect> = doc
+        .items()
+        .iter()
+        .filter_map(|item| match item {
+            sch_doc::Item::Rectangle(r) => Some(geom::Rect::from_points(r.start, r.end)),
+            _ => None,
+        })
+        .filter(|frame| !symbols.iter().any(|at| frame.contains(*at)))
+        .collect();
+    if stale.is_empty() {
+        return;
+    }
+    // A caption sits just above its frame's top-left corner and a note just below its
+    // bottom-left, both within a line of it.
+    const LINE: f64 = 5.08;
+    let orphaned = |at: geom::Point2| {
+        stale.iter().any(|f| {
+            (at.x - f.min_x).abs() <= LINE
+                && (at.y >= f.min_y - LINE && at.y <= f.max_y + LINE)
+        })
+    };
+    doc.retain_drawing(|item| match item {
+        sch_doc::Item::Rectangle(r) => {
+            !stale.contains(&geom::Rect::from_points(r.start, r.end))
+        }
+        sch_doc::Item::Text(t) => !orphaned(t.at.point()),
         _ => true,
     });
 }
