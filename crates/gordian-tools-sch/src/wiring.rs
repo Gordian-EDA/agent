@@ -157,7 +157,15 @@ fn connect_one(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         .flatten()
         .map(str::to_string)
         .collect();
-    let drawn = sch_drag::redraw_wire(&mut edit.doc, a, out_a, b, ROUTING_NET, &own)
+    // A wire is the better answer only while it stays readable. Past the length the
+    // engine itself will draw, the two ends are joined by NAME — the same move a person
+    // makes rather than run a line across the sheet. One Arduino sheet carried 28 wires
+    // over that cap, the longest 770 mm, every one of them from a `connect` of two
+    // distant pins.
+    let too_far = a.manhattan(b) > sch_floorplan::floorplan::place::LONG_SIMPLE_LEN_MM;
+    let drawn = (!too_far)
+        .then(|| sch_drag::redraw_wire(&mut edit.doc, a, out_a, b, ROUTING_NET, &own))
+        .flatten()
         // Drawing a path is not the same as making a connection: if the two
         // ends did not end up on one partition, the wire is decoration.
         .filter(|_| joined(&edit.doc, a, b));
