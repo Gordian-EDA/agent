@@ -318,3 +318,8 @@ re-place." Quality first; time later via parallel subagents; schematic too.
   suite table → lane/composition-pass (anchored `review_schematic`, tree revision loop) → port
   sch-agent text/route conventions → dataset discipline (gaps silent under "do not add parts") →
   iterate on the suite's top defect until green.
+- composition-pass merged (gate running): `review_schematic` (anchored critic, shared prompt files
+  `tools/schematic_critic_*.txt`, 3 reads, modal run, defects with mm coordinates + fixes, engine
+  facts as ground truth), prompt review loop (stop at 9 or two flat rounds), `review_scores` in the
+  harness. Pre-trees trajectory: sallen-key 3→4→5, blue-pill 3→3→3. Follow-up after push: drop the
+  model-supplied `anchor` path parameter from the tool schema.
