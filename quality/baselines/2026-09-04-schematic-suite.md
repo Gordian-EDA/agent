@@ -213,3 +213,36 @@ with five blocks strung in an unbounded row because each was grafted to the righ
 last, is wrong however it is graded. But nobody should cite it as a scoring win.
 
 The spread remains the story: ECG 5 and 9, Blue Pill 4 and 6, on identical runs.
+
+
+## Final run of the day: cross-section naming
+
+`--repeat 2`, lower median, against the previous suite.
+
+| case | before | now | attempts | |
+| --- | --- | --- | --- | --- |
+| dataset-ecg-sensor-07aabb42 | 5 | **8** | 8, 9 | PASSES |
+| dataset-ddr-memory-411be040 | 7 | **8** | 8, 9 | PASSES |
+| prompt-blue-pill | 4 | 6 | 6, 6 | |
+| prompt-bjt-preamp | 6 | 7 | 7, 6 | |
+| dataset-light-accessory-266db471 | 5 | 6 | 6, 6 | |
+| dataset-stm32-microcontroller | 6 | 6 | 6, 6 | |
+| prompt-555-blinker-ldo | 6 | 6 | 6, 7 | |
+| dataset-rp2040 / three-phase / prompt-hbridge / arduino | 5 | 5 | | |
+| dataset-current-sense-2995e0dd | 6 | 5 | 5, 6 | |
+| prompt-sallen-key-gain | 6 | 5 | 5, 5 | |
+| dataset-ibm-m122-261071e7 | 8 | 6 | 6, 8 | |
+
+**2 of 14 pass, mean 5.93** against 1 of 14 and 5.64.
+
+Read it carefully. Five cases up, three down, six flat; +0.29 on the mean. With per-case
+run-to-run spread of one to two points, the standard error on that mean difference is about
+0.35, so **+0.29 is inside one standard error and is not distinguishable from noise.**
+
+The part that is more than noise: the two passing cases pass with BOTH attempts at 8 or
+above (8,9 and 8,9), where passing has previously meant one lucky attempt out of two. The
+ECG case in particular went from 5,9 to 8,9 — its floor up three points. That is the shape
+of a consistency gain, and consistency is what the goal depends on.
+
+Day's arc on this suite: 1/14 at the sprint baseline, 0/14 once the statistic was corrected
+to the lower median, now 2/14.
