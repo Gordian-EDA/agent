@@ -210,6 +210,7 @@ mod tests {
         let mut doc = to_doc(seated).unwrap();
         doc.refit_page(&Default::default());
         let before: Vec<geom::Point2> = doc.wires().flat_map(|w| w.points.clone()).collect();
+        let seated_y = before[0].y;
 
         let mut block = SchematicWriter::new();
         block.add_wire_on_net([-25.4, -12.7], [-25.4, 12.7], "NEW");
@@ -217,7 +218,7 @@ mod tests {
 
         let after: Vec<geom::Point2> = doc
             .wires()
-            .filter(|w| w.points.iter().any(|p| p.y == 101.6))
+            .filter(|w| w.points.iter().any(|p| p.y == seated_y))
             .flat_map(|w| w.points.clone())
             .collect();
         assert_eq!(before, after, "the seated wire moved");

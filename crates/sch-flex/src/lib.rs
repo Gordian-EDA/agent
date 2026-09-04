@@ -46,11 +46,11 @@ const SHEET_ASPECT: f64 = 1.5;
 /// Usable width (mm) of the page a graft starts on; a pack wider than this grows the
 /// paper, which reads worse than a taller sheet.
 const PAGE_WIDTH: f64 = 260.0;
-/// Fraction of a page's usable box the packed BLOCKS may claim. The blocks are not the
-/// whole drawing: power rails run in bands above and below them and cross-block labels sit
-/// outside their frames, none of which this crate measures. Packing to the last millimetre
-/// therefore buys the next page up as soon as the router draws.
-const BLOCK_SHARE: f64 = 0.9;
+/// Room (mm) held back on each axis of a page's usable box for the drawing this crate does
+/// not measure: the power rails that run in bands above and below the blocks, and the
+/// cross-block labels that sit outside their frames. Packing to the last millimetre buys
+/// the next page up as soon as the router draws. One rail band and its riser on each side.
+const ROUTING_ROOM: f64 = 12.7;
 
 /// What the typesetter had to decide for itself, because its author did not.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -304,7 +304,7 @@ fn pack(sizes: &[(f64, f64)], pages: &[[f64; 2]]) -> Vec<Point2> {
 /// could not fill, never to shave an aspect error.
 fn fills(sizes: &[(f64, f64)], page: [f64; 2]) -> Option<Vec<Point2>> {
     let target = page[0] / page[1].max(1.0);
-    let room = [page[0] * BLOCK_SHARE, page[1] * BLOCK_SHARE];
+    let room = [page[0] - ROUTING_ROOM, page[1] - ROUTING_ROOM];
     orders(sizes).into_iter().find_map(|order| {
         limits(sizes, room[0])
             .into_iter()
