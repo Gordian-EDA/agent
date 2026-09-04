@@ -157,32 +157,7 @@ fn connect_one(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         .flatten()
         .map(str::to_string)
         .collect();
-    // A wire is the better answer only while it stays readable. A long hop BETWEEN
-    // SECTIONS is joined by NAME, the same move a person makes rather than run a line
-    // across the sheet: one Arduino sheet carried 28 such wires, the longest 770 mm.
-    //
-    // Inside one section the wire always wins, however far apart the two pins happen to
-    // sit right now — a section is drawn together and its parts move together, and
-    // naming everything within one turns it into a parts bin. Capping on length alone
-    // did exactly that to a DDR sheet: 9 wires and 68 labels.
-    let block_of = |t: &Target| {
-        t.owner().and_then(|refdes| {
-            edit.doc
-                .symbols()
-                .find(|s| s.refdes() == refdes)
-                .and_then(|s| s.fields.get(sch_model::result::AP_BLOCK))
-                .map(|f| f.value.clone())
-        })
-    };
-    let across = match (block_of(&from), block_of(&to)) {
-        (Some(x), Some(y)) => x != y,
-        _ => false,
-    };
-    let too_far =
-        across && a.manhattan(b) > sch_floorplan::floorplan::place::LONG_SIMPLE_LEN_MM;
-    let drawn = (!too_far)
-        .then(|| sch_drag::redraw_wire(&mut edit.doc, a, out_a, b, ROUTING_NET, &own))
-        .flatten()
+    let drawn = sch_drag::redraw_wire(&mut edit.doc, a, out_a, b, ROUTING_NET, &own)
         // Drawing a path is not the same as making a connection: if the two
         // ends did not end up on one partition, the wire is decoration.
         .filter(|_| joined(&edit.doc, a, b));
