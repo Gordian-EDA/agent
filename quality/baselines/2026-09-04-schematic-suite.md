@@ -83,3 +83,30 @@ points apart on one unchanged sheet, so only the pooled figure and the dimension
 are worth reading. And the RENDER PIPELINE moves the score as well: the same Blue Pill sheet
 scored 8 through the harness and 5 through an ad-hoc PDF rasterization, so corpus scores and
 suite scores are internally consistent but must never be put in one table.
+
+
+## Correction: the corpus figures above measured the wrong path
+
+`examples/render_corpus` composed its layout IR from the caller's intent alone, which
+carries rails and ports but no trees, so every fixture with an intent lost its authored
+trees and drew as one bare row. Fixed in `15e644a1`; the numbers above are still valid
+against each other, since both sides used that path, but they describe a sheet the
+production path never draws.
+
+On the path the sheet is actually drawn, same seven fixtures, three reads each:
+
+| | |
+| --- | --- |
+| pooled over 21 reads | **7.48** |
+| readability | 8.14 |
+| routing neatness | 8.14 |
+| convention | 8.00 |
+| compactness | 6.71 |
+
+`mcp1703-power-entry` scores 9, `555-blinker` 8, `divider-filter` 8.
+
+Tried on the correct path and reverted: letting a band that already fits the page
+re-compete on its proportions, to break up ribbon-shaped rows. It measured pooled 7.48 to
+6.71 with compactness 6.71 to 5.29, every dimension down, and the unrestricted form was an
+order of magnitude slower. The apparent win for this change, and the label overlap that had
+blocked it, were both artifacts of the untreed path.
