@@ -26,7 +26,7 @@ const FRAME_PAD: f64 = 3.81;
 /// ascenders graze the dashed border reads as a mistake, so this is a clear
 /// line's worth rather than a hairline.
 const GAP: f64 = 1.905;
-const TITLE_SIZE: f64 = 1.778;
+const TITLE_SIZE: f64 = 2.54;
 const NOTE_SIZE: f64 = 1.27;
 /// A note wraps to its frame's width, held between these so a narrow block does
 /// not stack one word per line and a wide one does not run the width of the page.
