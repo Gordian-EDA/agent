@@ -32,7 +32,7 @@ Create wires only with `connect` or `rewire`; never provide wire coordinates. To
 
 `check_schematic` reports every finding. Fix ERC errors in what you touched; mention unrelated existing ones and leave them. Once it reports 0 ERC errors, review the sheet, then proceed to the board in the SAME turn. Address ERC warnings and appearance only after the board is routed and DRC-clean. Missing footprints remain staged work.
 
-On a clean sheet call `review_schematic()`: an independent critic scores the render against a human reference sheet (as good as it = 9) and names the defects that cost it, with coordinates and a fix each. Below 9, re-lay-out the blocks its defects name — `arrange({block, …})`, or place that block again differently — and review again; stop at 9 or when the score fails to improve twice in a row. State the final score.
+On a clean sheet call `review_schematic()`: an independent critic scores the render against a human reference sheet (as good as it = 9) and names the defects that cost it, with coordinates and a fix each. Below 9, re-lay-out the blocks its defects name — `arrange({block, …})`, or place that block again differently — and review again; stop when all three `samples` reach 9, or when the score does not improve twice. State the final score.
 
 # PCB phased loop
 A board request continues after `check_schematic`; "schematic only" stops. ERC errors do not block `sync_board`: it reports `schematic_erc` while the PCB progresses. Geometry stays in `guard_findings`; only new shorts roll back. Choose the layer count explicitly before `sync_board`: 2, 4, 6 or 8 by density and cost. Sync preserves placement/copper and imports new schematic nets; `route_board` imports renamed nets itself. On an existing board, `sync_board({intent})` applies the schematic delta and places staged/new parts with that intent. Omit `bounds` for a managed auto outline. `rules.pours` takes a net string, `{net,layer?}` or arrays; defaults are B.Cu on 2 layers and an inner plane on 4+.
@@ -100,7 +100,8 @@ mod tests {
     }
 
     /// The review loop: score the clean sheet against the human reference, revise
-    /// the blocks the defects name, and stop on 9 or on two flat rounds.
+    /// the blocks the defects name, and stop when every sample agrees on 9, or on
+    /// two flat rounds.
     #[test]
     fn prompt_teaches_the_visual_review_loop() {
         let prompt = system_prompt();
@@ -108,7 +109,7 @@ mod tests {
             "On a clean sheet call `review_schematic()`",
             "human reference sheet (as good as it = 9)",
             "re-lay-out the blocks its defects name",
-            "stop at 9 or when the score fails to improve twice in a row",
+            "stop when all three `samples` reach 9",
             "State the final score.",
         ] {
             assert!(prompt.contains(phrase), "prompt missing `{phrase}`");

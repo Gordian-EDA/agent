@@ -122,8 +122,10 @@ pub async fn review(client: &dyn Provider, subject: &Subject) -> Result<Value> {
         "defects": defects(&verdict),
         "note": format!(
             "An independent critic graded the rendered sheet {SAMPLES} times against a {REFERENCE}; \
-             the modal run is reported. at_mm is in sheet millimetres, matching read_schematic. \
-             Below 9, re-lay-out the blocks the defects name and review again."
+             the modal run is reported, and `samples` holds all three. at_mm is in sheet \
+             millimetres, matching read_schematic. This grader reads +/-2 between samples on \
+             one unchanged sheet, so a sheet is finished only when the LOWEST sample reaches 9; \
+             otherwise re-lay-out the blocks the defects name and review again."
         ),
     });
     result[IMAGE_PATH_KEY] = json!(subject.annotated_path());
