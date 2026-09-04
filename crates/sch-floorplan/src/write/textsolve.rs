@@ -421,7 +421,7 @@ impl SchematicWriter {
     /// symbols. Wide (rotated passive) bodies prefer above/below; ICs carry the
     /// pair on the horizontal band least overlapping their own pin text.
     fn field_pair_movable(&self, i: usize) -> (sch_model::text::Movable, Apply) {
-        use sch_model::text::{Movable, pin_text_boxes, text_width};
+        use sch_model::text::{Movable, pin_text_boxes};
         let r2 = |v: f64| (v * 100.0).round() / 100.0;
         let inst = &self.instances[i];
         let h = inst.half_extents.rotated_half_extents(inst.angle);
