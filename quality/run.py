@@ -1742,11 +1742,11 @@ def run_agent(project, prompt, timeout, env):
         return subprocess.CompletedProcess(args, 124, stdout, stderr)
 
 
-def run_case(case, output_root):
+def run_case(case, output_root, attempt=None):
     started = time.time()
     prompt = (case / "prompt.txt").read_text(encoding="utf-8").strip()
     rubric, checks = parse_rubric((case / "rubric.txt").read_text(encoding="utf-8"))
-    run_dir = output_root / case.name
+    run_dir = output_root / (case.name if attempt is None else f"{case.name}#{attempt}")
     if run_dir.exists():
         shutil.rmtree(run_dir)
     artifacts = run_dir / "artifacts"
@@ -2213,13 +2213,21 @@ def schematic_row(report):
     critic = report.get("critic_schematic", {})
     score = critic.get("score")
     samples = critic.get("samples")
+    attempts = report.get("attempts")
+    spread = (
+        ""
+        if not attempts or len({a["critic"] for a in attempts}) <= 1
+        else " of " + ",".join("-" if a["critic"] is None else f"{a['critic']:g}" for a in attempts)
+    )
     return [
         report["case"],
         str(report.get("part_count", "-")),
         "-" if match is None else ("yes" if match else "NO"),
         f"{report.get('erc_errors', '?')}/{report.get('erc_warnings', '?')}",
         "-" if score is None else (
-            f"{score:g}" + (f" {samples}" if samples and len(set(samples)) > 1 else "")
+            f"{score:g}"
+            + (f" {samples}" if samples and len(set(samples)) > 1 else "")
+            + spread
         ),
         review_trajectory(report),
         human_look_score(report).split("/")[0],
@@ -2260,6 +2268,32 @@ def futures_report(futures, name):
     return next(future.result() for future, queued in futures.items() if queued == name)
 
 
+def typical(reports):
+    """The middle report of a case's repeated runs, by how many checks it passed
+    and then by critic score.
+
+    An agent run is not deterministic: the same H-bridge scored 4, 6 and 7 on three
+    identical tries. Reporting the best would flatter the engine and reporting the
+    last would be arbitrary, so the median run is the one that stands for the case.
+    Every run's scores ride along in `attempts`.
+    """
+    def rank(report):
+        checks = report.get("checks") or {}
+        critic = (report.get("critic_schematic") or {}).get("score")
+        return (-len(checks.get("fail") or []), critic if critic is not None else -1)
+
+    ordered = sorted(reports, key=rank)
+    middle = ordered[len(ordered) // 2]
+    middle["attempts"] = [
+        {
+            "critic": (r.get("critic_schematic") or {}).get("score"),
+            "failed": (r.get("checks") or {}).get("fail") or [],
+        }
+        for r in reports
+    ]
+    return middle
+
+
 def select(available, args):
     if args.cases:
         return args.cases
@@ -2279,6 +2313,14 @@ def main():
     )
     parser.add_argument(
         "--jobs", type=int, default=1, help="cases to run at a time (default: 1)"
+    )
+    parser.add_argument(
+        "--repeat",
+        type=int,
+        default=1,
+        help="runs per case; the reported verdict is the median one (default: 1). "
+             "One agent run of one case scored 4, 6 and 7 on three identical tries, "
+             "so a single run cannot tell an engine change from luck.",
     )
     parser.add_argument("--scoreboard", type=Path, help="write the scoreboard here too")
     parser.add_argument(
@@ -2309,12 +2351,17 @@ def main():
 
     columns, row_of = suite_view(args.suite)
 
-    def one(name):
+    def attempt(name, index):
         try:
-            return run_case(available[name], output)
+            return run_case(available[name], output, index)
         except Exception as error:
             print(f"{name}: {error}", file=sys.stderr)
             return recover_failed_report(output, name, error)
+
+    def one(name):
+        if args.repeat <= 1:
+            return attempt(name, None)
+        return typical([attempt(name, i) for i in range(args.repeat)])
 
     def announce(report):
         print(" | ".join(row_of(report)), flush=True)
