@@ -226,7 +226,18 @@ pub fn emit_strategy(
     // in islands that only `live::verify` would have caught. `net_shorts` above is the
     // other half.
     out.net_opens = match sch_doc::SchDoc::parse(&out.sch) {
-        Ok(doc) => crate::live::verify(&doc, design).scattered,
+        Ok(mut doc) => {
+            let opens = crate::live::verify(&doc, design).scattered;
+            // The writer's own `reframe` pins the drawing's minimum corner to the margin,
+            // which leaves every slack millimetre along the bottom and right — a circuit
+            // stranded in the corner of a sheet too big for it, the defect the critic names
+            // on nearly every under-filled page. `refit_page` is what settles paper and
+            // framing for a live sheet; running it here too means a whole-sheet emit and an
+            // edited sheet are framed by the same code rather than only looking alike.
+            doc.refit_page(&Default::default());
+            out.sch = doc.to_text();
+            opens
+        }
         Err(e) => vec![format!("could not re-read the emitted sheet: {e}")],
     };
     for net in &out.net_opens {

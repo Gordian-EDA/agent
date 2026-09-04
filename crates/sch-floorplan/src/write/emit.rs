@@ -44,11 +44,8 @@ impl SchematicWriter {
     /// `User` page sized to fit: an unconventional page beats an invisible drawing.
     fn page(&self) -> Option<(&'static str, [f64; 2])> {
         let bbox = self.content_bbox()?;
-        let band = if self.title.is_some() {
-            TITLE_BLOCK_BAND
-        } else {
-            0.0
-        };
+        // The drawing sheet paints its title block on every page, titled or not.
+        let band = TITLE_BLOCK_BAND;
         let need = [bbox.max_x + PAGE_MARGIN, bbox.max_y + PAGE_MARGIN + band];
         Some(standard_page(need).unwrap_or(("User", need)))
     }

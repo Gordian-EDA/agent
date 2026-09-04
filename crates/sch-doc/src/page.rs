@@ -114,10 +114,19 @@ fn shift_raw_points(node: &mut kiutils_sexpr::Node, dx: f64, dy: f64) {
 /// label text and annotation text are boxed by their estimated width in both directions,
 /// which covers every justification without decoding one.
 fn item_points(doc: &SchDoc, item: &Item, points: &mut Vec<Point2>) {
+    // A label drawn at 90 or 270 degrees reaches its WIDTH up and down the sheet and only
+    // its height across it. Measuring every text as if it ran horizontally understates a
+    // vertical net label by the length of its name, which is how a sheet that fits gets
+    // shifted until that label prints over the frame rule.
     let text_at = |pose: Pose, s: &str, size: f64, points: &mut Vec<Point2>| {
         let w = text_width(s, size);
-        points.push(Point2::new(pose.x - w, pose.y - size));
-        points.push(Point2::new(pose.x + w, pose.y + size));
+        let (across, along) = if pose.rot.rem_euclid(180.0) == 90.0 {
+            (size, w)
+        } else {
+            (w, size)
+        };
+        points.push(Point2::new(pose.x - across, pose.y - along));
+        points.push(Point2::new(pose.x + across, pose.y + along));
     };
     match item {
         Item::Symbol(inst) => {
@@ -356,11 +365,11 @@ impl SchDoc {
         }
 
         let bbox = self.content_bbox()?;
-        let band = if self.has_title_block() {
-            TITLE_BLOCK_BAND
-        } else {
-            0.0
-        };
+        // Always: KiCAD's drawing sheet paints the title block whether or not the
+        // document carries a `(title_block …)` node — the node only fills in its text —
+        // so content that reaches into the band is overprinted either way. This is what
+        // `usable_pages` has always assumed.
+        let band = TITLE_BLOCK_BAND;
         let need = [bbox.max_x + PAGE_MARGIN, bbox.max_y + PAGE_MARGIN + band];
         let (page, standard) = match standard_page(need) {
             Some((name, size)) => {
