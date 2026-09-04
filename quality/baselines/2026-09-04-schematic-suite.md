@@ -121,6 +121,7 @@ Each case run twice, the median reported, the spread shown after "of".
 | dataset-current-sense-2995e0dd | 33 | yes | 0/4 | **8** of 6,8 | 8 |
 | dataset-ddr-memory-411be040 | 28 | yes | 10/32 | **8** of 7,8 | 8 |
 | dataset-ecg-sensor-07aabb42 | 49 | yes | 0/0 | 6 of 6,5 | 4 |
+| dataset-ecg-sensor-07aabb42 (after the `N$` fix) | 49 | yes | 0/0 | **9** of 9,5 | 6 |
 | dataset-ibm-m122-261071e7 | 24 | yes | 1/68 | **8** of 7,8 | 7 |
 | dataset-light-accessory-266db471 | 21 | yes | 0/0 | 6 of 6,5 | 4 |
 | dataset-rp2040-mocon2040-0ea574f3 | 33 | yes | 0/0 | 7 of 7,5 | 7 |
@@ -133,8 +134,16 @@ Each case run twice, the median reported, the spread shown after "of".
 | prompt-hbridge | 18 | - | 0/0 | 7 of 6,7 | 6 |
 | prompt-sallen-key-gain | 17 | - | 0/0 | 6 | 3 |
 
-**Three of fourteen pass every check**, against one at the sprint baseline and two this
-morning. Mean critic over each case's better attempt is 6.57, from 5.93.
+**CORRECTION.** The line that first stood here said three of fourteen passed. That counted
+each case's BETTER attempt: `typical` took the upper of the two middle runs, which with
+`--repeat 2` is simply the best one. On the conservative statistic — the lower of the two —
+**none of the fourteen passes every check** and the mean critic is 5.79, against 5.93 for
+the single-run suite this morning. Fixed so an even number of runs reports the lower middle.
+
+What the two numbers together say is that the gap is CONSISTENCY, not ceiling. Every case
+moved by one to three points between two identical runs: the ECG front end scored 9 and
+passed everything on one attempt and 5 on the other; the Blue Pill 4 and 6. The engine can
+draw a sheet that clears the bar and does not do it reliably.
 
 The structural change is in what is left failing. **Every remaining failure is the visual
 score.** Not one case fails on ERC, and not one fails netlist fidelity — all eight dataset

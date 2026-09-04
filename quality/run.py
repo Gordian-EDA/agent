@@ -2275,6 +2275,7 @@ def typical(reports):
     An agent run is not deterministic: the same H-bridge scored 4, 6 and 7 on three
     identical tries. Reporting the best would flatter the engine and reporting the
     last would be arbitrary, so the median run is the one that stands for the case.
+    With an even number of runs the LOWER middle is taken, for the same reason.
     Every run's scores ride along in `attempts`.
     """
     def rank(report):
@@ -2282,8 +2283,11 @@ def typical(reports):
         critic = (report.get("critic_schematic") or {}).get("score")
         return (-len(checks.get("fail") or []), critic if critic is not None else -1)
 
+    # The LOWER middle: with an even number of runs there is no middle one, and taking
+    # the upper of the two reports the better attempt, which flatters the engine exactly
+    # where the spread is widest.
     ordered = sorted(reports, key=rank)
-    middle = ordered[len(ordered) // 2]
+    middle = ordered[(len(ordered) - 1) // 2]
     middle["attempts"] = [
         {
             "critic": (r.get("critic_schematic") or {}).get("score"),
