@@ -30,9 +30,8 @@ pub(crate) fn wire(
     ir: &LayoutIr,
     needs_flag: &BTreeSet<String>,
     flag_points: &mut BTreeMap<String, ([f64; 2], f64)>,
-    fan_risers: bool,
 ) -> io::Result<()> {
-    w.set_weld_guard(fan_risers);
+    w.set_weld_guard(true);
     let refdes_of = |i: usize| items[i].refdes.clone();
     // Endpoints of every net first, so all rails can share common bands.
     let mut net_eps: BTreeMap<String, Vec<([f64; 2], Dir)>> = BTreeMap::new();
@@ -55,65 +54,50 @@ pub(crate) fn wire(
     let rail_y_map = assign_rail_levels(&net_eps, ir);
 
     // Fan colliding rail risers off shared columns so two rails never merge into
-    // one net (the stacked-BGA-balls GND/1V2 short). Finalize-only: the per-move
-    // scorer passes `fan_risers = false` so transient mid-search collisions never
-    // perturb the placement.
-    let riser_offsets = if fan_risers {
-        plan_riser_offsets(&net_eps, ir, &rail_y_map)
-    } else {
-        BTreeMap::new()
-    };
+    // one net (the stacked-BGA-balls GND/1V2 short).
+    let riser_offsets = plan_riser_offsets(&net_eps, ir, &rail_y_map);
 
     // Solid symbol bodies for local power-glyph orientation. Unlike the padded
     // placement rectangles, these put pin tips on the boundary, so an outward power
     // marker merely touches its served body while an inward marker overlaps it.
     let power_keepouts: Vec<Rect> = items.iter().map(item_solid_rect).collect();
 
-    // 2-pin body segments (finalize-only, so the per-move scorer is untouched) so a
-    // rail riser can JOG around a part body it would otherwise be drawn straight
-    // through — the stacked same-rail cap column the SA can't always pull apart.
-    let bodies: Vec<([f64; 2], [f64; 2])> = if fan_risers {
-        items
-            .iter()
-            .filter(|it| it.geom.pins.len() == 2)
-            .filter_map(|it| {
-                let (n0, n1) = (&it.geom.pins[0].number, &it.geom.pins[1].number);
-                match (
-                    w.pin_dirs(env, &it.refdes, n0),
-                    w.pin_dirs(env, &it.refdes, n1),
-                ) {
-                    (Ok(d0), Ok(d1)) => match (d0.first(), d1.first()) {
-                        (Some((a, _)), Some((b, _))) => Some((*a, *b)),
-                        _ => None,
-                    },
+    // 2-pin body segments, so a rail riser can JOG around a part body it would
+    // otherwise be drawn straight through — the stacked same-rail cap column a
+    // greedy assignment can't always pull apart.
+    let bodies: Vec<([f64; 2], [f64; 2])> = items
+        .iter()
+        .filter(|it| it.geom.pins.len() == 2)
+        .filter_map(|it| {
+            let (n0, n1) = (&it.geom.pins[0].number, &it.geom.pins[1].number);
+            match (
+                w.pin_dirs(env, &it.refdes, n0),
+                w.pin_dirs(env, &it.refdes, n1),
+            ) {
+                (Ok(d0), Ok(d1)) => match (d0.first(), d1.first()) {
+                    (Some((a, _)), Some((b, _))) => Some((*a, *b)),
                     _ => None,
-                }
-            })
-            .collect()
-    } else {
-        Vec::new()
-    };
+                },
+                _ => None,
+            }
+        })
+        .collect();
 
     // Every pin on the sheet, tagged with its net, so a rail's lead-out/riser can never
     // be drawn onto a FOREIGN pin — KiCAD welds a wire that ends on or passes over one,
     // silently shorting the two nets. Phase B gives signal nets this guard through the
     // routing scene; rails are drawn before that scene exists, so they carry their own.
-    // Finalize-only (`fan_risers`), like the body jog, so the per-move scorer is untouched.
     // The sheet this block is being added beside is foreign in exactly the same way, and
     // its terminals are the ones the block cannot see at all.
-    let foreign_pins: Vec<([f64; 2], String)> = if fan_risers {
-        net_eps
-            .iter()
-            .flat_map(|(net, eps)| eps.iter().map(move |(p, _)| (*p, net.clone())))
-            .chain(
-                w.beside_terminals()
-                    .into_iter()
-                    .map(|(p, net)| ([p.x, p.y], net)),
-            )
-            .collect()
-    } else {
-        Vec::new()
-    };
+    let foreign_pins: Vec<([f64; 2], String)> = net_eps
+        .iter()
+        .flat_map(|(net, eps)| eps.iter().map(move |(p, _)| (*p, net.clone())))
+        .chain(
+            w.beside_terminals()
+                .into_iter()
+                .map(|(p, net)| ([p.x, p.y], net)),
+        )
+        .collect();
 
     // Phase A — rails (shared wires + stubs + power symbols), so their wires are
     // in the writer before we build the routing scene. `used_lanes` records every
@@ -128,7 +112,7 @@ pub(crate) fn wire(
             // per pin) where the author marked the net (≥2 placed power symbols).
             // `emit_rail` distributes on its own account too, once it knows how long
             // the trunk and risers it would actually draw are.
-            let distribute = ir.rail_locals.contains(net) && !ir.rail_force.contains(net);
+            let distribute = ir.rail_locals.contains(net);
             let rail_y = rail_y_map.get(net).copied().filter(|_| !distribute);
             emit_rail(
                 env,
@@ -137,13 +121,11 @@ pub(crate) fn wire(
                 eps,
                 *band,
                 rail_y,
-                ir.rail_force.contains(net),
                 flag,
                 &riser_offsets,
                 &bodies,
                 &foreign_pins,
                 &power_keepouts,
-                fan_risers,
                 &mut used_lanes,
             )?;
         }
@@ -169,13 +151,12 @@ pub(crate) fn wire(
     // direction and detour around bodies (never through them).
     //
     // Long/crossing hops are delegated to net-label pairs (the human idiom) instead of
-    // dragging a literal wire across the sheet. FINALIZE-ONLY (`fan_risers`), so the
-    // per-move scorer's cost landscape — and thus the placement — is never perturbed.
-    // The policy is corpus-anchored (humans keep ~0% of wires >50mm and ~0 crossings),
-    // and applies to EVERY board, not just dense ones: the wire-dense small references
-    // (555/uart/grid) are exactly where literal long crossing wires read worst. Mirrors
-    // the spread-rail → local-power-symbol distribution above.
-    let label_policy = fan_risers.then(LabelPolicy::default);
+    // dragging a literal wire across the sheet. The policy is corpus-anchored (humans
+    // keep ~0% of wires >50mm and ~0 crossings), and applies to EVERY board, not just
+    // dense ones: the wire-dense small references (555/uart/grid) are exactly where
+    // literal long crossing wires read worst. Mirrors the spread-rail →
+    // local-power-symbol distribution above.
+    let label_policy = LabelPolicy::default();
     for (net, eps) in &net_eps {
         if ir.rails.contains_key(net) {
             continue;
@@ -249,14 +230,10 @@ pub(crate) fn route_signal(
     net: &str,
     eps: &[([f64; 2], Dir)],
     port_exit: Option<(Side, [f64; 2])>,
-    label_policy: Option<LabelPolicy>,
+    label_policy: LabelPolicy,
     scene: &mut sch_model::route::RouteScene,
 ) -> io::Result<()> {
     let port = port_exit.map(|(side, _)| side);
-    // `label_policy` is Some only on the shipped sheet (see `wire`), which is the same
-    // signal the riser fan and the weld guard use: finalize-only repairs, so the
-    // per-move scorer realises every candidate through an unchanged code path.
-    let finalize = label_policy.is_some();
 
     // Terminals: real pins (with outward dir) + the virtual port exit `plan_port_exits`
     // already settled and reserved.
@@ -383,9 +360,8 @@ pub(crate) fn route_signal(
     let term_label_seatable: Vec<bool> = term_pin
         .iter()
         .map(|tp| {
-            tp.as_ref().is_none_or(|(it, num)| {
-                label_stub(w, env, scene, &items[*it].refdes, num, net, finalize).1
-            })
+            tp.as_ref()
+                .is_none_or(|(it, num)| label_stub(w, env, scene, &items[*it].refdes, num, net).1)
         })
         .collect();
 
@@ -405,47 +381,42 @@ pub(crate) fn route_signal(
         };
         // A hop longer than the label policy's length is left unrouted so the union-find
         // leaves its endpoints split — the label-bridge below then names each side,
-        // turning a long literal wire into a net-label pair (the human idiom). The policy
-        // is Some only at finalize (see `wire`), so every per-move route is unaffected.
+        // turning a long literal wire into a net-label pair (the human idiom).
         let direct = (a[0] - b[0]).abs() + (a[1] - b[1]).abs();
-        if let Some(pol) = label_policy
-            && direct > pol.len_mm
-        {
+        if direct > label_policy.len_mm {
             continue;
         }
         if let Some(p) = router.route_edge(a, da, b, net, scene) {
-            if let Some(pol) = label_policy {
-                // The DIRECT gap may be short while the only obstacle-free ROUTE is a sheet-wide
-                // DETOUR (two ICs whose shared bus pins face opposite ways, so the wire wraps the
-                // perimeter). A drawn wraparound reads far worse than naming each end, so discard a
-                // path whose routed length exceeds the policy length and leave the endpoints split.
-                let routed: f64 = p
-                    .windows(2)
-                    .map(|s| (s[0][0] - s[1][0]).abs() + (s[0][1] - s[1][1]).abs())
-                    .sum();
-                if routed > pol.len_mm {
-                    continue;
-                }
-                // CROSSING-DRIVEN promotion: a cross-block hop whose literal route would CROSS a
-                // foreign wire reads as spaghetti (humans keep ~0 crossings). Name it instead —
-                // leave the endpoints split for the label-bridge. Gated on the DIRECT pin-to-pin
-                // gap (not the routed length): a LOCAL node (terminals a few mm apart) keeps its
-                // wires even when the only obstacle-free route detours far around a body, so a
-                // tight cluster isn't fragmented into label spam. Only promote when BOTH endpoints
-                // could carry a body-CLEAR label (predictor matches the lint's geometry), so a pin
-                // whose label would land over a chip body or pin-name text — including after the
-                // finalize stub-retraction — keeps its wire instead of becoming a lint-flagged
-                // label. Conservative on purpose: the TIER-1 references must stay 0-warning.
-                if direct > pol.cross_len_mm
-                    && term_label_clear[i]
-                    && term_label_clear[j]
-                    && sch_model::route::path_crossings(&p, net, scene) > 0
-                {
-                    continue;
-                }
+            // The DIRECT gap may be short while the only obstacle-free ROUTE is a sheet-wide
+            // DETOUR (two ICs whose shared bus pins face opposite ways, so the wire wraps the
+            // perimeter). A drawn wraparound reads far worse than naming each end, so discard a
+            // path whose routed length exceeds the policy length and leave the endpoints split.
+            let routed: f64 = p
+                .windows(2)
+                .map(|s| (s[0][0] - s[1][0]).abs() + (s[0][1] - s[1][1]).abs())
+                .sum();
+            if routed > label_policy.len_mm {
+                continue;
+            }
+            // CROSSING-DRIVEN promotion: a cross-block hop whose literal route would CROSS a
+            // foreign wire reads as spaghetti (humans keep ~0 crossings). Name it instead —
+            // leave the endpoints split for the label-bridge. Gated on the DIRECT pin-to-pin
+            // gap (not the routed length): a LOCAL node (terminals a few mm apart) keeps its
+            // wires even when the only obstacle-free route detours far around a body, so a
+            // tight cluster isn't fragmented into label spam. Only promote when BOTH endpoints
+            // could carry a body-CLEAR label (predictor matches the lint's geometry), so a pin
+            // whose label would land over a chip body or pin-name text — including after the
+            // stub-retraction — keeps its wire instead of becoming a lint-flagged label.
+            // Conservative on purpose: the TIER-1 references must stay 0-warning.
+            if direct > label_policy.cross_len_mm
+                && term_label_clear[i]
+                && term_label_clear[j]
+                && sch_model::route::path_crossings(&p, net, scene) > 0
+            {
+                continue;
             }
             for seg in p.windows(2) {
-                emit_routed_segment(w, scene, net, seg[0], seg[1], finalize);
+                emit_routed_segment(w, scene, net, seg[0], seg[1]);
             }
             paths.push(p);
             uf.union_to(i, j);
@@ -466,7 +437,7 @@ pub(crate) fn route_signal(
         && uf.find(0) != uf.find(pi)
         && safe_forced_single_port_stub(pts[0], pts[pi], net, scene)
     {
-        emit_routed_segment(w, scene, net, pts[0], pts[pi], finalize);
+        emit_routed_segment(w, scene, net, pts[0], pts[pi]);
         uf.union_to(0, pi);
     }
 
@@ -516,12 +487,11 @@ pub(crate) fn route_signal(
             }
             // Don't force an OVERHEAD detour across a long-haul gap: that recreates the very sheet-wide
             // wraparound the MST already declined (the i2c_sensors U4 SCL pin, ~110 mm from the rest of
-            // the bus). When the label policy is active, leave such a pin SPLIT so the label-bridge
-            // below names it instead — exactly as the too-long MST hop already does, and as the sibling
-            // SDA pin already gets. The local op-amp feedback case (pins a few mm apart) is well under
-            // the length, so it still forces its clean loop.
-            if let Some(pol) = label_policy
-                && (pts[0][0] - pts[k][0]).abs() + (pts[0][1] - pts[k][1]).abs() > pol.len_mm
+            // the bus). Leave such a pin SPLIT so the label-bridge below names it instead — exactly as
+            // the too-long MST hop already does, and as the sibling SDA pin already gets. The local
+            // op-amp feedback case (pins a few mm apart) is well under the length, so it still forces
+            // its clean loop.
+            if (pts[0][0] - pts[k][0]).abs() + (pts[0][1] - pts[k][1]).abs() > label_policy.len_mm
             {
                 continue;
             }
@@ -550,7 +520,7 @@ pub(crate) fn route_signal(
                         if (seg[0][0] - seg[1][0]).abs() > EPS
                             || (seg[0][1] - seg[1][1]).abs() > EPS
                         {
-                            emit_routed_segment(w, scene, net, seg[0], seg[1], finalize);
+                            emit_routed_segment(w, scene, net, seg[0], seg[1]);
                         }
                     }
                     uf.union_to(0, k);
@@ -613,7 +583,7 @@ pub(crate) fn route_signal(
                 continue; // named by the port label below
             }
             if let Some((i, num)) = pin {
-                let (stub, _) = label_stub(w, env, scene, &items[*i].refdes, num, net, finalize);
+                let (stub, _) = label_stub(w, env, scene, &items[*i].refdes, num, net);
                 if Some(*root) == global_fallback_root {
                     w.add_global_signal_label_stub(env, &items[*i].refdes, num, net, stub)?;
                 } else {
@@ -655,16 +625,14 @@ pub(crate) fn route_signal(
 }
 
 /// Emit only the portions of one routed segment not already covered by same-net geometry.
-/// Partial-overlap trimming is finalize-only so correctness repair does not perturb the
-/// placement scorer; fully covered spans are always reused. Covered request endpoints in
-/// an existing segment's interior receive junctions so the reuse is electrically attached.
+/// Fully covered spans are always reused; covered request endpoints in an existing
+/// segment's interior receive junctions so the reuse is electrically attached.
 fn emit_routed_segment(
     w: &mut SchematicWriter,
     scene: &mut sch_model::route::RouteScene,
     net: &str,
     a: ::geom::Point2,
     b: ::geom::Point2,
-    trim_partial: bool,
 ) {
     if let Some(covering) = scene.segments.iter().find(|existing| {
         existing.net == net
@@ -678,13 +646,6 @@ fn emit_routed_segment(
                 w.add_junction_on_net(at, net);
             }
         }
-        return;
-    }
-    if !trim_partial {
-        w.add_wire_on_net(a, b, net);
-        scene
-            .segments
-            .push(sch_model::route::NetSegment::new(a, b, net));
         return;
     }
     let existing: Vec<_> = scene
@@ -752,15 +713,11 @@ fn subtract_collinear_overlap(
 /// label tucks onto the pin endpoint itself, which is where the writer's stub retraction
 /// would put it anyway and which the lint exempts against the pin's own body.
 ///
-/// On a `finalize` build a rung whose anchor would MERGE the net with another
-/// (`anchor_merges`) is not a rung at all: readability may be given up, truthfulness may
-/// not. When every rung merges — which needs a foreign wire or pin over this pin's own
-/// tip, so only on a block drawn beside existing content — the default landing comes
-/// back reported as not clear, and the bridge picks another pin.
-///
-/// FINALIZE-ONLY, like the riser fan and the weld guard: the per-move scorer realises
-/// every candidate through this same path, so filtering there would make a truthfulness
-/// repair part of the cost landscape and move placements that never had a short.
+/// A rung whose anchor would MERGE the net with another (`anchor_merges`) is not a rung
+/// at all: readability may be given up, truthfulness may not. When every rung merges —
+/// which needs a foreign wire or pin over this pin's own tip, so only on a block drawn
+/// beside existing content — the default landing comes back reported as not clear, and
+/// the bridge picks another pin.
 fn label_stub(
     w: &SchematicWriter,
     env: &KicadInstallation,
@@ -768,7 +725,6 @@ fn label_stub(
     refdes: &str,
     num: &str,
     net: &str,
-    finalize: bool,
 ) -> (f64, bool) {
     const LADDER: [f64; 5] = [3.81, 6.35, 8.89, 11.43, 13.97];
     let Some((ep, dir)) = w
@@ -785,7 +741,7 @@ fn label_stub(
     let truthful: Vec<f64> = LADDER
         .into_iter()
         .chain([0.0])
-        .filter(|&s| !finalize || !anchor_merges(scene, landing(s), net))
+        .filter(|&s| !anchor_merges(scene, landing(s), net))
         .collect();
     match truthful
         .iter()
@@ -1250,8 +1206,7 @@ pub(crate) fn dir_toward(a: impl Into<::geom::Point2>, b: impl Into<::geom::Poin
 
 /// A signal-net MST hop whose (direct OR routed) length exceeds this (mm) is delegated
 /// to a name-matched net-label pair instead of a drawn wire — the professional idiom for
-/// long-haul / cross-block connectivity. Applied FINALIZE-ONLY (see [`LabelPolicy`]) so
-/// the per-move scorer / placement is never perturbed.
+/// long-haul / cross-block connectivity (see [`LabelPolicy`]).
 ///
 /// 50mm, anchored directly to the human corpus (`tools/layout_metrics.py`): humans keep
 /// ~0% of wires above 50mm (`wire_frac_gt50` median 0). A literal wire longer than this is
@@ -1559,15 +1514,11 @@ pub(crate) fn emit_rail(
     eps: &[([f64; 2], Dir)],
     band: Band,
     rail_y: Option<f64>,
-    // `ir.rail_force`: the author pinned this net to a spanning trunk, so the
-    // drawn-length cap does not apply to it.
-    forced: bool,
     flag: Option<&mut BTreeMap<String, ([f64; 2], f64)>>,
     riser_offsets: &BTreeMap<(String, i64), f64>,
     bodies: &[([f64; 2], [f64; 2])],
     foreign_pins: &[([f64; 2], String)],
     power_keepouts: &[Rect],
-    fan_risers: bool,
     used_lanes: &mut Vec<(f64, f64, f64, String)>,
 ) -> io::Result<()> {
     let Some(rail_y) = rail_y.filter(|_| eps.len() >= 3) else {
@@ -1577,11 +1528,7 @@ pub(crate) fn emit_rail(
     // the row it sits on, so the row is what is searched: the assigned row first, then
     // rows stepping OUTWARD from the parts. A trunk is drawn with no obstacle router of
     // its own, so a row it cannot own alone is rejected whole rather than patched.
-    let foreign_wires: Vec<(f64, f64, f64)> = if fan_risers {
-        foreign_rows(w, net)
-    } else {
-        Vec::new()
-    };
+    let foreign_wires: Vec<(f64, f64, f64)> = foreign_rows(w, net);
     let plan = |y: f64| {
         let attaches =
             plan_rail_attaches(net, eps, y, riser_offsets, bodies, foreign_pins, used_lanes);
@@ -1623,13 +1570,11 @@ pub(crate) fn emit_rail(
         .flat_map(|((p, _), &ax)| [(p[1] - rail_y).abs(), (ax - p[0]).abs()])
         .chain(std::iter::once(span_hi - span_lo))
         .fold(0.0, f64::max);
-    if longest > RAIL_SEGMENT_MAX && !forced {
+    if longest > RAIL_SEGMENT_MAX {
         return emit_local_power(env, w, net, eps, flag, power_keepouts);
     }
-    if fan_risers {
-        for (ep, &ax) in eps.iter().map(|(p, _)| p).zip(&attaches) {
-            used_lanes.push((ax, ep[1].min(rail_y), ep[1].max(rail_y), net.to_string()));
-        }
+    for (ep, &ax) in eps.iter().map(|(p, _)| p).zip(&attaches) {
+        used_lanes.push((ax, ep[1].min(rail_y), ep[1].max(rail_y), net.to_string()));
     }
     w.add_wire_on_net([span_lo, rail_y], [span_hi, rail_y], net);
     for ((ep, _dir), &ax) in eps.iter().zip(&attaches) {
@@ -1727,8 +1672,7 @@ fn trunk_hits_body(rail_y: f64, span: (f64, f64), bodies: &[Rect]) -> bool {
 /// same-rail cap column, or a mis-oriented cap whose own body sits between its pin and the
 /// rail), a FOREIGN pin the run would weld onto, and a lane another net's riser already
 /// occupies. One predicate, one search: jogging off one hazard can no longer land on
-/// another. `bodies`/`foreign_pins` are empty on the per-move scorer (finalize-only), so
-/// the placement is never churned by this.
+/// another.
 fn plan_rail_attaches(
     net: &str,
     eps: &[([f64; 2], Dir)],
@@ -1969,7 +1913,7 @@ mod tests {
             "+3V3",
             [105.41, 2.54].into(),
             [105.41, 24.13].into(),
-            false,
+            
         );
         emit_routed_segment(
             &mut writer,
@@ -1977,7 +1921,7 @@ mod tests {
             "+3V3",
             [105.41, 24.13].into(),
             [105.41, 21.59].into(),
-            false,
+            
         );
 
         assert_eq!(writer.wires_with_nets().len(), 1);
@@ -1998,7 +1942,7 @@ mod tests {
             "5V_FUSED",
             [105.41, 21.59].into(),
             [105.41, 24.13].into(),
-            true,
+            
         );
         emit_routed_segment(
             &mut writer,
@@ -2006,7 +1950,7 @@ mod tests {
             "5V_FUSED",
             [105.41, 24.13].into(),
             [105.41, 2.54].into(),
-            true,
+            
         );
 
         assert_eq!(writer.wires_with_nets().len(), 2);
@@ -2041,7 +1985,7 @@ mod tests {
             "SIG",
             [12.7, 10.16].into(),
             [17.78, 10.16].into(),
-            false,
+            
         );
 
         assert!(writer.wires_with_nets().is_empty());
@@ -2139,13 +2083,11 @@ mod tests {
             &eps,
             Band::Bottom,
             Some(45.72),
-            false,
             None,
             &BTreeMap::new(),
             &[],
             &foreign,
             &[],
-            true,
             &mut Vec::new(),
         )
         .unwrap();

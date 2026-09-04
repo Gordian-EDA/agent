@@ -107,7 +107,6 @@
     }
   ],
   "intent": {
-    "flow": "lr",
     "rails": {
       "3V3": "top",
       "5V": "top",
@@ -115,48 +114,6 @@
     },
     "ports": {
       "5V_BUS": "left"
-    },
-    "place": {
-      "C1": {
-        "col": 1,
-        "row": 0,
-        "orient": "down"
-      },
-      "C2": {
-        "col": 2,
-        "row": 0,
-        "orient": "down"
-      },
-      "C3": {
-        "col": 4,
-        "row": 0,
-        "orient": "down"
-      },
-      "C4": {
-        "col": 5,
-        "row": 0,
-        "orient": "down"
-      },
-      "D1": {
-        "col": 6,
-        "row": 0,
-        "orient": "left"
-      },
-      "F1": {
-        "col": 0,
-        "row": 0,
-        "orient": "right"
-      },
-      "R2": {
-        "col": 7,
-        "row": 1,
-        "orient": "up"
-      },
-      "U1": {
-        "col": 3,
-        "row": 0,
-        "orient": "down"
-      }
     }
   }
 }

@@ -1,18 +1,14 @@
 //! `sch-floorplan` — the COMPOSITION ROOT of schematic layout: it turns a
 //! `sch_check::Design` into a real `.kicad_sch` (and back), and it supplies the concrete
-//! collaborators the algorithm leaves are handed.
+//! collaborators `sch_flex::typeset` is handed.
 //!
-//! Owns the [`floorplan`] pipeline: **infer → place → wire → write**, and implements every
-//! contract `sch-model` declares:
+//! Owns the [`floorplan`] pipeline: **infer → place → wire → write**, and implements the
+//! `sch-model` contracts the typesetter's output is drawn through:
 //!
-//! - [`floorplan::place::RoutedEvaluator`] — the `CandidateEvaluator` a placement engine
-//!   asks what a candidate would cost. The cost an engine minimises *is* a routed-sheet
-//!   score, so the realiser and the measurement stay together here.
+//! - [`floorplan::place::RoutedEvaluator`] — measures a placed sheet once it is routed:
+//!   its truthfulness breaks, its readability warnings, its crossings.
 //! - [`wire::ElbowRouter`] — the `SchRouter` that draws the Manhattan wires.
 //! - [`label::GreedyText`] — the `TextSolver` that seats fields and net labels.
-//!
-//! The engine crates never depend on this one: they speak `sch-model` alone, and this
-//! crate injects itself into them. Swapping a leaf is a one-line change at the call site.
 //!
 //! The other surfaces:
 //! - [`floorplan`] — the pipeline entry points callers run (`infer_ir`, `place_problem`,

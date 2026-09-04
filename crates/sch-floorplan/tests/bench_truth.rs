@@ -36,10 +36,8 @@ fn regulator_payload() -> PlacePartsInput {
     serde_json::from_value(json!({
         "block": "regulator_fix",
         "intent": {
-            "flow": "lr",
             "ports": {"3V3": "right"},
-            "rails": {"GND": "bottom"},
-            "relations": [{"a": "U1", "b": "R32", "kind": "above"}]
+            "rails": {"GND": "bottom"}
         },
         "name": "Corrected regulator symbol",
         "parts": [

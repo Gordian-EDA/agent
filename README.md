@@ -69,13 +69,9 @@ cargo run --release -p gordian -- tui --project ./my_board
 ```
 
 PCB physical design exposes independently invokable tuned placement and routing
-phases, with the saved board as their shared state. Schematic placement remains
-independently selectable:
-
-```toml
-[engines]
-schematicPlacer = "cluster" # cluster | anneal | spine
-```
+phases, with the saved board as their shared state. Schematic layout has no
+search to select: the model composes each block as a row/col tree and the
+typesetter measures it.
 
 ## Architecture
 
@@ -91,9 +87,9 @@ A Rust workspace; the LLM orchestrates the deterministic crates:
 | `sch-check` | The kernel circuit model (`Design`), its semantic lints and deterministic ERC, and the `place_parts` tool input |
 | `circuit-graph` | Attributed circuit graph + a declarative idiom matcher |
 | `sch-doc` | Lossless editable `.kicad_sch` document and pure-Rust connectivity extractor |
-| `sch-model` | The schematic layout MODEL: the layout IR, placeable items, and the leaf contracts (`PlacementEngine`, `CandidateEvaluator`, `SchRouter`, `TextSolver`) plus a stub evaluator and golden problem fixtures |
-| `sch-floorplan` | Composition root: infer → place → wire → write, the routed evaluator, the elbow router, the text solver, and live editing |
-| `anneal-place` / `cluster-place` / `spine-place` | Interchangeable schematic placement leaves — `sch-model` + `geom` only |
+| `sch-model` | The schematic layout MODEL: the layout tree, the layout IR, placeable items, and the leaf contracts (`SchRouter`, `TextSolver`) |
+| `sch-floorplan` | Composition root: infer → typeset → wire → write, the elbow router, the text solver, and live editing |
+| `sch-flex` | The schematic TYPESETTER: a block's row/col tree measured into coordinates — `sch-model` + `geom` only |
 | `kicad-symbol` / `kicad-footprint` | KiCAD library discovery, metadata, and geometry |
 | `pcb-model` | Shared geometry and contracts for independently invoked PCB placement and routing phases |
 | `pcb-engine` | Production policy facade for tuned placement and routing |

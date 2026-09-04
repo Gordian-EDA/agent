@@ -18,7 +18,7 @@ pub mod place_parts;
 
 pub use diag::{Diagnostic, Diagnostics, Severity, Span};
 pub use kicad_symbol::{PinDir, PinMeta, PinType, SymbolMeta, SymbolTable, find_pin};
-pub use model::{Block, Component, Design, LayoutGrid, NetAttrs, Origin, PinTarget};
+pub use model::{Block, Component, Design, NetAttrs, Origin, PinTarget};
 pub use place_parts::{
     BlockDoc, DanglingPin, DuplicateRef, ExistingSheet, Intent, NcOverride, PayloadAudit,
     PlacePartsInput, into_design, place_parts_input_schema,

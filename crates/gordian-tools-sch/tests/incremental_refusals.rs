@@ -136,7 +136,10 @@ fn add_power_authorizes_the_power_net_and_the_named_pins_net() {
 
     assert!(powered.get("error").is_none(), "{powered}");
     let ground = call(&ctx, "get_net", json!({"name": "GND"})).to_string();
-    assert!(ground.contains("R1.1") && ground.contains("R2.1"), "{ground}");
+    assert!(
+        ground.contains("R1.1") && ground.contains("R2.1"),
+        "{ground}"
+    );
 }
 
 #[test]

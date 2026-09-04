@@ -25,24 +25,15 @@ fn payload(name: &str) -> PlacePartsInput {
     serde_json::from_str(&src).expect("payload parses")
 }
 
-/// Place `blocks` in order onto one sheet, as the tool's engine ladder does: every
-/// block is gated, and a refusal restores the sheet before the next one starts.
+/// Place `blocks` in order onto one sheet: every block is gated, and a refusal
+/// restores the sheet before the next one starts.
 fn place_blocks(env: &KicadInstallation, blocks: &[&str]) -> (SchDoc, Vec<(String, PlaceReport)>) {
     let mut doc = live::blank_sheet().expect("blank sheet");
     let mut reports = Vec::new();
     for name in blocks {
         let input = payload(name);
-        // The tool budgets by what the call LEAVES on the sheet, and a truncated search
-        // is part of the shape being reproduced — an unbounded run places differently.
-        let sheet_parts = doc.symbols().count() + input.parts.len();
-        let report = live::place_parts(
-            env,
-            &mut doc,
-            &input,
-            Box::new(spine_place::SpinePlace),
-            Some(live::PlacementBudget::new(sheet_parts)),
-        )
-        .unwrap_or_else(|e| panic!("{name}: {e}"));
+        let report =
+            live::place_parts(env, &mut doc, &input).unwrap_or_else(|e| panic!("{name}: {e}"));
         reports.push(((*name).to_string(), report));
     }
     (doc, reports)
@@ -83,7 +74,7 @@ fn mcu_core_after_the_buck_stage_is_truthful() {
 /// `campaign-bms-10s`: the pull-up network reduced to its cause. `Device:R_Network04`
 /// puts four pins at half-grid pitch, so `I2C_SCL`'s pennant — nudged 2.54 mm clear of
 /// the body — landed exactly on `I2C_SDA`'s, and two global labels at one coordinate are
-/// one net (`shorted I2C_SCL+I2C_SDA`, under BOTH spine and cluster).
+/// one net (`shorted I2C_SCL+I2C_SDA`).
 #[test]
 fn a_pullup_network_seats_one_pennant_per_anchor() {
     assert_no_shorts(&["i2c-pullup-network"]);

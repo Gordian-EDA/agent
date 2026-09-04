@@ -16,11 +16,6 @@ use kicad::KicadInstallation;
 use sch_check::place_parts::PlacePartsInput;
 use sch_doc::{LabelKind, SchDoc};
 use sch_floorplan::live;
-use sch_model::engine::PlacementEngine;
-
-fn engine() -> impl PlacementEngine {
-    cluster_place::ClusterPlace
-}
 
 const BLANK: &str = "(kicad_sch\n\
 \t(version 20250114)\n\
@@ -95,7 +90,6 @@ fn ported_block() -> PlacePartsInput {
              "pins": {"1": "NRST", "2": "GND"}}
         ],
         "intent": {
-            "flow": "lr",
             "rails": {"+3V3": "top", "GND": "bottom"},
             "ports": {"NRST": "right", "SWDIO": "right", "SWCLK": "right",
                       "USB_D+": "left", "USB_D-": "left", "BOOT0": "left"}
@@ -120,7 +114,7 @@ fn joining_block() -> PlacePartsInput {
 }
 
 fn place(env: &KicadInstallation, doc: &mut SchDoc, input: &PlacePartsInput) {
-    let report = live::place_parts(env, doc, input, Box::new(engine()), None).expect("place_parts");
+    let report = live::place_parts(env, doc, input).expect("place_parts");
     assert!(report.committed, "rolled back — {:?}", report.mismatch);
 }
 
@@ -248,13 +242,7 @@ fn arranging_keeps_each_nets_scope() {
     let before = scopes(&doc);
 
     let selection = live::Selection::Refs(vec!["U1".into(), "J3".into(), "R1".into(), "C1".into()]);
-    let report =
-        live::arrange(
-        &env,
-        &mut doc,
-        &selection,
-        None,
-        Box::new(engine()), None).expect("arrange");
+    let report = live::arrange(&env, &mut doc, &selection, None, None).expect("arrange");
     assert!(report.committed, "rolled back — {:?}", report.mismatch);
     doc.write(&path).unwrap();
 

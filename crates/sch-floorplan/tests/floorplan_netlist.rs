@@ -217,18 +217,13 @@ fn validate_fixture(
         let (design, diagnostics, _) =
             sch_check::into_design(&input, provider, &Default::default());
         assert!(!diagnostics.has_errors(), "{name}: {:#?}", diagnostics);
-        let ir = input
-            .intent
-            .map(sch_check::Intent::into_layout_ir)
-            .unwrap_or_else(|| floorplan::baseline_ir(&design));
-        // `SCH_ENGINE=spine` runs the same oracle over the spine engine; the
-        // default stays anneal so existing runs are untouched.
-        let engine: Box<dyn sch_model::engine::PlacementEngine> =
-            match std::env::var("SCH_ENGINE").as_deref() {
-                Ok("spine") => Box::new(spine_place::SpinePlace),
-                _ => Box::new(anneal_place::Anneal),
-            };
-        let out = floorplan::emit_strategy(env, &design, engine, Some(ir))
+        // Compose the IR exactly as the live path does: inference supplies the rails,
+        // the ports and each block's tree, and the caller's intent lays over it.
+        let mut ir = floorplan::infer_ir(env, &design);
+        if let Some(intent) = input.intent {
+            floorplan::apply_intent(&mut ir, intent.into_layout_ir());
+        }
+        let out = floorplan::emit_strategy(env, &design, Some(ir))
             .unwrap_or_else(|e| panic!("{name}: {e}"));
 
         // The realiser's own occupancy invariant, read off the finished sheet before the
@@ -250,8 +245,8 @@ fn validate_fixture(
 
         // Readability invariant (tier-1 only): the reference fixtures emit with ZERO
         // layout warnings (no symbol/text overlap, no value-text smeared onto a
-        // neighbour, no wire through a body). This guards the IC-MPN placement, spine
-        // collinearity, and IC-body-crossing work — any of which regressing would
+        // neighbour, no wire through a body). This guards the IC-MPN placement, pin
+        // alignment, and IC-body-crossing work — any of which regressing would
         // re-introduce a warning here long before a human re-renders. The hard
         // challenge fixtures are exempt (a 100-pin part lays out rough on purpose).
         if strict_warnings {

@@ -74,22 +74,17 @@ const TEN_PARTS: &str = r#"{
     {"ref": "TP1", "part": "Device:R", "value": "0R", "dnp": true,
      "pins": {"1": "TX", "2": "nc"}}
   ],
-  "intent": {"flow": "lr", "rails": {"+3V3": "top", "GND": "bottom"},
+  "intent": {"rails": {"+3V3": "top", "GND": "bottom"},
              "ports": {"TX": "right", "RX": "right"}}
 }"#;
 
 const CAMPAIGN_BMS_POWER_PROTECTION: &str = r#"{
   "block": "power_protection",
   "intent": {
-    "flow": "lr",
     "ports": {
       "+3V3": "top", "CHG": "top", "DSG": "top", "GND": "bottom",
       "LOAD+": "right", "LOAD-": "right", "PACK+": "left", "PACK-": "left"
-    },
-    "relations": [
-      {"kind": "group", "members": ["J1", "F1", "J2", "Q1", "Q2", "RS1", "D1"], "name": "power_path", "side": "right"},
-      {"anchor": "J1", "kind": "group", "members": ["U2", "C1", "C2"], "name": "ldo", "side": "top"}
-    ]
+    }
   },
   "name": "10S Li-ion BMS",
   "parts": [
@@ -463,25 +458,6 @@ fn campaign_bms_unresolvable_decoupled_part_is_reported_without_panicking() {
             .any(|diagnostic| diagnostic.code == "decouple-unplaced"),
         "{diags:?}"
     );
-
-    let available = design
-        .blocks
-        .values()
-        .flat_map(|block| block.components.keys().cloned())
-        .collect();
-    let (ir, warnings) = input.intent.unwrap().into_layout_ir_for(&available);
-    assert!(ir.relations.is_empty(), "{ir:?}");
-    assert_eq!(warnings.len(), 2, "{warnings:?}");
-    assert!(
-        warnings
-            .iter()
-            .any(|warning| warning.contains("J1") && warning.contains("J2")),
-        "{warnings:?}"
-    );
-    assert!(
-        warnings.iter().any(|warning| warning.contains("U2")),
-        "{warnings:?}"
-    );
 }
 
 #[test]
@@ -616,8 +592,8 @@ fn intent_becomes_a_layout_ir() {
     let ir = parse().intent.expect("intent").into_layout_ir();
     assert_eq!(ir.rails.len(), 2);
     assert_eq!(ir.ports.len(), 2);
-    // The engine's own derived fields are not input.
-    assert!(ir.idioms.is_empty() && ir.frozen.is_empty() && ir.zone.is_empty());
+    // What inference derives for itself is not input.
+    assert!(ir.trees.is_empty() && ir.rail_locals.is_empty());
 }
 
 #[test]

@@ -34,7 +34,7 @@
 //! structures via the same `write` module tree:
 //!
 //! - [`build`] — accumulating the document: `add_*` placement, pin-endpoint
-//!   geometry, route-scene/refinement accessors, and the rigid `translate`.
+//!   geometry, route-scene/truthfulness accessors, and the rigid `translate`.
 //! - [`textsolve`] — the field/label placement solver: stub retraction, wire
 //!   splitting at taps, the greedy candidate solver, reframing, and the
 //!   readability lint.
@@ -52,7 +52,8 @@ mod textsolve;
 
 // Re-export the public surface VERBATIM so external `crate::write::…` paths
 // resolve unchanged across the split.
-pub use build::{pin_end0, point_key, quantize_dir};
+pub use build::{pin_end0, point_key};
+pub use sch_model::geometry::quantize_dir;
 pub use emit::{escape_sexpr_string, fmt_coord};
 
 /// Stable key identifying *this* schematic sheet for root-uuid derivation.
@@ -254,9 +255,8 @@ pub struct SchematicWriter {
     /// which place content at fixed absolute coordinates.
     pub(super) frame: bool,
     /// When set, a junction dot is refused where a FOREIGN net's wire already runs — a
-    /// dot welds everything through it, so on a shipped sheet the realiser must never be
-    /// the thing that merges two nets. A finalize-only repair, like the riser fan: the
-    /// per-move scorer leaves it off so its cost landscape stays the geometry alone.
+    /// dot welds everything through it, so the realiser must never be the thing that
+    /// merges two nets.
     pub(super) weld_guard: bool,
     /// Points occupied by a pin the design put on a NET. A no-connect marker there is
     /// refused: symbols stack their duplicate power pins on one endpoint (an ESP32's

@@ -22,7 +22,7 @@ fn main() {
     if sch {
         print!(
             "{}",
-            floorplan::emit_strategy(&env, &design, Box::new(anneal_place::Anneal), Some(ir))
+            floorplan::emit_strategy(&env, &design, Some(ir))
                 .unwrap()
                 .sch
         );

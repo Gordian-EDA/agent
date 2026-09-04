@@ -10,23 +10,18 @@ description = "Schematic layout composition root: infer, place, route, text-solv
 sch-model = { path = "../sch-model" }
 sch-doc = { path = "../sch-doc" }
 sch-check = { path = "../sch-check" }
+sch-flex = { path = "../sch-flex" }
 circuit-graph = { path = "../circuit-graph" }
 kicad-symbol = { path = "../kicad-symbol" }
 kicad = { path = "../kicad" }
 geom = { path = "../geom" }
-indexmap.workspace = true
 kiutils_kicad.workspace = true
 uuid.workspace = true
 tempfile.workspace = true
 serde = { workspace = true, features = ["derive"] }
-anyhow.workspace = true
 thiserror.workspace = true
 serde_json.workspace = true
-rayon.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
-anneal-place = { path = "../anneal-place" }
-spine-place = { path = "../spine-place" }
-cluster-place = { path = "../cluster-place" }
 tempfile.workspace = true

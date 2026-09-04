@@ -10,9 +10,9 @@
 //! treat the bench as progress rather than as damage.
 //!
 //! Two things put a symbol here: [`add_parts`](crate::live::add_parts), which is a
-//! payload with no layout at all, and a placement whose every engine drew a sheet
-//! that did not mean what the payload said — those symbols are benched rather than
-//! the whole netlist discarded. [`crate::live::arrange`] is how they leave.
+//! payload with no layout at all, and a placement that drew a sheet which did not
+//! mean what the payload said — those symbols are benched rather than the whole
+//! netlist discarded. [`crate::live::arrange`] is how they leave.
 //!
 //! Authored names are written exactly as requested. KiCAD-derived names such as
 //! `Net-(R1-Pad1)` are the sole exception: they change with their pin partition, so

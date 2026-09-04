@@ -3,19 +3,19 @@
 //! more than one piece (an OPEN). This is the geometry behind the `place_parts` refusals
 //! "the placed result does not match the requested connectivity (shorted A+B)" and
 //! "(scattered GND)" — checked here directly on the emitted sheet, so a regression is a
-//! failing unit test rather than a refused tool call a whole engine-run later.
+//! failing unit test rather than a refused tool call a whole typeset later.
 //!
-//! Runs over every `place-parts` fixture in the validation corpus under the SPINE engine —
-//! the one the agent places with, and the one `floorplan_netlist` (which asserts the same
-//! invariant for free on its own anneal emits) does not exercise. Between the two, both
-//! engines are covered once each. SKIPs without KiCAD.
+//! Runs over every `place-parts` fixture in the validation corpus twice: once straight
+//! through `emit_strategy` (`realised_corpus_sheets_are_truthful`, the same path
+//! `floorplan_netlist` exercises), and once through the LIVE path the agent actually
+//! places with (`live_place_parts_commits_every_corpus_fixture`, `place_parts` onto a
+//! blank sheet), which `floorplan_netlist` does not cover. SKIPs without KiCAD.
 
 use std::path::Path;
 
 use kicad::KicadInstallation;
 use kicad_symbol::SymbolTable;
 use sch_floorplan::floorplan;
-use sch_model::engine::PlacementEngine;
 
 fn corpus() -> std::path::PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/validation")
@@ -50,8 +50,7 @@ fn defects_of(env: &KicadInstallation, provider: &SymbolTable, name: &str) -> Ve
         .clone()
         .map(sch_check::Intent::into_layout_ir)
         .unwrap_or_else(|| floorplan::baseline_ir(&design));
-    let engine: Box<dyn PlacementEngine> = Box::new(spine_place::SpinePlace);
-    let out = floorplan::emit_strategy(env, &design, engine, Some(ir))
+    let out = floorplan::emit_strategy(env, &design, Some(ir))
         .unwrap_or_else(|e| panic!("{name}: {e}"));
     out.net_shorts
         .into_iter()
@@ -92,8 +91,8 @@ fn realised_corpus_sheets_are_truthful() {
 }
 
 /// The same corpus through the LIVE path the agent calls — `place_parts` onto a blank
-/// sheet under the spine engine — asserting the gate it is refused by. A refusal here is
-/// the `place_parts` failure a campaign pays a whole retry for, reproduced without one.
+/// sheet — asserting the gate it is refused by. A refusal here is the `place_parts`
+/// failure a campaign pays a whole retry for, reproduced without one.
 #[test]
 fn live_place_parts_commits_every_corpus_fixture() {
     if !corpus().is_dir() {
@@ -118,13 +117,7 @@ fn live_place_parts_commits_every_corpus_fixture() {
         let (_, diags, _) = sch_check::into_design(&input, &provider, &Default::default());
         assert!(!diags.has_errors(), "{name}: {diags:#?}");
         let mut doc = sch_floorplan::live::blank_sheet().unwrap();
-        match sch_floorplan::live::place_parts(
-            &env,
-            &mut doc,
-            &input,
-            Box::new(spine_place::SpinePlace),
-            None,
-        ) {
+        match sch_floorplan::live::place_parts(&env, &mut doc, &input) {
             Ok(report) if !report.committed => {
                 refused.push(format!("{name}: {:?}", report.mismatch))
             }

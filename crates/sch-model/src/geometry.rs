@@ -1,12 +1,9 @@
 //! Placement geometry: an item's body+text rect, overlap counts, pin endpoints,
 //! and the sheet spacing constants every seeding pass shares.
 
-use std::collections::BTreeMap;
-
-use geom::{EPS, GRID_50_MIL, Point2};
+use geom::{Dir, GRID_50_MIL, Point2};
 use kicad_symbol::geometry::PinGeom;
 
-use crate::ir::LayoutIr;
 use crate::item::Item;
 use crate::text::text_width;
 
@@ -97,43 +94,6 @@ pub fn body_overlap_count(items: &[Item]) -> usize {
     n
 }
 
-/// Violations of the author's per-block `layout:` relative ordering (`ir.grid`).
-/// For each pair of gridded parts whose grid boxes are DISJOINT on an axis, the
-/// search must hold that order: A strictly left of B (`A.col_max < B.col_min`)
-/// requires A's body centre left of B's; A strictly above B (`A.row_max <
-/// B.row_min`) requires A above B (smaller y). Boxes that OVERLAP on an axis — a
-/// column-span float like a tall IC — impose no constraint on that axis, so the
-/// part floats within its span. Empty grid ⇒ 0 (no `layout:` / sidecar path).
-pub fn grid_order_viol(items: &[Item], ir: &LayoutIr) -> usize {
-    if ir.grid.is_empty() {
-        return 0;
-    }
-    let pos: BTreeMap<&str, [f64; 2]> = items
-        .iter()
-        .map(|it| (it.refdes.as_str(), it.at.into()))
-        .collect();
-    let g: Vec<(&String, &[i32; 4])> = ir.grid.iter().collect();
-    let mut viol = 0;
-    for i in 0..g.len() {
-        for j in (i + 1)..g.len() {
-            let (ra, ba) = g[i];
-            let (rb, bb) = g[j];
-            let (Some(pa), Some(pb)) = (pos.get(ra.as_str()), pos.get(rb.as_str())) else {
-                continue;
-            };
-            // Columns → left/right, only when the two boxes share no column.
-            if (ba[2] < bb[0] && pa[0] >= pb[0] - EPS) || (bb[2] < ba[0] && pb[0] >= pa[0] - EPS) {
-                viol += 1;
-            }
-            // Rows → above/below (smaller y is higher), only when row-disjoint.
-            if (ba[3] < bb[1] && pa[1] >= pb[1] - EPS) || (bb[3] < ba[1] && pb[1] >= pa[1] - EPS) {
-                viol += 1;
-            }
-        }
-    }
-    viol
-}
-
 /// Compute the sheet-space connection endpoint of a pin on a placed instance.
 ///
 /// ## What "connection endpoint" means
@@ -178,6 +138,27 @@ pub fn pin_endpoint(
         .into()
 }
 
+/// Quantize a pin's outward direction to the four sheet axes.
+///
+/// `pin_angle` is the pin's local `(at … angle)` in the symbol — it points from
+/// the connection tip INTO the body, so outward (away from the body) is
+/// `pin_angle + 180`. That outward vector goes through [`Point2::transform_offset`]
+/// — the SAME pose transform as the endpoint, so a direction can never point back
+/// through the body its endpoint sits on — and is then snapped to the dominant axis.
+/// Shared by the writer's stub directions and the typesetter's
+/// orientation conventions.
+pub fn quantize_dir(pin_angle: f64, inst_angle: f64, mirror: bool) -> Dir {
+    let theta = (pin_angle + 180.0).to_radians();
+    let out = Point2::new(theta.cos(), theta.sin()).transform_offset(inst_angle, mirror);
+    if out.x.abs() >= out.y.abs() {
+        if out.x >= 0.0 { Dir::East } else { Dir::West }
+    } else if out.y >= 0.0 {
+        Dir::South
+    } else {
+        Dir::North
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -208,7 +189,6 @@ mod tests {
             angle: 0.0,
             unit: 1,
             mirror: false,
-            frozen: false,
             preseeded: false,
         }
     }

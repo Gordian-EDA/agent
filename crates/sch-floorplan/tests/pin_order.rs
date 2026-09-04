@@ -91,17 +91,16 @@ fn a_two_pin_part_keeps_its_pin_order_in_every_pose() {
     );
 }
 
-/// The same claim one level up: a 2-pin part authored with each [`Orient`], mirrored
-/// or not, placed by the shipping engine, must draw the pin->net map it was given.
-///
-/// [`Orient`]: sch_model::ir::Orient
+/// The same claim one level up: a 2-pin part authored at every angle, mirrored or
+/// not, placed by `sch_flex::typeset` through an authored `layout` tree, must draw
+/// the pin->net map it was given.
 #[test]
 fn placing_a_two_pin_part_honours_every_authored_orientation() {
     let Some(env) = detect() else { return };
     let provider = SymbolTable::from_symbol_dir(env.symbol_dir().to_path_buf());
     let dir = tempfile::tempdir().unwrap();
     let mut wrong = Vec::new();
-    for orient in ["up", "down", "left", "right"] {
+    for rot in ANGLES {
         for mirror in [false, true] {
             // X1 under test, flanked so BOTH its nets carry a second pin: a
             // transposition on a net with one pin is not observable.
@@ -111,9 +110,12 @@ fn placing_a_two_pin_part_honours_every_authored_orientation() {
                     {"ref": "R8", "part": "Device:R", "pins": {"1": "N1", "2": "N0"}},
                     {"ref": "R9", "part": "Device:R", "pins": {"1": "N2", "2": "N0"}}
                 ],
-                "intent": {
-                    "place": {"X1": {"col": 1, "row": 1, "orient": orient}},
-                    "mirror": if mirror { vec!["X1"] } else { vec![] },
+                "layout": {
+                    "main": {"row": [
+                        {"part": "X1", "rot": rot as i32, "mirror": mirror},
+                        {"part": "R8"},
+                        {"part": "R9"}
+                    ]}
                 }
             }))
             .unwrap();
@@ -122,34 +124,25 @@ fn placing_a_two_pin_part_honours_every_authored_orientation() {
             assert!(!diagnostics.has_errors(), "{diagnostics:#?}");
 
             let mut doc = live::blank_sheet().unwrap();
-            let report = live::place_parts(
-                &env,
-                &mut doc,
-                &input,
-                Box::new(cluster_place::ClusterPlace),
-                None,
-            )
-            .unwrap();
+            let report = live::place_parts(&env, &mut doc, &input).unwrap();
             if !report.mismatch.is_empty() {
-                wrong.push(format!("{orient}/mirror={mirror}: {:?}", report.mismatch));
+                wrong.push(format!("rot={rot}/mirror={mirror}: {:?}", report.mismatch));
                 continue;
             }
             // `verify` shares the writer's pose transform, so confirm against KiCAD too.
-            let path = dir
-                .path()
-                .join(format!("place-{orient}-{mirror}.kicad_sch"));
+            let path = dir.path().join(format!("place-{rot}-{mirror}.kicad_sch"));
             doc.write(&path).unwrap();
             let nets: std::collections::BTreeMap<String, String> =
                 cli_pin_nets(&env, &path).into_iter().collect();
             let (one, two) = (nets.get("X1.1"), nets.get("X1.2"));
             if one.is_none() || one == two {
                 wrong.push(format!(
-                    "{orient}/mirror={mirror}: X1 pins on {one:?}/{two:?}"
+                    "rot={rot}/mirror={mirror}: X1 pins on {one:?}/{two:?}"
                 ));
             }
             if nets.get("X1.1") != nets.get("R8.1") || nets.get("X1.2") != nets.get("R9.1") {
                 wrong.push(format!(
-                    "{orient}/mirror={mirror}: X1 pins TRANSPOSED — {nets:?}"
+                    "rot={rot}/mirror={mirror}: X1 pins TRANSPOSED — {nets:?}"
                 ));
             }
             let _ = SchDoc::read(&path).unwrap();

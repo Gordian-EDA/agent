@@ -21,7 +21,7 @@ use sch_model::ir::LayoutIr;
 use sch_model::item::{Incidence, Item};
 
 use crate::floorplan::place::add_orphan_label_columns;
-use crate::floorplan::place::{RouteRealization, RoutedSheetRealizer};
+use crate::floorplan::place::RoutedSheetRealizer;
 use crate::write::SchematicWriter;
 
 /// How a block is drawn, beyond the items themselves.
@@ -56,7 +56,7 @@ pub fn realize_block(
     if let Some(scene) = draw.beside {
         realizer = realizer.beside(scene);
     }
-    let mut writer = realizer.realize_writer(draw.title, items, RouteRealization::ShippedSheet)?;
+    let mut writer = realizer.realize_writer(draw.title, items)?;
     add_orphan_label_columns(&mut writer, design, inc);
     writer.set_frame(draw.frame);
     writer.prepare();

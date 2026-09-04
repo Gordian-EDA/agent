@@ -676,53 +676,85 @@
 	)
 	(global_label "OUT"
 		(shape bidirectional)
-		(at 40.64 33.02 0)
+		(at 71.12 20.32 0)
 		(effects (font (size 1.27 1.27)) (justify left))
-		(uuid "7afe2d23-7405-5284-a20d-60ac39b73570")
+		(uuid "891f0095-668e-5dd0-9f85-7ccd1fcf5b83")
 	)
 	(wire
 		(pts
-			(xy 22.86 33.02) (xy 29.21 33.02)
+			(xy 25.4 20.32) (xy 43.18 20.32)
 		)
 		(stroke (width 0) (type default))
-		(uuid "087e759b-4dc5-555a-96f0-887ea0918ce4")
+		(uuid "4882b307-172b-5a99-928f-bed12712ab1f")
 	)
 	(wire
 		(pts
-			(xy 29.21 27.94) (xy 29.21 33.02)
+			(xy 43.18 17.78) (xy 63.5 17.78)
 		)
 		(stroke (width 0) (type default))
-		(uuid "cef49a9e-290b-5920-856a-c8a877f46f95")
+		(uuid "7496b7fc-dfeb-533e-89d2-9d7bfa467a44")
 	)
 	(wire
 		(pts
-			(xy 29.21 33.02) (xy 33.02 33.02)
+			(xy 43.18 20.32) (xy 43.18 17.78)
 		)
 		(stroke (width 0) (type default))
-		(uuid "f7592f97-72f3-58da-9513-3211c5fcb357")
+		(uuid "1623acd7-74cd-5a23-90da-dd13342442b6")
 	)
 	(wire
 		(pts
-			(xy 33.02 33.02) (xy 40.64 33.02)
+			(xy 63.5 17.78) (xy 63.5 20.32)
 		)
 		(stroke (width 0) (type default))
-		(uuid "65851a2d-9e6a-5dcc-9551-9da61ee8b760")
+		(uuid "a1764405-3076-5851-aa88-7dcdcfb30c2c")
+	)
+	(wire
+		(pts
+			(xy 63.5 17.78) (xy 71.12 17.78)
+		)
+		(stroke (width 0) (type default))
+		(uuid "56780e0c-0f96-54b7-954f-9128f4998b54")
+	)
+	(wire
+		(pts
+			(xy 71.12 17.78) (xy 71.12 20.32)
+		)
+		(stroke (width 0) (type default))
+		(uuid "0df40e83-bbd6-59eb-8a50-a0eab16a042a")
 	)
 	(junction
-		(at 29.21 33.02)
+		(at 43.18 17.78)
 		(diameter 0)
 		(color 0 0 0 0)
-		(uuid "a667b7fc-7d9c-5780-b37c-e5de2082b904")
+		(uuid "d0cbac53-fd0e-5780-baac-2bd542794372")
 	)
 	(junction
-		(at 33.02 33.02)
+		(at 43.18 20.32)
 		(diameter 0)
 		(color 0 0 0 0)
-		(uuid "391e6103-1355-5271-bc96-f018d57785f9")
+		(uuid "93a411b2-f6cd-55c7-a6e8-d4fe5851ff36")
+	)
+	(junction
+		(at 63.5 17.78)
+		(diameter 0)
+		(color 0 0 0 0)
+		(uuid "ae2fcc80-22fc-5c7a-9445-19fec70d8935")
+	)
+	(junction
+		(at 63.5 20.32)
+		(diameter 0)
+		(color 0 0 0 0)
+		(uuid "8f127fdc-de29-5d75-8dad-a2cf3bc499fd")
+	)
+	(junction
+		(at 71.12 17.78)
+		(diameter 0)
+		(color 0 0 0 0)
+		(uuid "7e60fe0c-3026-5f14-a484-e72cf675f383")
 	)
 	(symbol
 		(lib_id "power:PWR_FLAG")
-		(at 33.02 40.64 180)
+		(at 43.18 27.94 180)
 		(unit 1)
 		(exclude_from_sim no)
 		(in_bom yes)
@@ -730,15 +762,15 @@
 		(dnp no)
 		(uuid "00312453-030b-5f09-adc4-2c51ad421be0")
 		(property "Reference" "#FLG_GND"
-			(at 39.370000000000005 39.37 0)
+			(at 49.53 26.67 0)
 			(effects (font (size 1.27 1.27)) (justify left) (hide yes))
 		)
 		(property "Value" "PWR_FLAG"
-			(at 39.370000000000005 41.910000000000004 0)
+			(at 49.53 29.21 0)
 			(effects (font (size 1.27 1.27)) (justify left) (hide yes))
 		)
 		(property "Footprint" ""
-			(at 33.02 40.64 0)
+			(at 43.18 27.94 0)
 			(effects (font (size 1.27 1.27)) (hide yes))
 		)
 		(instances
@@ -753,7 +785,7 @@
 	)
 	(symbol
 		(lib_id "power:PWR_FLAG")
-		(at 29.21 20.32 0)
+		(at 17.78 20.32 90)
 		(unit 1)
 		(exclude_from_sim no)
 		(in_bom yes)
@@ -761,15 +793,15 @@
 		(dnp no)
 		(uuid "3bc57e2e-7dd3-5896-acbe-d80c03a6b295")
 		(property "Reference" "#FLG_VCC"
-			(at 35.56 19.05 0)
+			(at 24.13 19.05 270)
 			(effects (font (size 1.27 1.27)) (justify left) (hide yes))
 		)
 		(property "Value" "PWR_FLAG"
-			(at 35.56 21.59 0)
+			(at 24.13 21.59 270)
 			(effects (font (size 1.27 1.27)) (justify left) (hide yes))
 		)
 		(property "Footprint" ""
-			(at 29.21 20.32 0)
+			(at 17.78 20.32 0)
 			(effects (font (size 1.27 1.27)) (hide yes))
 		)
 		(instances
@@ -784,7 +816,7 @@
 	)
 	(symbol
 		(lib_id "power:GND")
-		(at 33.02 40.64 0)
+		(at 43.18 27.94 0)
 		(unit 1)
 		(exclude_from_sim no)
 		(in_bom yes)
@@ -792,15 +824,15 @@
 		(dnp no)
 		(uuid "8795b477-e3cf-5de6-932b-54ef9a3a00a4")
 		(property "Reference" "#PWR_GND_0"
-			(at 39.370000000000005 39.37 0)
+			(at 49.53 26.67 0)
 			(effects (font (size 1.27 1.27)) (justify left) (hide yes))
 		)
 		(property "Value" "GND"
-			(at 38.74 41.44 0)
+			(at 48.9 28.74 0)
 			(effects (font (size 1.27 1.27)) (justify left))
 		)
 		(property "Footprint" ""
-			(at 33.02 40.64 0)
+			(at 43.18 27.94 0)
 			(effects (font (size 1.27 1.27)) (hide yes))
 		)
 		(instances
@@ -815,7 +847,7 @@
 	)
 	(symbol
 		(lib_id "power:GND")
-		(at 22.86 40.64 0)
+		(at 63.5 27.94 0)
 		(unit 1)
 		(exclude_from_sim no)
 		(in_bom yes)
@@ -823,15 +855,15 @@
 		(dnp no)
 		(uuid "4f6232d6-d705-5753-a39b-13963eb74766")
 		(property "Reference" "#PWR_GND_1"
-			(at 29.209999999999997 39.37 0)
+			(at 69.85 26.67 0)
 			(effects (font (size 1.27 1.27)) (justify left) (hide yes))
 		)
 		(property "Value" "GND"
-			(at 17.14 41.44 0)
-			(effects (font (size 1.27 1.27)) (justify right))
+			(at 69.22 28.74 0)
+			(effects (font (size 1.27 1.27)) (justify left))
 		)
 		(property "Footprint" ""
-			(at 22.86 40.64 0)
+			(at 63.5 27.94 0)
 			(effects (font (size 1.27 1.27)) (hide yes))
 		)
 		(instances
@@ -846,7 +878,7 @@
 	)
 	(symbol
 		(lib_id "power:VCC")
-		(at 29.21 20.32 0)
+		(at 17.78 20.32 90)
 		(unit 1)
 		(exclude_from_sim no)
 		(in_bom yes)
@@ -854,15 +886,15 @@
 		(dnp no)
 		(uuid "42b5ed80-094a-5030-a7fb-dda43f1803a7")
 		(property "Reference" "#PWR_VCC_0"
-			(at 35.56 19.05 0)
+			(at 24.13 19.05 270)
 			(effects (font (size 1.27 1.27)) (justify left) (hide yes))
 		)
 		(property "Value" "VCC"
-			(at 29.21 14.6 0)
+			(at 17.78 14.6 270)
 			(effects (font (size 1.27 1.27)))
 		)
 		(property "Footprint" ""
-			(at 29.21 20.32 0)
+			(at 17.78 20.32 0)
 			(effects (font (size 1.27 1.27)) (hide yes))
 		)
 		(instances
@@ -877,7 +909,7 @@
 	)
 	(symbol
 		(lib_id "Device:C")
-		(at 22.86 36.83 0)
+		(at 63.5 24.13 0)
 		(unit 1)
 		(exclude_from_sim no)
 		(in_bom yes)
@@ -885,19 +917,19 @@
 		(dnp no)
 		(uuid "8fdd845b-ad84-5268-a715-a880690218bf")
 		(property "Reference" "C3"
-			(at 16.51 35.56 0)
-			(effects (font (size 1.27 1.27)) (justify right))
+			(at 69.85 22.86 0)
+			(effects (font (size 1.27 1.27)) (justify left))
 		)
 		(property "Value" "47n"
-			(at 16.51 38.1 0)
-			(effects (font (size 1.27 1.27)) (justify right))
+			(at 69.85 25.4 0)
+			(effects (font (size 1.27 1.27)) (justify left))
 		)
 		(property "Footprint" ""
-			(at 22.86 36.83 0)
+			(at 63.5 24.13 0)
 			(effects (font (size 1.27 1.27)) (hide yes))
 		)
 		(property "ap_block" "divider"
-			(at 22.86 36.83 0)
+			(at 63.5 24.13 0)
 			(effects (font (size 1.27 1.27)) (hide yes))
 		)
 		(instances
@@ -912,7 +944,7 @@
 	)
 	(symbol
 		(lib_id "Device:R")
-		(at 29.21 24.13 0)
+		(at 21.59 20.32 90)
 		(unit 1)
 		(exclude_from_sim no)
 		(in_bom yes)
@@ -920,19 +952,19 @@
 		(dnp no)
 		(uuid "032709ec-ea61-5799-af11-528db1baca67")
 		(property "Reference" "R7"
-			(at 35.56 22.86 0)
-			(effects (font (size 1.27 1.27)) (justify left))
+			(at 21.59 27.64 270)
+			(effects (font (size 1.27 1.27)))
 		)
 		(property "Value" "649k"
-			(at 35.56 25.4 0)
-			(effects (font (size 1.27 1.27)) (justify left))
+			(at 21.59 30.18 270)
+			(effects (font (size 1.27 1.27)))
 		)
 		(property "Footprint" ""
-			(at 29.21 24.13 0)
+			(at 21.59 20.32 0)
 			(effects (font (size 1.27 1.27)) (hide yes))
 		)
 		(property "ap_block" "divider"
-			(at 29.21 24.13 0)
+			(at 21.59 20.32 0)
 			(effects (font (size 1.27 1.27)) (hide yes))
 		)
 		(instances
@@ -947,7 +979,7 @@
 	)
 	(symbol
 		(lib_id "Device:R")
-		(at 33.02 36.83 0)
+		(at 43.18 24.13 0)
 		(unit 1)
 		(exclude_from_sim no)
 		(in_bom yes)
@@ -955,19 +987,19 @@
 		(dnp no)
 		(uuid "509797cb-68c2-555f-8785-a91a8594de2f")
 		(property "Reference" "R8"
-			(at 39.37 35.56 0)
+			(at 49.53 22.86 0)
 			(effects (font (size 1.27 1.27)) (justify left))
 		)
 		(property "Value" "200k"
-			(at 39.37 38.1 0)
+			(at 49.53 25.4 0)
 			(effects (font (size 1.27 1.27)) (justify left))
 		)
 		(property "Footprint" ""
-			(at 33.02 36.83 0)
+			(at 43.18 24.13 0)
 			(effects (font (size 1.27 1.27)) (hide yes))
 		)
 		(property "ap_block" "divider"
-			(at 33.02 36.83 0)
+			(at 43.18 24.13 0)
 			(effects (font (size 1.27 1.27)) (hide yes))
 		)
 		(instances

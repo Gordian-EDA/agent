@@ -144,7 +144,6 @@
     }
   ],
   "intent": {
-    "flow": "lr",
     "rails": {
       "GNDD": "bottom",
       "VCC3V3": "top",
@@ -153,67 +152,84 @@
     "ports": {
       "RXD1": "right",
       "TXD1": "right"
+    }
+  },
+  "layout": {
+    "uart": {
+      "row": [
+        {
+          "part": "J1"
+        },
+        {
+          "col": [
+            {
+              "part": "R7"
+            },
+            {
+              "part": "R8"
+            }
+          ],
+          "gap": 6
+        },
+        {
+          "col": [
+            {
+              "part": "R9"
+            },
+            {
+              "part": "R16"
+            }
+          ],
+          "gap": 6
+        },
+        {
+          "part": "U2"
+        },
+        {
+          "col": [
+            {
+              "part": "R15"
+            },
+            {
+              "part": "R13"
+            }
+          ],
+          "gap": 6
+        },
+        {
+          "row": [
+            {
+              "part": "C14"
+            },
+            {
+              "part": "C16"
+            }
+          ],
+          "gap": 6
+        }
+      ],
+      "gap": 7
     },
-    "place": {
-      "C14": {
-        "col": 5,
-        "row": 0,
-        "orient": "down"
-      },
-      "C16": {
-        "col": 6,
-        "row": 0,
-        "orient": "down"
-      },
-      "J1": {
-        "col": 0,
-        "row": 1,
-        "orient": "down"
-      },
-      "R13": {
-        "col": 4,
-        "row": 2,
-        "orient": "right"
-      },
-      "R15": {
-        "col": 4,
-        "row": 1,
-        "orient": "right"
-      },
-      "R16": {
-        "col": 3,
-        "row": 0,
-        "orient": "up"
-      },
-      "R20": {
-        "col": 7,
-        "row": 1,
-        "orient": "down"
-      },
-      "R7": {
-        "col": 1,
-        "row": 1,
-        "orient": "right"
-      },
-      "R8": {
-        "col": 1,
-        "row": 2,
-        "orient": "right"
-      },
-      "R9": {
-        "col": 2,
-        "row": 0,
-        "orient": "up"
-      },
-      "U2": {
-        "col": 2,
-        "row": 1,
-        "orient": "down"
-      }
+    "power": {
+      "row": [
+        {
+          "part": "PWR1"
+        },
+        {
+          "part": "PWR2"
+        },
+        {
+          "part": "PWR3"
+        }
+      ],
+      "gap": 8
     },
-    "mirror": [
-      "J1",
-      "U2"
-    ]
+    "mcu": {
+      "row": [
+        {
+          "part": "R20"
+        }
+      ]
+    }
   }
 }

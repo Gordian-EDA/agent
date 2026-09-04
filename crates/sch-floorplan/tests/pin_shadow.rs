@@ -93,14 +93,7 @@ fn place_parts_keeps_numbered_pin_assignments_distinct() {
     assert!(!diagnostics.has_errors(), "{diagnostics:#?}");
 
     let mut doc = live::blank_sheet().unwrap();
-    let report = live::place_parts(
-        &env,
-        &mut doc,
-        &input,
-        Box::new(cluster_place::ClusterPlace),
-        None,
-    )
-    .unwrap();
+    let report = live::place_parts(&env, &mut doc, &input).unwrap();
     assert!(report.committed, "{:?}", report.mismatch);
     assert!(live::verify(&doc, &design).is_empty());
 
@@ -145,7 +138,7 @@ fn an_unassigned_pin_name_cannot_shadow_a_physical_number() {
     sch_check::nets::derive_attrs(&mut design);
 
     let emitted =
-        floorplan::emit_strategy(&env, &design, Box::new(cluster_place::ClusterPlace), None)
+        floorplan::emit_strategy(&env, &design, None)
             .unwrap();
     let schematic = dir.path().join("raw-design.kicad_sch");
     std::fs::write(&schematic, emitted.sch).unwrap();

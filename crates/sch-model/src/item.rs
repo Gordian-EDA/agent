@@ -61,11 +61,6 @@ pub struct Item {
     /// onto the Item so the placement search can flip it as a move and the cost
     /// sees exactly what ships.
     pub mirror: bool,
-    /// Pinned by an idiom cluster (a crystal + its load caps): the placement search
-    /// must NOT move it, so the engine-recognized arrangement ships intact. It says
-    /// nothing about whether the item has a pose yet — a frozen item still gets its
-    /// seed; see [`Item::preseeded`].
-    pub frozen: bool,
     /// This item arrived with a LIVE pose its caller owns (the region adapter's fixed
     /// neighbours, lifted off a real sheet), so seeding must leave `at`/`angle` alone.
     /// Every whole-sheet path builds items at the origin with this clear.

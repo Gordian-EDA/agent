@@ -81,7 +81,7 @@ pub(crate) fn design(doc: &SchDoc, netlist: &Netlist) -> Design {
             title: None,
             note: None,
             components,
-            layout: Vec::new(),
+            layout: None,
         },
     );
     Design {

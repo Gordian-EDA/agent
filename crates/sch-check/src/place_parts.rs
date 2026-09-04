@@ -1,10 +1,10 @@
 //! The connectivity-only input of the bulk-create tool.
 //!
 //! The LLM states parts and what each pin connects to — never a coordinate, and
-//! never a wire. Layout *intent* rides along as [`Intent`]; solvers turn it into
-//! geometry. [`into_design`] lowers the input to the kernel [`Design`] the
-//! checkers and the placement engines already speak; the caller hands
-//! [`Intent::into_layout_ir`] to the placement engine alongside it.
+//! never a wire. Layout *intent* rides along as [`Intent`]; the typesetter turns
+//! it into geometry. [`into_design`] lowers the input to the kernel [`Design`] the
+//! checkers and `sch-floorplan` already speak; the caller hands
+//! [`Intent::into_layout_ir`] to `sch-floorplan` alongside it.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -12,7 +12,8 @@ use circuit_graph::netclass::is_power_net;
 use fuzzy_matcher::FuzzyMatcher;
 use fuzzy_matcher::skim::SkimMatcherV2;
 use indexmap::IndexMap;
-use sch_model::ir::{Band, Cell, Flow, LayoutIr, Relation, Side};
+use sch_model::ir::{Band, LayoutIr, Side};
+use sch_model::tree::Tree;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -30,11 +31,10 @@ pub struct PlacePartsInput {
     /// Region every part without its own `block` joins.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub block: Option<BlockName>,
-    /// Region → its internal placement grid: rows of refdes, `null` for a hole.
-    /// A refdes repeated down a column spans those rows. Regions left out are
-    /// arranged from connectivity.
+    /// Region → the row/col tree it is drawn from. This IS the layout: the
+    /// typesetter measures the symbols and computes every coordinate from it.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub layout: BTreeMap<BlockName, LayoutGrid>,
+    pub layout: BTreeMap<BlockName, Tree>,
     /// Region → how it is documented on the sheet: the caption drawn on its frame
     /// and a note explaining a decision. Regions left out are captioned with their
     /// own name and carry no note.
@@ -42,10 +42,6 @@ pub struct PlacePartsInput {
     pub blocks: BTreeMap<BlockName, BlockDoc>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub intent: Option<Intent>,
-    /// Placement engine override. The refusal a placement-engine failure returns
-    /// names this as the way out, so it has to exist.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub engine: Option<String>,
 }
 
 /// What a region says about itself on the drawn sheet.
@@ -243,92 +239,29 @@ impl PayloadAudit {
     }
 }
 
-/// The layout hints an LLM may state — the input-facing subset of the engine's
-/// [`LayoutIr`]. What the engine derives for itself (recognized idioms, frozen
-/// clusters, zone biases) is absent rather than silently accepted.
+/// The layout hints an LLM may state — the input-facing subset of `sch-floorplan`'s
+/// [`LayoutIr`]. `rail_locals` (derived from the design's power-symbol count) and
+/// each block's authored tree (carried on the block itself, not here) are absent
+/// rather than silently accepted.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct Intent {
-    /// Global signal-flow direction.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub flow: Option<Flow>,
     /// Net → band, for nets to draw as spanning rails.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub rails: BTreeMap<NetName, Band>,
     /// Net → the sheet edge it exits toward.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub ports: BTreeMap<NetName, Side>,
-    /// Refdes → coarse unitless cell. Usually only the anchors.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub place: BTreeMap<RefDes, Cell>,
-    /// Anchors to flip left-to-right.
-    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
-    pub mirror: BTreeSet<RefDes>,
-    /// Relative statements about parts — `left_of`, `group`, `align`. The only way
-    /// to say where new parts go with respect to parts already on the sheet.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub relations: Vec<Relation>,
 }
 
 impl Intent {
-    /// The engine-facing IR. Everything the engine derives itself stays empty.
+    /// The floorplan-facing IR. Everything `sch-floorplan` derives itself stays empty.
     pub fn into_layout_ir(self) -> LayoutIr {
         LayoutIr {
-            flow: self.flow.unwrap_or_default(),
             rails: self.rails,
             ports: self.ports,
-            place: self.place,
-            mirror: self.mirror,
-            relations: self.relations,
             ..Default::default()
         }
-    }
-
-    /// The engine-facing IR after dropping hints that name no available part.
-    pub fn into_layout_ir_for(self, available: &BTreeSet<String>) -> (LayoutIr, Vec<String>) {
-        let mut ir = self.into_layout_ir();
-        let mut warnings = Vec::new();
-        ir.place.retain(|reference, _| {
-            let keep = available.contains(reference);
-            if !keep {
-                warnings.push(format!(
-                    "dropped intent.place.{reference}: no arrangeable part has that reference"
-                ));
-            }
-            keep
-        });
-        ir.mirror.retain(|reference| {
-            let keep = available.contains(reference);
-            if !keep {
-                warnings.push(format!(
-                    "dropped intent.mirror entry `{reference}`: no arrangeable part has that reference"
-                ));
-            }
-            keep
-        });
-        ir.relations = ir
-            .relations
-            .into_iter()
-            .enumerate()
-            .filter_map(|(index, relation)| {
-                let missing = relation
-                    .refdes()
-                    .into_iter()
-                    .filter(|reference| !available.contains(*reference))
-                    .map(str::to_string)
-                    .collect::<BTreeSet<_>>();
-                if missing.is_empty() {
-                    Some(relation)
-                } else {
-                    warnings.push(format!(
-                        "dropped intent.relations[{index}]: unknown arrangeable reference(s): {}",
-                        missing.into_iter().collect::<Vec<_>>().join(", ")
-                    ));
-                    None
-                }
-            })
-            .collect();
-        (ir, warnings)
     }
 }
 
@@ -359,6 +292,9 @@ pub fn into_design(
     // A part nothing can resolve leaves before lowering, so the `decouple` caps it
     // would have grown never appear and the placement never has to draw it.
     let (dropped, unplaced) = unresolvable(&input, provider);
+    // The references those parts would have carried: a layout tree that names one is
+    // right about a part that is not there, which is a warning, not a refusal.
+    let dropped_refs: BTreeSet<RefDes> = unplaced.iter().map(|p| p.refdes.clone()).collect();
     for spec in input
         .parts
         .iter()
@@ -403,9 +339,14 @@ pub fn into_design(
             )),
         }
     }
-    for (name, grid) in &input.layout {
+    for (name, tree) in &input.layout {
         match design.blocks.get_mut(name) {
-            Some(block) => block.layout = grid.clone(),
+            Some(block) => {
+                for fault in tree_faults(name, tree, block, &dropped_refs, &existing.refs) {
+                    diags.push(fault);
+                }
+                block.layout = Some(tree.clone());
+            }
             // A layout hint for a region nobody joined is a hint about nothing,
             // not a broken circuit — it is dropped and said so.
             None => diags.push(Diagnostic::warning(
@@ -883,53 +824,116 @@ fn expand_decouple(
 /// JSON Schema for the tool's `input_schema`. Deliberately terse: the LLM needs
 /// the shape and the rules that are not obvious (`"nc"`, that a pin key may be a
 /// name or a number, and that anything left out is a no-connect).
-/// The `intent.relations` schema: every accepted entry shape, with an example.
+/// What is wrong with a region's layout tree: a leaf naming a part that is not in the
+/// region, or the same part placed twice. Both would silently lose a part off the drawing,
+/// so they refuse the payload rather than surprise the author.
 ///
-/// Split out because the whole payload schema is one `json!` literal and the
-/// macro's recursion limit is real; it also keeps the grammar in one readable place.
-fn relations_schema() -> Value {
+/// A leaf naming a part the payload could not resolve at all (`dropped`) is the author's
+/// tree being right about a part that is not there: it is a warning, and the typesetter
+/// simply has one fewer leaf to draw.
+///
+/// A leaf naming a part already ON THE SHEET is not a fault at all. `place_parts` appends,
+/// so a follow-up call that adds two parts to a block still states that whole block's
+/// tree; the parts it already placed keep the poses they have and the tree says where the
+/// new ones go among them.
+fn tree_faults(
+    name: &str,
+    tree: &Tree,
+    block: &Block,
+    dropped: &BTreeSet<RefDes>,
+    on_sheet: &BTreeSet<RefDes>,
+) -> Vec<Diagnostic> {
+    let mut seen: BTreeSet<(String, u8)> = BTreeSet::new();
+    let mut out = Vec::new();
+    for (refdes, unit) in tree.keys() {
+        if on_sheet.contains(&refdes) {
+            continue;
+        }
+        if dropped.contains(&refdes) {
+            out.push(Diagnostic::warning(
+                "layout-unplaced-part",
+                format!("`layout.{name}` places `{refdes}`, which could not be resolved — drawn without it"),
+            ));
+        } else if !block.components.contains_key(&refdes) {
+            let near = closest_ref(&refdes, block.components.keys().map(String::as_str));
+            let hint = near.map_or_else(
+                || {
+                    let mut members: Vec<&str> =
+                        block.components.keys().map(String::as_str).collect();
+                    members.truncate(12);
+                    format!(" — region `{name}` holds {}", members.join(", "))
+                },
+                |r| format!(" (did you mean `{r}`?)"),
+            );
+            out.push(Diagnostic::error(
+                "layout-unknown-part",
+                format!("`layout.{name}` places `{refdes}`, which is not a part of that region{hint}"),
+            ));
+        } else if !seen.insert((refdes.clone(), unit)) {
+            out.push(Diagnostic::error(
+                "layout-duplicate-part",
+                format!("`layout.{name}` places `{refdes}` twice; every part gets one place"),
+            ));
+        }
+    }
+    out
+}
+
+/// The region member a mistyped refdes most likely meant.
+fn closest_ref<'a>(refdes: &str, candidates: impl Iterator<Item = &'a str>) -> Option<String> {
+    candidates
+        .map(|c| (strsim::normalized_levenshtein(refdes, c), c))
+        .filter(|(score, _)| *score >= 0.6)
+        .max_by(|a, b| a.0.total_cmp(&b.0))
+        .map(|(_, c)| c.to_owned())
+}
+
+/// The layout tree a region is drawn from: nested rows and columns of parts.
+///
+/// The schema is recursive by `$ref`, and its description carries the composition rules —
+/// they are what separates a readable block from a merely correct one.
+fn layout_tree_schema() -> Value {
     json!({
-    "type": "array",
-    "description":
-        "Relative placement. `b` and `anchor` may name a part already \
-         on the sheet. Example: \
-         {\"kind\":\"group\",\"name\":\"leds\",\"members\":[\"R3\",\"D1\"],\
-         \"side\":\"right\",\"anchor\":\"U1\"}",
-    "items": {
-        "type": "object",
-        "properties": {
-            "kind": {
-                "type": "string",
-                "enum": ["left_of", "right_of", "above", "below",
-                         "group", "align"]
-            },
-            "a": {"type": "string"},
-            "b": {"type": "string"},
-            "name": {"type": "string"},
-            "members": {
-                "type": "array",
-                "items": {"type": "string"},
-                "minItems": 1
-            },
-            "side": {
+        "$ref": "#/$defs/node",
+        "$defs": {
+            "node": {
+                "type": "object",
                 "description":
-                    "An edge, or an [edge, anchor] pair, or \
-                     {side, anchor}.",
-                "anyOf": [
-                    {"type": "string",
-                     "enum": ["left", "right", "top", "bottom"]},
-                    {"type": "array", "minItems": 2, "maxItems": 2},
-                    {"type": "object"}
-                ]
-            },
-            "anchor": {"type": "string"},
-            "axis": {
-                "type": "string",
-                "enum": ["horizontal", "vertical"]
+                    "One of: {part} for a part, {row:[...]} for a left-to-right signal path, \
+                     {col:[...]} for what hangs off a node. RULES: a row is ONE signal path \
+                     (neighbours in a row must share a net, so they get a straight wire) — \
+                     never put unrelated parts side by side. Anything hanging off a node (a \
+                     shunt cap to GND, a pull-up, a bias resistor) goes in a col with the \
+                     series part it attaches to. Around an IC: \
+                     {row:[{col:[input-side parts]}, {part:IC}, {col:[output-side parts]}]}. \
+                     Decoupling caps: a row of caps right after the IC. Two parts that meet \
+                     only through a rail (GND, +3V3) need no adjacency — power symbols join \
+                     them. Symmetric halves (H-bridge, differential pair, dual channel) are \
+                     two mirrored cols side by side in one row. Keep a block to 3-12 parts \
+                     and give every part a place. Gaps: 4-6 in a passive chain, 6-8 around \
+                     an IC and between sub-rows; keep blocks COMPACT — empty space, long \
+                     wires and parts far from what they connect to all read badly.",
+                "properties": {
+                    "part": {"type": "string", "description": "Refdes of a part in this region."},
+                    "unit": {"type": "integer", "description": "Unit of a multi-unit symbol; one leaf per unit."},
+                    "rot": {
+                        "type": "integer", "enum": [0, 90, 180, 270],
+                        "description":
+                            "Only when the default looks wrong. 0 stands a 2-pin part up, \
+                             90 lays it along the row. By default series passives lie along \
+                             their row, a part touching a rail stands with GND down and the \
+                             supply up, and a connector at a row end faces the circuit."
+                    },
+                    "mirror": {"type": "boolean", "description": "Flip the symbol left-to-right."},
+                    "row": {"type": "array", "items": {"$ref": "#/$defs/node"}, "minItems": 1},
+                    "col": {"type": "array", "items": {"$ref": "#/$defs/node"}, "minItems": 1},
+                    "gap": {"type": "number", "description": "Grid units between children (1 unit = 1.27 mm, an 0603 resistor is 6 units). Default 8."},
+                    "align": {"type": "string", "enum": ["center", "start", "end"]}
+                },
+                "additionalProperties": false
             }
-        },
-        "required": ["kind"]
-    }})
+        }
+    })
 }
 
 pub fn place_parts_input_schema() -> Value {
@@ -997,15 +1001,9 @@ pub fn place_parts_input_schema() -> Value {
             "layout": {
                 "type": "object",
                 "description":
-                    "Region -> rows of refdes (null for a hole): that region's internal grid. \
-                     A refdes repeated down a column spans those rows.",
-                "additionalProperties": {
-                    "type": "array",
-                    "items": {
-                        "type": "array",
-                        "items": {"type": ["string", "null"]}
-                    }
-                }
+                    "Region -> its layout TREE: how that region is drawn. This is the layout; \
+                     compose one for every region.",
+                "additionalProperties": layout_tree_schema()
             },
             "blocks": {
                 "type": "object",
@@ -1023,19 +1021,11 @@ pub fn place_parts_input_schema() -> Value {
                     "additionalProperties": false
                 }
             },
-            "engine": {
-                "type": "string",
-                "enum": ["anneal", "spine", "cluster"],
-                "description":
-                    "Placement engine override. Only worth setting after a placement-engine \
-                     failure; the default is chosen from the sheet's size."
-            },
             "intent": {
                 "type": "object",
-                "description": "Optional layout intent. Hints only; the solver owns all geometry.",
+                "description": "What the sheet does with a NET: which are rails and which exit as ports. Where the PARTS go is the `layout` tree.",
                 "additionalProperties": false,
                 "properties": {
-                    "flow": {"enum": ["lr", "tb"], "description": "Global signal-flow direction."},
                     "rails": {
                         "type": "object",
                         "description": "Net -> sheet side: nets drawn as spanning rails. Left/right are mapped to the nearest supported horizontal band.",
@@ -1046,25 +1036,6 @@ pub fn place_parts_input_schema() -> Value {
                         "description": "Net -> the sheet edge it exits toward.",
                         "additionalProperties": {"enum": ["left", "right", "top", "bottom"]}
                     },
-                    "place": {
-                        "type": "object",
-                        "description": "Refdes -> coarse unitless cell (col grows right, row grows down).",
-                        "additionalProperties": {
-                            "type": "object",
-                            "required": ["col", "row"],
-                            "properties": {
-                                "col": {"type": "integer"},
-                                "row": {"type": "integer"},
-                                "orient": {"enum": ["up", "down", "left", "right"]}
-                            }
-                        }
-                    },
-                    "mirror": {
-                        "type": "array",
-                        "description": "Refdes to flip left-to-right.",
-                        "items": {"type": "string"}
-                    },
-                    "relations": relations_schema()
                 }
             }
         }

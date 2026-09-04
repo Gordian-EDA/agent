@@ -2,28 +2,14 @@
 
 use anyhow::{Context, Result, anyhow};
 use gordian_runtime::AgentRuntime;
-use gordian_runtime::config::PlacementEngineKind;
 use sch_check::place_parts::PartSpec;
-use sch_floorplan::live::{ArrangeReport, PlaceReport, PlacementBudget, Selection};
-use sch_model::engine::PlacementEngine;
+use sch_floorplan::live::{ArrangeReport, PlaceReport, Selection};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::time::Duration;
 
 use crate::session::{Allow, Edit, attach_connectivity};
-
-/// Every accepted shape of an `intent.relations` entry, with an example of each.
-///
-/// Serde can only report the first malformed field and says nothing about what it
-/// wanted, so a caller who mis-shapes a relation has to guess. Relations are the
-/// field that is actually guessed wrong, so the refusal carries the whole grammar.
-const RELATION_SHAPES: &str = "each entry is an object tagged by `kind`: \
-     {\"kind\":\"left_of\",\"a\":\"R1\",\"b\":\"U1\"} (also right_of, above, below); \
-     {\"kind\":\"group\",\"name\":\"leds\",\"members\":[\"R3\",\"D1\"],\"side\":\"right\",\"anchor\":\"U1\"} \
-     (`side` alone is fine; [\"right\",\"U1\"] and {\"side\":\"right\",\"anchor\":\"U1\"} also parse); \
-     {\"kind\":\"align\",\"members\":[\"C1\",\"C2\"],\"axis\":\"horizontal\"}";
 
 /// Deserialize a tool's arguments, naming the field that was wrong.
 ///
@@ -32,12 +18,7 @@ const RELATION_SHAPES: &str = "each entry is an object tagged by `kind`: \
 fn typed<T: serde::de::DeserializeOwned>(input: Value, tool: &str) -> Result<T> {
     serde_path_to_error::deserialize(input).map_err(|e| {
         let path = e.path().to_string();
-        let help = if path.contains("relations") {
-            format!(" — {RELATION_SHAPES}")
-        } else {
-            String::new()
-        };
-        anyhow!("invalid {tool} input at `{path}`: {}{help}", e.into_inner())
+        anyhow!("invalid {tool} input at `{path}`: {}", e.into_inner())
     })
 }
 
@@ -48,7 +29,7 @@ struct SelectionInput {
     bbox: Option<[f64; 4]>,
     block: Option<String>,
     intent: Option<sch_check::Intent>,
-    engine: Option<PlacementEngineKind>,
+    layout: Option<sch_model::tree::Tree>,
 }
 
 #[derive(Debug, Serialize)]
@@ -82,11 +63,11 @@ pub(crate) fn selection_schema(engine: bool) -> Value {
     if engine {
         properties["intent"] =
             sch_check::place_parts_input_schema()["properties"]["intent"].clone();
-        properties["engine"] = json!({
-            "type": "string",
-            "enum": ["anneal", "spine", "cluster"],
-            "description": "Optional placement engine override."
-        });
+        properties["layout"] =
+            sch_check::place_parts_input_schema()["properties"]["layout"]["additionalProperties"]
+                .clone();
+        properties["layout"]["description"] =
+            json!("How the selection is arranged: one row/col tree over its parts.");
     }
     json!({
         "type": "object",
@@ -171,121 +152,50 @@ pub(crate) fn place_parts(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             &renamed,
         ));
     }
-    let requested = match payload.engine.as_deref().map(engine_named) {
-        Some(Some(kind)) => Some(kind),
-        Some(None) => {
-            return Ok(with_renamed(
-                json!({
-                    "error": format!(
-                        "unknown engine `{}`; use \"anneal\", \"spine\" or \"cluster\"",
-                        payload.engine.clone().unwrap_or_default()
-                    ),
-                }),
-                &renamed,
-            ));
-        }
-        None => None,
-    };
-    let sheet_parts = edit.doc.symbols().count() + payload.parts.len();
-    // A mismatch restores the document, so trying another engine costs only time.
-    // The engines fail on different sheets, and the model has no way to tell which
-    // will work — leaving it to guess turned one campaign case into a dead end.
-    let mut tried = Vec::new();
-    let mut skipped = Vec::new();
-    let mut report = None;
-    // The last attempt's timing, reported on the result whether it committed or not.
+    // The last placement's timing, reported on the result whether it committed or not.
     let mut placement = json!(null);
-    // The ladder shares ONE budget: a second engine only gets what the first left,
-    // so three attempts can never stack past the tool's timeout.
-    let ladder_started = std::time::Instant::now();
-    let policy = PlacementBudget::new(sheet_parts);
-    let ladder_budget = policy.budget;
-    for kind in engines_to_try(requested) {
-        let remaining = ladder_budget.saturating_sub(ladder_started.elapsed());
-        if requested.is_none() && !policy.engine_fits(kind, remaining) {
-            let name = engine_kind_name(kind);
-            tracing::info!(
-                engine = name,
-                parts = sheet_parts,
-                remaining_ms = remaining.as_millis().min(u128::from(u64::MAX)) as u64,
-                "skipping placement engine that cannot finish in the remaining budget"
-            );
-            skipped.push(name);
-            continue;
+    let timing = Timing::start("place_parts", payload.parts.len());
+    let attempt = guarded_place_parts(ctx.env(), &mut edit.doc, &payload)?;
+    let GuardedPlacement::Completed(result) = attempt else {
+        timing.done("panicked");
+        return Ok(with_renamed(
+            json!({"error": "the typesetter panicked; nothing was written"}),
+            &renamed,
+        ));
+    };
+    let report = match *result {
+        Ok(placed) => {
+            let elapsed_ms = timing.done(if placed.committed {
+                "committed"
+            } else {
+                "refused"
+            });
+            placement = json!({"parts": timing.parts, "elapsed_ms": elapsed_ms});
+            placed
         }
-        let (budget, engine) = budgeted_within(ctx, remaining, sheet_parts, Some(kind));
-        let engine_name = engine.name();
-        let timing = Timing::start("place_parts", &budget, engine_name);
-        let attempt =
-            guarded_place_parts(ctx.env(), &mut edit.doc, &payload, engine, Some(budget))?;
-        let GuardedPlacement::Completed(result) = attempt else {
-            timing.done("panicked");
-            tried.push(engine_name);
-            continue;
-        };
-        match *result {
-            Ok(placed) => {
-                let elapsed_ms = timing.done(if placed.committed {
-                    "committed"
-                } else {
-                    "refused"
-                });
-                placement = json!({
-                    "engine": timing.engine,
-                    "parts": timing.parts,
-                    "budget_ms": timing.budget_ms,
-                    "elapsed_ms": elapsed_ms,
-                });
-                tried.push(engine_name);
-                let committed = placed.committed;
-                report = Some(placed);
-                if committed {
-                    break;
-                }
-            }
-            Err(error @ sch_floorplan::live::Error::Budget { .. }) => {
-                timing.done("overran");
-                return Ok(with_renamed(budget_refusal(&error), &renamed));
-            }
-            Err(sch_floorplan::live::Error::InvalidPayload(audit)) => {
-                return Ok(with_renamed(
-                    invalid_payload_response(*audit, &warnings),
-                    &renamed,
-                ));
-            }
-            Err(sch_floorplan::live::Error::Nothing) => {
-                return Ok(with_renamed(
-                    nothing_placed_response(non_placeable_parts(&payload), &warnings),
-                    &renamed,
-                ));
-            }
-            Err(error) => return Err(error.into()),
-        }
-    }
-    let report = match report {
-        Some(report) => report,
-        None => {
+        Err(sch_floorplan::live::Error::InvalidPayload(audit)) => {
             return Ok(with_renamed(
-                json!({
-                    "error": "no placement engine completed",
-                    "engines_tried": tried,
-                    "engines_skipped": skipped,
-                }),
+                invalid_payload_response(*audit, &warnings),
                 &renamed,
             ));
         }
+        Err(sch_floorplan::live::Error::Nothing) => {
+            return Ok(with_renamed(
+                nothing_placed_response(non_placeable_parts(&payload), &warnings),
+                &renamed,
+            ));
+        }
+        Err(error) => return Err(error.into()),
     };
     if !report.committed {
-        // Every engine drew a sheet that did not mean what the payload said. The
-        // connectivity is not the engines' to throw away: the parts go to the
-        // bench, named at every pin, and `arrange` lays them out from there.
+        // The drawn sheet did not mean what the payload said. The connectivity is not
+        // the typesetter's to throw away: the parts go to the bench, named at every
+        // pin, and `arrange` lays them out from there.
         let value = bench_payload(
             ctx,
             edit,
             &payload,
             &mismatch_clause(&report.mismatch),
-            &tried,
-            &skipped,
             &warnings,
         )?;
         let value = with_renamed(value, &renamed);
@@ -308,8 +218,6 @@ pub(crate) fn place_parts(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         return Ok(value);
     }
     value["placement"] = placement;
-    value["engines_tried"] = json!(tried);
-    value["engines_skipped"] = json!(skipped);
     let refs = report.placed.join(" ");
     attach_connectivity(&mut value, ctx, report.placed, &format!("PLACED  {refs}"))?;
     let value = with_check(value, ctx).context("checking placed parts")?;
@@ -533,56 +441,8 @@ fn rewrite_payload_references(
             }
         }
     }
-    for grid in payload.layout.values_mut() {
-        for refdes in grid.iter_mut().flatten().flatten() {
-            rewrite_ref(refdes, renamed);
-        }
-    }
-    let Some(intent) = &mut payload.intent else {
-        return;
-    };
-    intent.place = std::mem::take(&mut intent.place)
-        .into_iter()
-        .map(|(refdes, cell)| (renamed.get(&refdes).cloned().unwrap_or(refdes), cell))
-        .collect();
-    intent.mirror = std::mem::take(&mut intent.mirror)
-        .into_iter()
-        .map(|refdes| renamed.get(&refdes).cloned().unwrap_or(refdes))
-        .collect();
-    for relation in &mut intent.relations {
-        use sch_model::ir::{GroupSide, Relation};
-        match relation {
-            Relation::LeftOf { a, b }
-            | Relation::RightOf { a, b }
-            | Relation::Above { a, b }
-            | Relation::Below { a, b } => {
-                rewrite_ref(a, renamed);
-                rewrite_ref(b, renamed);
-            }
-            Relation::Group {
-                members,
-                side,
-                anchor,
-                ..
-            } => {
-                for member in members {
-                    rewrite_ref(member, renamed);
-                }
-                if let Some(anchor) = anchor {
-                    rewrite_ref(anchor, renamed);
-                }
-                match side {
-                    Some(GroupSide::Anchored(_, anchor))
-                    | Some(GroupSide::Named { anchor, .. }) => rewrite_ref(anchor, renamed),
-                    Some(GroupSide::Edge(_)) | None => {}
-                }
-            }
-            Relation::Align { members, .. } => {
-                for member in members {
-                    rewrite_ref(member, renamed);
-                }
-            }
-        }
+    for tree in payload.layout.values_mut() {
+        rewrite_tree_refs(tree, renamed);
     }
 }
 
@@ -740,26 +600,28 @@ fn sanitize_place_parts_input(input: &mut Value) -> Vec<String> {
             }
         }
     }
-    // A layout hint of the wrong SHAPE — `"rails": "+3V3"` where a map belongs — is
-    // still only a hint. Dropping it costs a rail band; refusing the payload costs
-    // the whole block.
+    // A layout hint of the wrong SHAPE — `"rails": "+3V3"` where a map belongs — or one
+    // this build no longer has is still only a hint. Dropping it costs a rail band;
+    // refusing the payload costs the whole block, and a hint the model learned from an
+    // older build would cost every block it writes.
     if let Some(intent) = input.get_mut("intent") {
         if intent.as_object().is_some() {
-            let malformed: Vec<String> = intent
+            let unusable: Vec<String> = intent
                 .as_object()
                 .expect("just checked")
                 .iter()
                 .filter(|(field, value)| match field.as_str() {
-                    "rails" | "ports" | "place" => !value.is_object(),
-                    "relations" => !value.is_array(),
-                    "mirror" => !value.is_array(),
-                    _ => false,
+                    "rails" | "ports" => !value.is_object(),
+                    _ => true,
                 })
                 .map(|(field, _)| field.clone())
                 .collect();
-            for field in malformed {
+            for field in unusable {
                 intent.as_object_mut().expect("just checked").remove(&field);
-                warnings.push(format!("dropped malformed intent.{field}: wrong shape"));
+                warnings.push(format!(
+                    "dropped intent.{field}: the sheet reads only `rails` and `ports`; \
+                     where the parts go is the `layout` tree"
+                ));
             }
         } else {
             warnings.push("dropped malformed intent: expected an object".to_string());
@@ -809,18 +671,6 @@ fn sanitize_place_parts_input(input: &mut Value) -> Vec<String> {
             }
         });
     }
-    if let Some(relations) = intent.get_mut("relations").and_then(Value::as_array_mut) {
-        let mut valid = Vec::with_capacity(relations.len());
-        for (index, relation) in relations.drain(..).enumerate() {
-            match serde_json::from_value::<sch_model::ir::Relation>(relation.clone()) {
-                Ok(_) => valid.push(relation),
-                Err(error) => warnings.push(format!(
-                    "dropped malformed intent.relations[{index}]: {error}"
-                )),
-            }
-        }
-        *relations = valid;
-    }
     warnings
 }
 
@@ -833,13 +683,10 @@ fn guarded_place_parts(
     env: &kicad::KicadInstallation,
     doc: &mut sch_doc::SchDoc,
     payload: &sch_check::PlacePartsInput,
-    engine: Box<dyn PlacementEngine>,
-    budget: Option<PlacementBudget>,
 ) -> Result<GuardedPlacement> {
     let snapshot = doc.snapshot();
-    let engine_name = engine.name();
     match catch_unwind(AssertUnwindSafe(|| {
-        sch_floorplan::live::place_parts(env, doc, payload, engine, budget)
+        sch_floorplan::live::place_parts(env, doc, payload)
     })) {
         Ok(result) => Ok(GuardedPlacement::Completed(Box::new(result))),
         Err(panic) => {
@@ -848,25 +695,15 @@ fn guarded_place_parts(
                 .copied()
                 .or_else(|| panic.downcast_ref::<String>().map(String::as_str))
                 .unwrap_or("non-string panic payload");
-            tracing::error!(
-                engine = engine_name,
-                panic = message,
-                "placement engine panicked"
-            );
+            tracing::error!(panic = message, "the typesetter panicked");
             doc.restore(snapshot)?;
             Ok(GuardedPlacement::Panicked)
         }
     }
 }
 
-/// Re-lay out a selection, or — when the search runs out of clock — do the half of
-/// the work that has no search in it.
-///
-/// The engines stop themselves at the search deadline, so an overrun means an
-/// engine ignored it and the whole call was abandoned. Coming back empty is the
-/// one outcome worth avoiding: a re-wire in place redraws the same selection's
-/// wiring from the same netlist with no search at all, which is the honest
-/// best-so-far — the layout is what it was, and the drawing reflects the netlist.
+/// Re-typeset a selection: `sch_floorplan::live::arrange` places it, gated on the
+/// module's truthfulness invariant (see its module docs) before anything is kept.
 pub(crate) fn arrange(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let input: SelectionInput = typed(input, "arrange")?;
     let mut selection = selection(&input)?;
@@ -878,23 +715,14 @@ pub(crate) fn arrange(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             "note": "power flags and power symbols are connectivity furniture, not arrangeable parts; select one of the nearby real-part references instead",
         })));
     }
-    let (budget, engine) = budgeted(ctx, edit.doc.symbols().count(), input.engine);
-    let timing = Timing::start("arrange", &budget, engine.name());
-    let report = match sch_floorplan::live::arrange(
+    let timing = Timing::start("arrange", edit.doc.symbols().count());
+    let report = sch_floorplan::live::arrange(
         ctx.env(),
         &mut edit.doc,
         &selection,
         input.intent.clone(),
-        engine,
-        Some(budget),
-    ) {
-        Ok(report) => report,
-        Err(error @ sch_floorplan::live::Error::Budget { .. }) => {
-            timing.done("overran");
-            return arrange_in_place(ctx, &selection, budget_refusal(&error));
-        }
-        Err(error) => return Err(error.into()),
-    };
+        input.layout.clone(),
+    )?;
     timing.done(if report.committed {
         "committed"
     } else {
@@ -982,84 +810,23 @@ fn resolve_arrangeable_refs(
     notes
 }
 
-/// The searchless half of `arrange`, run after its budget was spent.
-fn arrange_in_place(ctx: &AgentRuntime, selection: &Selection, overrun: Value) -> Result<Value> {
-    let mut edit = Edit::open(ctx)?;
-    let budget = PlacementBudget::new(edit.doc.symbols().count());
-    let report =
-        match sch_floorplan::live::rewire(ctx.env(), &mut edit.doc, selection, Some(budget)) {
-            Ok(report) => report,
-            Err(_) => return Ok(overrun),
-        };
-    if !report.committed {
-        return Ok(overrun);
-    }
-    let mut value = finish_arrangement(edit, report, ctx)?;
-    value["placement"] = overrun["placement"].clone();
-    value["note"] = json!(
-        "the placement search overran its budget; the selection's wiring was redrawn where it \
-         stands instead. Arrange a smaller selection to move it."
-    );
-    Ok(value)
-}
-
 pub(crate) fn rewire(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let input: SelectionInput = typed(input, "rewire")?;
-    if input.engine.is_some() || input.intent.is_some() {
+    if input.intent.is_some() || input.layout.is_some() {
         return Err(anyhow!(
-            "rewire moves nothing, so it takes no engine or intent"
+            "rewire moves nothing, so it takes no intent or layout"
         ));
     }
     let selection = selection(&input)?;
     let mut edit = Edit::open(ctx)?;
-    let budget = PlacementBudget::new(edit.doc.symbols().count());
-    let timing = Timing::start("rewire", &budget, "rewire");
-    let report =
-        match sch_floorplan::live::rewire(ctx.env(), &mut edit.doc, &selection, Some(budget)) {
-            Ok(report) => report,
-            Err(error @ sch_floorplan::live::Error::Budget { .. }) => {
-                timing.done("overran");
-                return Ok(budget_refusal(&error));
-            }
-            Err(error) => return Err(error.into()),
-        };
+    let timing = Timing::start("rewire", edit.doc.symbols().count());
+    let report = sch_floorplan::live::rewire(ctx.env(), &mut edit.doc, &selection)?;
     timing.done(if report.committed {
         "committed"
     } else {
         "refused"
     });
     finish_arrangement(edit, report, ctx)
-}
-
-fn budget_refusal(error: &sch_floorplan::live::Error) -> Value {
-    let sch_floorplan::live::Error::Budget {
-        budget,
-        elapsed,
-        parts,
-        engine,
-        phase,
-    } = error
-    else {
-        unreachable!("budget_refusal only formats a budget error")
-    };
-    let millis = |duration: Duration| duration.as_millis().min(u128::from(u64::MAX)) as u64;
-    let overrun = elapsed.saturating_sub(*budget);
-    let overran_ms = if elapsed > budget {
-        millis(overrun).max(1)
-    } else {
-        0
-    };
-    json!({
-        "error": error.to_string(),
-        "placement": {
-            "engine": engine,
-            "parts": parts,
-            "budget_ms": millis(*budget),
-            "elapsed_ms": millis(*elapsed),
-            "overran_ms": overran_ms,
-            "phase": phase,
-        }
-    })
 }
 
 fn finish_arrangement(edit: Edit, report: ArrangeReport, ctx: &AgentRuntime) -> Result<Value> {
@@ -1201,27 +968,15 @@ fn payload_pin_net(payload: &sch_check::PlacePartsInput, spec: &str) -> Option<S
     (!net.starts_with(crate::refs::NET_OF_PIN)).then(|| net.clone())
 }
 
-/// The engine a payload named, if it named a real one.
-fn engine_named(name: &str) -> Option<PlacementEngineKind> {
-    match name {
-        "anneal" => Some(PlacementEngineKind::Anneal),
-        "spine" => Some(PlacementEngineKind::Spine),
-        "cluster" => Some(PlacementEngineKind::Cluster),
-        _ => None,
+/// Rewrite every refdes a layout tree names.
+fn rewrite_tree_refs(tree: &mut sch_model::tree::Tree, renamed: &BTreeMap<String, String>) {
+    match tree {
+        sch_model::tree::Tree::Leaf(leaf) => rewrite_ref(&mut leaf.part, renamed),
+        sch_model::tree::Tree::Container(c) => c
+            .children
+            .iter_mut()
+            .for_each(|child| rewrite_tree_refs(child, renamed)),
     }
-}
-
-/// The engines to attempt, in order: the one asked for, else the sheet's default
-/// followed by the others as fallbacks.
-fn engines_to_try(requested: Option<PlacementEngineKind>) -> Vec<PlacementEngineKind> {
-    if let Some(kind) = requested {
-        return vec![kind];
-    }
-    vec![
-        PlacementEngineKind::Spine,
-        PlacementEngineKind::Cluster,
-        PlacementEngineKind::Anneal,
-    ]
 }
 
 /// The tool behind `add_parts`: a payload with no layout at all.
@@ -1257,8 +1012,6 @@ pub(crate) fn add_parts(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         edit,
         &payload,
         "added without layout — call arrange to lay it out",
-        &[],
-        &[],
         &warnings,
     )
     .map(|value| with_renamed(value, &renamed))
@@ -1274,8 +1027,6 @@ fn bench_payload(
     mut edit: Edit,
     payload: &sch_check::PlacePartsInput,
     why: &str,
-    tried: &[&str],
-    skipped: &[&str],
     warnings: &[String],
 ) -> Result<Value> {
     let report = match sch_floorplan::live::add_parts(ctx.env(), &mut edit.doc, payload, None, why)
@@ -1311,17 +1062,13 @@ fn bench_payload(
     if value.get("error").is_some() {
         return Ok(value);
     }
-    if !tried.is_empty() {
-        value["engines_tried"] = json!(tried);
-        value["engines_skipped"] = json!(skipped);
-    }
     let joined = refs.join(" ");
     attach_connectivity(&mut value, ctx, refs, &format!("BENCHED  {joined}"))?;
     let value = with_check(value, ctx).context("checking benched parts")?;
     Ok(with_warnings(value, warnings))
 }
 
-/// One clause naming what the engines got wrong, for the bench report.
+/// One clause naming what the typesetter got wrong, for the bench report.
 fn mismatch_clause(mismatch: &sch_floorplan::live::Mismatch) -> String {
     let mut why = Vec::new();
     if !mismatch.shorted.is_empty() {
@@ -1341,10 +1088,7 @@ fn mismatch_clause(mismatch: &sch_floorplan::live::Mismatch) -> String {
             mismatch.disturbed.join(", ")
         ));
     }
-    format!(
-        "no placement engine could draw it truthfully ({})",
-        why.join("; ")
-    )
+    format!("could not be drawn truthfully ({})", why.join("; "))
 }
 
 fn selection(input: &SelectionInput) -> Result<Selection> {
@@ -1368,39 +1112,18 @@ fn with_check(mut value: Value, ctx: &AgentRuntime) -> Result<Value> {
     Ok(value)
 }
 
-fn placement_engine(selected: PlacementEngineKind) -> Box<dyn PlacementEngine> {
-    match selected {
-        PlacementEngineKind::Anneal => Box::new(anneal_place::Anneal),
-        PlacementEngineKind::Spine => Box::new(spine_place::SpinePlace),
-        PlacementEngineKind::Cluster => Box::new(cluster_place::ClusterPlace),
-    }
-}
-
-fn engine_kind_name(selected: PlacementEngineKind) -> &'static str {
-    match selected {
-        PlacementEngineKind::Anneal => "anneal",
-        PlacementEngineKind::Spine => "spine",
-        PlacementEngineKind::Cluster => "cluster",
-    }
-}
-
-/// One placement call's wall time, logged when it ends — the record that says
-/// whether the deadline policy is holding on real designs.
+/// One layout call's wall time, logged when it ends.
 struct Timing {
     tool: &'static str,
-    engine: &'static str,
-    budget_ms: u64,
     parts: usize,
     started: std::time::Instant,
 }
 
 impl Timing {
-    fn start(tool: &'static str, budget: &PlacementBudget, engine: &'static str) -> Self {
+    fn start(tool: &'static str, parts: usize) -> Self {
         Self {
             tool,
-            engine,
-            budget_ms: budget.budget.as_millis().min(u128::from(u64::MAX)) as u64,
-            parts: budget.parts,
+            parts,
             started: std::time::Instant::now(),
         }
     }
@@ -1409,117 +1132,11 @@ impl Timing {
         let elapsed_ms = self.started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
         tracing::info!(
             tool = self.tool,
-            engine = self.engine,
             parts = self.parts,
-            budget_ms = self.budget_ms,
             elapsed_ms,
             outcome,
-            "placement finished"
+            "layout finished"
         );
         elapsed_ms
-    }
-}
-
-/// The deadline policy for a call that leaves `parts` on the sheet, with the engine
-/// it chose — honouring an explicit `engine` on the call, then the configured
-/// override. The engine routes the WHOLE sheet per candidate, so the sheet's size is
-/// what the budget must be read against, never the size of the block being placed.
-fn budgeted(
-    ctx: &AgentRuntime,
-    parts: usize,
-    engine: Option<PlacementEngineKind>,
-) -> (PlacementBudget, Box<dyn PlacementEngine>) {
-    budgeted_within(ctx, PlacementBudget::new(parts).budget, parts, engine)
-}
-
-/// A budget clipped to `remaining` — what a later rung of the engine ladder gets.
-fn budgeted_within(
-    ctx: &AgentRuntime,
-    remaining: Duration,
-    parts: usize,
-    engine: Option<PlacementEngineKind>,
-) -> (PlacementBudget, Box<dyn PlacementEngine>) {
-    let budget = PlacementBudget::within(remaining, parts);
-    let engine = budget.engine(engine.or(ctx.config().engines.schematic_placer));
-    (budget, placement_engine(engine))
-}
-
-#[cfg(test)]
-mod tests {
-    use sch_model::engine::{CandidateEvaluator, PlacementOutput, SchematicPlaceProblem};
-    use serde_json::json;
-
-    use super::*;
-
-    struct PanicEngine;
-
-    impl PlacementEngine for PanicEngine {
-        fn name(&self) -> &'static str {
-            "panic-stub"
-        }
-
-        fn place(
-            &self,
-            _problem: &mut SchematicPlaceProblem,
-            _eval: &dyn CandidateEvaluator,
-        ) -> PlacementOutput {
-            panic!("stub placement panic")
-        }
-    }
-
-    #[test]
-    fn budget_refusal_reports_a_real_sub_millisecond_overrun() {
-        let error = PlacementBudget::within(Duration::from_secs(1), 70).overrun(
-            Duration::from_secs(1) + Duration::from_nanos(1),
-            "spine",
-            "verify",
-        );
-        let value = budget_refusal(&error);
-        assert_eq!(value.pointer("/placement/overran_ms"), Some(&json!(1)));
-    }
-
-    #[test]
-    fn panicking_engine_restores_the_document_and_falls_through() {
-        let Some(ctx) = AgentRuntime::detect_for_test() else {
-            eprintln!("SKIP: no KiCAD detected");
-            return;
-        };
-        let payload: sch_check::PlacePartsInput = serde_json::from_value(json!({
-            "parts": [
-                {"ref": "R1", "part": "Device:R", "pins": {"1": "VCC", "2": "MID"}},
-                {"ref": "R2", "part": "Device:R", "pins": {"1": "MID", "2": "GND"}}
-            ]
-        }))
-        .unwrap();
-        let mut doc = sch_floorplan::live::blank_sheet().unwrap();
-        let before = doc.to_text();
-        let mut tried = Vec::new();
-
-        match guarded_place_parts(ctx.env(), &mut doc, &payload, Box::new(PanicEngine), None)
-            .unwrap()
-        {
-            GuardedPlacement::Panicked => tried.push(PanicEngine.name()),
-            GuardedPlacement::Completed(_) => panic!("panic stub unexpectedly completed"),
-        }
-        assert_eq!(doc.to_text(), before);
-
-        let report = match guarded_place_parts(
-            ctx.env(),
-            &mut doc,
-            &payload,
-            Box::new(spine_place::SpinePlace),
-            None,
-        )
-        .unwrap()
-        {
-            GuardedPlacement::Completed(result) => {
-                tried.push("spine");
-                (*result).unwrap()
-            }
-            GuardedPlacement::Panicked => panic!("fallback engine panicked"),
-        };
-
-        assert!(report.committed, "fallback placement was refused");
-        assert_eq!(tried, ["panic-stub", "spine"]);
     }
 }

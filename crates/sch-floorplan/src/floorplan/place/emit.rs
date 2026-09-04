@@ -1,7 +1,6 @@
-//! `place::emit` — IR → millimetre orchestration: `gather` the parts, seed the
-//! coarse grid into mm (`assign_cells`/`apply_cells`), drive the placement engine
-//! (`emit_strategy`/`prepare_writer`), and assemble the routed `SchematicWriter`
-//! (`build_writer`).
+//! `place::emit` — IR → millimetre orchestration: `gather` the parts, hand them to
+//! `sch_flex::typeset` (`emit_strategy`/`prepare_writer`), and assemble the routed
+//! `SchematicWriter` (`build_writer`).
 
 #![allow(clippy::items_after_test_module)]
 
@@ -16,81 +15,11 @@ use sch_check::{PinType, SymbolMeta, find_pin};
 
 use crate::write::SchematicWriter;
 use geom::Dir;
-use kicad_symbol::PinDir;
-use sch_model::engine::CandidateEvaluator;
-use sch_model::engine::{PinFlow, PlacementEngine, SchematicPlaceProblem};
-use sch_model::place::PlaceOptions;
-use sch_model::refine::SEARCH_SEED;
 use sch_model::result::EmitOutput;
 
 use super::*;
 use sch_model::item::{Incidence, Item};
-
-// The disjoint-set forest (over a caller-owned `parent` slice) lives in
-// `geom::union_find`, shared with the desugar pin reconciler.
 use sch_model::ir::LayoutIr;
-
-/// Compose every block's per-block `layout:` grid into one global relative seed:
-/// refdes → (grid col, grid row). Each gridded block occupies its own column band
-/// (declaration order, laid left→right); within a band a cell maps its refdes to
-/// `(band_base + local_col, local_row)`. `None` (`~`) holes are skipped; a refdes
-/// repeated in a column takes its FIRST occurrence (the seed — the search then
-/// floats/spans it, since the grid is RELATIVE positioning, never an absolute
-/// pin). Blocks with no grid contribute nothing here — the engine infers their
-/// internal arrangement. Empty when no block carries a `layout:`.
-pub(crate) fn grid_from_layout(design: &Design) -> BTreeMap<String, [i32; 4]> {
-    let mut out: BTreeMap<String, [i32; 4]> = BTreeMap::new();
-    let mut col_base = 0i32;
-    for block in design.blocks.values() {
-        if block.layout.is_empty() {
-            continue;
-        }
-        let mut width = 0i32;
-        for (r, row) in block.layout.iter().enumerate() {
-            for (c, cell) in row.iter().enumerate() {
-                let Some(name) = cell else { continue };
-                let (gc, gr) = (col_base + c as i32, r as i32);
-                // Bounding box: a refdes in several cells (a column span) grows its
-                // box; the seed uses the top-left, the order constraint the whole box.
-                let e = out.entry(name.clone()).or_insert([gc, gr, gc, gr]);
-                e[0] = e[0].min(gc);
-                e[1] = e[1].min(gr);
-                e[2] = e[2].max(gc);
-                e[3] = e[3].max(gr);
-                width = width.max(c as i32 + 1);
-            }
-        }
-        // Next gridded block starts past this one's columns, so bands never overlap.
-        col_base += width.max(1);
-    }
-    out
-}
-
-/// Every authored occurrence of a refdes, in row-major order. Repeated cells are
-/// meaningful for multi-unit symbols: occurrence 1 seeds unit 1, occurrence 2
-/// seeds unit 2, and so on. `grid_from_layout` deliberately keeps only their
-/// bounding box for ordering; this companion view preserves the individual cells.
-pub(crate) fn grid_occurrences(design: &Design) -> BTreeMap<String, Vec<(i32, i32)>> {
-    let mut out: BTreeMap<String, Vec<(i32, i32)>> = BTreeMap::new();
-    let mut col_base = 0i32;
-    for block in design.blocks.values() {
-        if block.layout.is_empty() {
-            continue;
-        }
-        let mut width = 0i32;
-        for (r, row) in block.layout.iter().enumerate() {
-            for (c, cell) in row.iter().enumerate() {
-                let Some(name) = cell else { continue };
-                out.entry(name.clone())
-                    .or_default()
-                    .push((col_base + c as i32, r as i32));
-                width = width.max(c as i32 + 1);
-            }
-        }
-        col_base += width.max(1);
-    }
-    out
-}
 
 // ---------------------------------------------------------------------------
 // Compiler internal model.
@@ -262,61 +191,24 @@ mod resolve_pin_tests {
 // Public entry.
 // ---------------------------------------------------------------------------
 
-/// Build the neutral placement problem: gathered parts, connectivity, the layout intent
-/// to honour (inferred from connectivity when the caller has none), and the pin flow
-/// directions resolved from the symbol library — so no engine ever opens one itself.
+/// A design lowered to the geometry the typesetter and the realiser share: the items to
+/// draw, the net incidence over them, and the sheet intent.
+pub struct Scene {
+    pub items: Vec<Item>,
+    pub inc: Incidence,
+    pub ir: LayoutIr,
+}
+
+/// Lower `design` into a [`Scene`], inferring the sheet intent when the caller has none.
 pub fn place_problem(
     env: &KicadInstallation,
     design: &Design,
     ir: Option<LayoutIr>,
-    options: PlaceOptions,
-) -> io::Result<SchematicPlaceProblem> {
+) -> io::Result<Scene> {
     let items = gather(env, design)?;
     let inc = incidence(&items);
     let ir = ir.unwrap_or_else(|| super::super::infer::infer_ir(env, design));
-    let pin_flow = resolve_pin_flow(env, &items);
-    Ok(SchematicPlaceProblem {
-        items,
-        inc,
-        ir,
-        pin_flow,
-        seed: SEARCH_SEED,
-        options,
-        deadline: None,
-    })
-}
-
-/// `(item, pin)` → flow direction, from the symbol library's electrical pin types.
-pub fn resolve_pin_flow(
-    env: &KicadInstallation,
-    items: &[Item],
-) -> BTreeMap<(usize, String), PinFlow> {
-    let table = SymbolTable::from_symbol_dir(env.symbol_dir().to_path_buf());
-    let mut meta_cache: BTreeMap<String, Option<SymbolMeta>> = BTreeMap::new();
-    let mut flows = BTreeMap::new();
-    for (i, it) in items.iter().enumerate() {
-        let meta = meta_cache
-            .entry(it.part.clone())
-            .or_insert_with(|| table.symbol(&it.part));
-        let Some(meta) = meta else { continue };
-        for (num, _name, net) in &it.pins {
-            if net.is_none() {
-                continue;
-            }
-            let Some(pm) = find_pin(&meta.pins, num) else {
-                continue;
-            };
-            let flow = match pm.dir {
-                PinDir::Out => Some(PinFlow::Source),
-                PinDir::In => Some(PinFlow::Sink),
-                _ => None,
-            };
-            if let Some(flow) = flow {
-                flows.insert((i, num.clone()), flow);
-            }
-        }
-    }
-    flows
+    Ok(Scene { items, inc, ir })
 }
 
 /// Emit a complete `.kicad_sch`. Pass `ir: None` for connectivity inference (production);
@@ -324,10 +216,9 @@ pub fn resolve_pin_flow(
 pub fn emit_strategy(
     env: &KicadInstallation,
     design: &Design,
-    engine: Box<dyn PlacementEngine>,
     ir: Option<LayoutIr>,
 ) -> io::Result<EmitOutput> {
-    let (w, mut out) = prepare_writer(env, design, ir, engine)?;
+    let (w, mut out) = prepare_writer(env, design, ir)?;
     out.sch = w.finish();
     // The OPEN half of truthfulness, read off the finished document with the same
     // extractor the live-edit gate uses — so a whole-sheet emit can never ship a rail
@@ -355,52 +246,33 @@ fn block_prop(it: &Item) -> Vec<(String, String)> {
     vec![(sch_model::result::AP_BLOCK.to_string(), it.block.clone())]
 }
 
-/// Lay out `design` under `engine` and build its FINALIZED writer (placed, routed,
-/// text-solved, reframed) WITHOUT rendering it. Returns the prepared writer plus the
-/// readability metadata; `EmitOutput.sch` and `net_opens` are left empty because both
-/// need the finished document — [`emit_strategy`] fills them in.
+/// Typeset `design` and build its FINALIZED writer (placed, routed, text-solved,
+/// reframed) WITHOUT rendering it. Returns the prepared writer plus the readability
+/// metadata; `EmitOutput.sch` and `net_opens` are left empty because both need the
+/// finished document — [`emit_strategy`] fills them in.
 #[tracing::instrument(
     skip_all,
-    fields(
-        engine = engine.name(),
-        design = design.name.as_deref().unwrap_or("<unnamed>")
-    )
+    fields(design = design.name.as_deref().unwrap_or("<unnamed>"))
 )]
 pub(crate) fn prepare_writer(
     env: &KicadInstallation,
     design: &Design,
     ir: Option<LayoutIr>,
-    engine: Box<dyn PlacementEngine>,
 ) -> io::Result<(SchematicWriter, EmitOutput)> {
-    let mut problem = place_problem(env, design, ir, PlaceOptions::default())?;
-    if problem.options.debug_timing {
-        tracing::debug!("[place] engine = {}", engine.name());
-    }
-    // The oracle is a SNAPSHOT of the problem's connectivity and intent: the engine mutates
-    // only item poses, so the two never diverge, and the borrow checker stays out of the way.
-    let ir = {
-        let (inc, intent) = (problem.inc.clone(), problem.ir.clone());
-        let realizer = RoutedSheetRealizer::new(env, &inc, &intent);
-        engine
-            .place(&mut problem, &RoutedEvaluator::new(realizer, design))
-            .ir
-    };
+    let mut problem = place_problem(env, design, ir)?;
+    sch_flex::typeset(&mut problem.items, &problem.ir.trees);
+    let ir = problem.ir.clone();
 
-    let detected_idioms = ir.idioms.clone();
     let realizer = RoutedSheetRealizer::new(env, &problem.inc, &ir);
-    let evaluator = RoutedEvaluator::new(realizer, design);
-    let mut w = realizer.realize_writer(
-        design.name.as_deref(),
-        &problem.items,
-        RouteRealization::ShippedSheet,
-    )?;
+    let evaluator = RoutedEvaluator::new(realizer);
+    let mut w = realizer.realize_writer(design.name.as_deref(), &problem.items)?;
     add_orphan_label_columns(&mut w, design, &problem.inc);
     w.set_frame(true);
     w.prepare();
     let warnings = w.layout_warnings();
     let crossings = evaluator.crossings(&problem.items);
     // The truthfulness invariant of the finished geometry, read back off the writer:
-    // no point may carry two nets. Cheap next to the search, and it names the pair.
+    // no point may carry two nets.
     let net_shorts: Vec<String> = super::net_conflicts(env, &w, &problem.items, &problem.inc)
         .iter()
         .map(ToString::to_string)
@@ -417,7 +289,6 @@ pub(crate) fn prepare_writer(
             sch: String::new(),
             layout_warnings: warnings,
             crossings,
-            detected_idioms,
             net_shorts,
             net_opens: Vec::new(),
         },
@@ -425,12 +296,7 @@ pub(crate) fn prepare_writer(
 }
 
 /// Build the complete schematic writer for a placed `items`: symbols (+mirror),
-/// no-connects on unconnected pins, all wiring (rails + routed signals), and ERC
-/// flags. Shared by the final emission and the refinement scorer so both judge
-/// the same geometry — except `fan_risers`, a finalize-only correctness repair
-/// (like `prepare`'s wire-split): two rails whose risers are collinear short, so
-/// the shipped sheet fans them apart, but the per-move scorer skips it (the fan
-/// is a transient mid-search artifact that would churn the placement otherwise).
+/// no-connects on unconnected pins, all wiring (rails + routed signals), and ERC flags.
 #[allow(clippy::too_many_arguments)]
 pub fn build_writer(
     env: &KicadInstallation,
@@ -439,7 +305,6 @@ pub fn build_writer(
     inc: &Incidence,
     ir: &LayoutIr,
     needs_flag: &BTreeSet<String>,
-    fan_risers: bool,
     beside: sch_model::route::RouteScene,
 ) -> io::Result<SchematicWriter> {
     let mut w = SchematicWriter::new();
@@ -495,7 +360,6 @@ pub fn build_writer(
         ir,
         needs_flag,
         &mut flag_points,
-        fan_risers,
     )?;
     for net in needs_flag {
         if let Some((at, angle)) = flag_points.get(net) {
@@ -614,7 +478,6 @@ pub(crate) fn gather(env: &KicadInstallation, design: &Design) -> io::Result<Vec
                     angle: 0.0,
                     unit: u,
                     mirror: false,
-                    frozen: false,
                     preseeded: false,
                 });
             }
@@ -702,7 +565,3 @@ pub(crate) fn incidence(items: &[Item]) -> Incidence {
     }
     inc
 }
-
-// ---------------------------------------------------------------------------
-// Placement — the coarse (col,row,orient) grid rendered as a table.
-// ---------------------------------------------------------------------------

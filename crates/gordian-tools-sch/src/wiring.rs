@@ -44,8 +44,14 @@ pub fn connect_tool(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             .map(|result| {
                 format!(
                     "{} -> {}: {}",
-                    result.get("from").and_then(Value::as_str).unwrap_or("<missing>"),
-                    result.get("to").and_then(Value::as_str).unwrap_or("<missing>"),
+                    result
+                        .get("from")
+                        .and_then(Value::as_str)
+                        .unwrap_or("<missing>"),
+                    result
+                        .get("to")
+                        .and_then(Value::as_str)
+                        .unwrap_or("<missing>"),
                     result
                         .get("error")
                         .and_then(Value::as_str)

@@ -33,17 +33,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "anneal-place"
-version = "0.1.0"
-dependencies = [
- "circuit-graph",
- "geom",
- "rayon",
- "sch-model",
- "tracing",
-]
-
-[[package]]
 name = "anyhow"
 version = "1.0.102"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -211,19 +200,6 @@ dependencies = [
 [[package]]
 name = "circuit-graph"
 version = "0.1.0"
-
-[[package]]
-name = "cluster-place"
-version = "0.1.0"
-dependencies = [
- "anneal-place",
- "circuit-graph",
- "geom",
- "rayon",
- "sch-model",
- "spine-place",
- "tracing",
-]
 
 [[package]]
 name = "cmake"
@@ -911,12 +887,10 @@ dependencies = [
 name = "gordian-tools-sch"
 version = "0.1.0"
 dependencies = [
- "anneal-place",
  "anyhow",
  "async-trait",
  "base64",
  "circuit-graph",
- "cluster-place",
  "futures",
  "fuzzy-matcher",
  "geom",
@@ -930,12 +904,12 @@ dependencies = [
  "sch-check",
  "sch-doc",
  "sch-drag",
+ "sch-flex",
  "sch-floorplan",
  "sch-model",
  "serde",
  "serde_json",
  "serde_path_to_error",
- "spine-place",
  "tempfile",
  "tokio",
  "tracing",
@@ -2428,25 +2402,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "sch-flex"
+version = "0.1.0"
+dependencies = [
+ "circuit-graph",
+ "geom",
+ "kicad-symbol",
+ "sch-model",
+]
+
+[[package]]
 name = "sch-floorplan"
 version = "0.1.0"
 dependencies = [
- "anneal-place",
- "anyhow",
  "circuit-graph",
- "cluster-place",
  "geom",
- "indexmap 2.14.0",
  "kicad",
  "kicad-symbol",
  "kiutils_kicad",
- "rayon",
  "sch-check",
  "sch-doc",
+ "sch-flex",
  "sch-model",
  "serde",
  "serde_json",
- "spine-place",
  "tempfile",
  "thiserror",
  "tracing",
@@ -2745,18 +2724,6 @@ checksum = "52d1cfed4120b4d927bf7c0f86d2087a4a7d6027c906d9f9d525a80573b9be51"
 dependencies = [
  "libc",
  "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "spine-place"
-version = "0.1.0"
-dependencies = [
- "circuit-graph",
- "geom",
- "kicad-symbol",
- "sch-model",
- "serde_json",
- "tracing",
 ]
 
 [[package]]

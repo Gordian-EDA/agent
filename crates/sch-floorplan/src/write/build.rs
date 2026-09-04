@@ -1,13 +1,13 @@
 //! Building the schematic document: placing symbols, labels, wires, junctions,
 //! and free graphics, plus the pin-endpoint geometry the connectivity helpers
-//! resolve against and the refinement-scorer accessors over the placed scene.
+//! resolve against and the truthfulness-count accessors over the placed scene.
 
 use std::io;
 
 use geom::{GRID_50_MIL, Point2, Rect, Segment};
 use kicad::KicadInstallation;
 use kicad_symbol::geometry::{PinGeom, SymbolGeometry};
-use sch_model::geometry::pin_endpoint;
+use sch_model::geometry::{pin_endpoint, quantize_dir};
 
 use sch_model::route::{DrawnSegment, NetSegment};
 
@@ -135,8 +135,8 @@ impl SchematicWriter {
     }
 
     /// Set the symbol UNIT of the most-recently-added instance (the dual of
-    /// [`Self::set_mirror_last`]). The floorplan engine calls this when it places
-    /// the units of a multi-unit part as separate instances sharing a refdes.
+    /// [`Self::set_mirror_last`]). `build_writer` calls this when it places the
+    /// units of a multi-unit part as separate instances sharing a refdes.
     pub fn set_unit_last(&mut self, unit: u8) {
         if let Some(i) = self.instances.last_mut() {
             i.unit = unit;
@@ -144,8 +144,8 @@ impl SchematicWriter {
     }
 
     /// Mirror the most recently added symbol left-to-right (`(mirror y)`). Used
-    /// by the floorplan engine to flip an IC so the pins facing its neighbours
-    /// (e.g. a translator's B-side toward the connector) point the right way.
+    /// to flip an IC so the pins facing its neighbours (e.g. a translator's
+    /// B-side toward the connector) point the right way.
     pub fn set_mirror_last(&mut self) {
         if let Some(i) = self.instances.last_mut() {
             i.mirror = true;
@@ -414,7 +414,6 @@ impl SchematicWriter {
     }
 
     /// Refuse junction dots that would weld two nets (see [`Self::add_junction_on_net`]).
-    /// Finalize-only, so the per-move placement scorer is never perturbed by the repair.
     pub fn set_weld_guard(&mut self, on: bool) {
         self.weld_guard = on;
     }
@@ -553,8 +552,7 @@ impl SchematicWriter {
             })?;
         let lib_id = any.lib_id.clone();
         // Pins are cached per lib_id when the symbol is first added, so this hot
-        // path (called once per net-pin during routing, and many times over while
-        // the refinement loop re-routes candidate placements) never re-reads the
+        // path (called once per net-pin during routing) never re-reads the
         // `.kicad_sym` from disk. Fall back to a load only if somehow uncached.
         let pins: Vec<PinGeom> = match self.sym_pins.get(&lib_id).cloned() {
             Some(p) => p,
@@ -871,13 +869,8 @@ impl SchematicWriter {
             .collect()
     }
 
-    /// Junction-dot count (a routing-quality signal for the refinement scorer).
-    pub fn junction_count(&self) -> usize {
-        self.junction_positions().len()
-    }
-
-    /// Junction-dot positions (for the scorer's merge check: a junction sitting
-    /// on wires of two different nets fuses them).
+    /// Junction-dot positions (for `count_merges`: a junction sitting on wires of
+    /// two different nets fuses them).
     pub fn junction_positions(&self) -> Vec<[f64; 2]> {
         let mut seen = std::collections::BTreeSet::new();
         self.junctions
@@ -920,22 +913,8 @@ impl SchematicWriter {
         self.labels.iter().filter(|l| !l.global).count()
     }
 
-    /// Bounding boxes of the global/port labels (the edge pentagons), for the
-    /// refinement scorer to keep symbol bodies from colliding with a port label
-    /// (the label is placed during routing, so it is not an `Item`).
-    pub fn cluster_label_boxes(&self) -> Vec<Rect> {
-        self.labels
-            .iter()
-            .filter(|l| l.global)
-            .map(|l| {
-                let w = sch_model::text::text_width(&l.net) + 2.54;
-                Rect::new(l.at[0] - w, l.at[1] - 2.0, l.at[0] + w, l.at[1] + 2.0)
-            })
-            .collect()
-    }
-
-    /// Every drawn wire segment with its net. For the refinement scorer's
-    /// crossing / length / short metrics.
+    /// Every drawn wire segment with its net, for `place::score`'s truthfulness counts
+    /// (crossings, merges, foreign taps).
     pub fn wires_with_nets(&self) -> Vec<DrawnSegment> {
         self.wires
             .iter()
@@ -1195,27 +1174,6 @@ pub fn pin_end0(env: &KicadInstallation, lib_id: &str, pin: &str) -> io::Result<
         .into_iter()
         .map(|pg| <[f64; 2]>::from(pg.at.transform_offset(0.0, false)))
         .collect())
-}
-
-/// Quantize a pin's outward direction to the four sheet axes.
-///
-/// `pin_angle` is the pin's local `(at … angle)` in the symbol — it points from
-/// the connection tip INTO the body, so outward (away from the body) is
-/// `pin_angle + 180`. That outward vector goes through [`Point2::transform_offset`]
-/// — the SAME pose transform as the endpoint, so a direction can never point back
-/// through the body its endpoint sits on — and is then snapped to the dominant axis.
-/// Shared by [`SchematicWriter::pin_dirs`] (stub directions) and anchor-pin slotting
-/// (cluster join sides).
-pub fn quantize_dir(pin_angle: f64, inst_angle: f64, mirror: bool) -> Dir {
-    let theta = (pin_angle + 180.0).to_radians();
-    let out = Point2::new(theta.cos(), theta.sin()).transform_offset(inst_angle, mirror);
-    if out.x.abs() >= out.y.abs() {
-        if out.x >= 0.0 { Dir::East } else { Dir::West }
-    } else if out.y >= 0.0 {
-        Dir::South
-    } else {
-        Dir::North
-    }
 }
 
 #[cfg(test)]

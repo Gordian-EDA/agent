@@ -61,13 +61,13 @@ impl WireSeg {
 /// Everything derived once per sheet state.
 ///
 /// Building it costs one [`connect::scene`] pass; every query below is then a
-/// hash lookup, which is what keeps a search over thousands of poses viable.
+/// hash lookup, which is what keeps a redraw's obstacle checks cheap.
 #[derive(Debug, Clone)]
 pub struct Sheet {
     pub pins: Vec<PlacedPin>,
     pub bodies: Vec<Body>,
     pub wires: Vec<WireSeg>,
-    /// Text runs drawn on the sheet, for the collision term.
+    /// Text runs drawn on the sheet, an obstacle [`route`](crate::route) routes around.
     pub texts: Vec<Rect>,
     /// Net carried by each connection point on the sheet.
     pub node_net: HashMap<NodeKey, String>,

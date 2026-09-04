@@ -570,7 +570,6 @@
   "name": "USB STM32F405 Controller",
   "block": "main",
   "intent": {
-    "flow": "lr",
     "rails": {
       "3V3": "top",
       "GND": "bottom"
@@ -582,108 +581,6 @@
       "USB_DM": "left",
       "USB_DP": "left",
       "VBUS": "left"
-    },
-    "relations": [
-      {
-        "kind": "group",
-        "name": "power",
-        "members": [
-          "F1",
-          "D1",
-          "U2",
-          "L1",
-          "C1",
-          "C2",
-          "C3",
-          "C4",
-          "C5",
-          "R1",
-          "R2",
-          "R3"
-        ],
-        "side": [
-          "left",
-          "F1"
-        ]
-      },
-      {
-        "kind": "group",
-        "name": "mcu",
-        "members": [
-          "U1",
-          "C6",
-          "FB1",
-          "C7",
-          "C8",
-          "C9",
-          "C10",
-          "C11",
-          "C12",
-          "C13",
-          "C14",
-          "C15",
-          "C16",
-          "C17",
-          "SW1"
-        ],
-        "side": [
-          "right",
-          "U1"
-        ]
-      },
-      {
-        "kind": "group",
-        "name": "usb",
-        "members": [
-          "J1",
-          "U3",
-          "R5",
-          "R6",
-          "R7",
-          "R8",
-          "R9",
-          "R10"
-        ],
-        "side": [
-          "left",
-          "J1"
-        ]
-      },
-      {
-        "kind": "group",
-        "name": "debug",
-        "members": [
-          "Y1",
-          "C26",
-          "C27",
-          "J2",
-          "JP1"
-        ],
-        "side": [
-          "right",
-          "J2"
-        ]
-      },
-      {
-        "kind": "group",
-        "name": "gpio",
-        "members": [
-          "J3",
-          "J4",
-          "J5",
-          "J6",
-          "R11",
-          "R12",
-          "D2",
-          "D3",
-          "R13",
-          "R14"
-        ],
-        "side": [
-          "right",
-          "J3"
-        ]
-      }
-    ]
+    }
   }
 }
