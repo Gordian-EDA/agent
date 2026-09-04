@@ -59,3 +59,27 @@ Composition, not correctness. Sheets are electrically sound and fold onto standa
 now, but they occupy one band or corner and leave the rest of the page empty, and it is
 the model's own trees plus the block pack that decide that. The unported pieces from the
 reference are a balance-weighted pack score and a post-pack spread to fill.
+
+
+## Corpus measurement after the second wave (verified on a clean checkout of `1ca5254b`)
+
+`tools/corpus_critic.py` over the seven scored validation fixtures, three critic reads each.
+This path renders the engine directly, with no agent run in it, so it isolates the engine.
+
+| | start of day | after |
+| --- | --- | --- |
+| mean of the seven | 6.57 | **7.29** |
+| pooled over all 21 reads | 6.43 | **7.00** |
+| compactness | 4.57 | **6.43** |
+| convention | 7.86 | **8.14** |
+| routing neatness | 7.86 | **8.00** |
+| readability | 7.57 | 7.57 |
+
+Every dimension equal or better. `divider-filter` reaches 9, `555-blinker` and
+`mcp1703-power-entry` 8. All 23 fixtures emit with no shorts and no opens throughout.
+
+Two cautions for anyone comparing numbers across this file. The critic reads about two
+points apart on one unchanged sheet, so only the pooled figure and the dimension averages
+are worth reading. And the RENDER PIPELINE moves the score as well: the same Blue Pill sheet
+scored 8 through the harness and 5 through an ad-hoc PDF rasterization, so corpus scores and
+suite scores are internally consistent but must never be put in one table.
