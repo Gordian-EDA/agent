@@ -20,7 +20,10 @@ import tomllib
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 ANCHOR = ROOT / "quality/anchor/schematic-9.png"
 KICAD = ROOT / ".local/kicad-10.0.4/AppDir/usr/bin/kicad-cli"
-SAMPLES = 3
+# Seven, matching `quality/run.py`: the critic reads one unchanged sheet 1-3 points apart,
+# and the mean of seven takes that spread to about 0.3 — the resolution a packing change
+# needs to be visible at all.
+SAMPLES = 7
 
 
 def gateway():
@@ -88,9 +91,13 @@ def main():
     with futures.ThreadPoolExecutor(max_workers=6) as pool:
         results = dict(pool.map(one, sheets))
 
-    scored = [v["score"] for v in results.values() if isinstance(v.get("score"), (int, float))]
+    # The MEAN of the samples, not the rounded score: rounding throws away most of what
+    # seven samples bought.
+    scored = [v.get("mean", v.get("score")) for v in results.values()
+              if isinstance(v.get("mean", v.get("score")), (int, float))]
     for name, verdict in sorted(results.items()):
-        print(f"{name}: {verdict.get('score')} {verdict.get('samples', verdict.get('error', ''))}")
+        print(f"{name}: {verdict.get('mean', verdict.get('score'))} "
+              f"{verdict.get('samples', verdict.get('error', ''))}")
     if scored:
         print(f"\nmean {sum(scored) / len(scored):.2f} over {len(scored)} sheets")
     (directory / "scores.json").write_text(json.dumps(results, indent=1))
