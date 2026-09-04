@@ -29,16 +29,30 @@ def gateway():
 
 
 def render(sch: pathlib.Path) -> pathlib.Path | None:
-    """`sch` as a PNG beside it, via KiCAD's own exporter."""
+    """`sch` as a PNG beside it, via KiCAD's own exporter.
+
+    ImageMagick's SVG reader gives up on a big sheet with "vector graphics nested
+    too deeply", which silently dropped the five largest fixtures — exactly the ones
+    a packing change moves most. KiCAD's PDF carries the same drawing through a
+    renderer with no such limit, so it is the fallback.
+    """
     png = sch.with_suffix(".png")
     if png.exists():
         return png
     subprocess.run([str(KICAD), "sch", "export", "svg", "-o", str(sch.parent), str(sch)],
                    capture_output=True)
     svg = sch.with_suffix(".svg")
-    if not svg.exists():
+    if svg.exists():
+        subprocess.run(["magick", "-density", "130", str(svg), "-background", "white",
+                        "-flatten", str(png)], capture_output=True)
+    if png.exists():
+        return png
+    pdf = sch.with_suffix(".pdf")
+    subprocess.run([str(KICAD), "sch", "export", "pdf", "-o", str(pdf), str(sch)],
+                   capture_output=True)
+    if not pdf.exists():
         return None
-    subprocess.run(["magick", "-density", "130", str(svg), "-background", "white",
+    subprocess.run(["magick", "-density", "130", str(pdf), "-background", "white",
                     "-flatten", str(png)], capture_output=True)
     return png if png.exists() else None
 
