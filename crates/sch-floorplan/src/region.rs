@@ -27,6 +27,9 @@ use sch_model::geometry::body_rect;
 
 /// Space left between the content already on a sheet and a block placed beside it.
 const BLOCK_MARGIN: f64 = 10.0 * geom::GRID_50_MIL.pitch();
+
+/// The width-to-height ratio a sheet aims for: a landscape page's usable area.
+const SHEET_ASPECT: f64 = 1.5;
 /// Step of the legalisation walk (100 mil — two schematic grid steps).
 const WALK: f64 = 2.0 * geom::GRID_50_MIL.pitch();
 /// How far a whole BLOCK may be slid to find free sheet. A block legitimately travels the
@@ -138,15 +141,35 @@ fn beside_pages(there: Rect) -> Vec<[f64; 2]> {
 }
 
 /// Slide a freshly typeset block clear of the content already on the sheet, so it starts
-/// beside it rather than on top of it.
+/// beside it rather than on top of it — or under it, when beside would make a ribbon.
+///
+/// A design arrives one block per call, and putting each new one to the right of
+/// everything turns five blocks into a row 613 mm wide on a sheet 173 mm tall. Every one
+/// of 28 measured agent sheets came out between three and six times wider than it was
+/// tall, against the 1.4 of the paper it lands on. So the two placements are compared on
+/// the proportions they leave behind, and the better one wins.
 fn beside_the_fixed(movable: &mut [Item], fixed: &[Item]) {
     let (Some(here), Some(there)) = (content_bbox(movable), content_bbox(fixed)) else {
         return;
     };
-    let delta = Point2::new(
+    let beside = Point2::new(
         geom::GRID_50_MIL.snap(there.max_x + BLOCK_MARGIN - here.min_x),
         geom::GRID_50_MIL.snap(there.min_y - here.min_y),
     );
+    let below = Point2::new(
+        geom::GRID_50_MIL.snap(there.min_x - here.min_x),
+        geom::GRID_50_MIL.snap(there.max_y + BLOCK_MARGIN - here.min_y),
+    );
+    let spread = |d: Point2| {
+        let w = (there.max_x).max(here.max_x + d.x) - there.min_x.min(here.min_x + d.x);
+        let h = (there.max_y).max(here.max_y + d.y) - there.min_y.min(here.min_y + d.y);
+        ((w / h.max(1.0)) / SHEET_ASPECT).ln().abs()
+    };
+    let delta = if spread(below) < spread(beside) {
+        below
+    } else {
+        beside
+    };
     for it in movable {
         it.at = Point2::new(it.at.x + delta.x, it.at.y + delta.y);
     }
