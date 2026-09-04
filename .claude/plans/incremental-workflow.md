@@ -331,3 +331,7 @@ re-place." Quality first; time later via parallel subagents; schematic too.
 - Sprint lanes running: text-box-model, route-shape-pagefill (shape acceptance
   `(len−manhattan)+6·bends+20·crossings ≤ 8.5|30.5`, trunk lines; page fill/sheet balance),
   dataset-discipline (strict mode: no gaps when the request fixes the part list; `netlist_fidelity`).
+- dataset-discipline merged (gate running): `RequestScope{no_additions}` in `.gordian/request.json`
+  derived from the request or `place_parts{strict:true}`; completeness audit silent under it;
+  `netlist_fidelity` on check_schematic when `netlist.json` exists. light-accessory and ibm-m122 now
+  reproduce the human netlist (15/10 invented parts → 0); power-over's 4 mis-wired nets remain.
