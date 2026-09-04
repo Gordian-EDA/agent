@@ -11,7 +11,7 @@ use crate::{GRID_50_MIL, Point2};
 /// Grid units charged for one corner.
 const BEND: f64 = 6.0;
 /// Grid units charged for one crossing over a foreign net.
-const CROSSING: f64 = 20.0;
+pub const CROSSING_COST: f64 = 20.0;
 
 /// A route's departure from the straight run between its ends.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -52,7 +52,7 @@ impl RouteShape {
     pub fn cost(&self) -> f64 {
         self.detour_mm / GRID_50_MIL.pitch()
             + BEND * self.bends as f64
-            + CROSSING * self.crossings as f64
+            + CROSSING_COST * self.crossings as f64
     }
 }
 

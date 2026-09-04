@@ -28,7 +28,7 @@ pub use point::Point2;
 pub use polygon::Polygon;
 pub use polyline::Polyline;
 pub use rect::{BoundaryAxis, Rect, SharedBoundary};
-pub use route_shape::{RouteShape, SHAPE_GENERAL, SHAPE_SIMPLE};
+pub use route_shape::{CROSSING_COST, RouteShape, SHAPE_GENERAL, SHAPE_SIMPLE};
 pub use segment::Segment;
 pub use shape::Dir;
 pub use union_find::{ParentForest, UnionFind};

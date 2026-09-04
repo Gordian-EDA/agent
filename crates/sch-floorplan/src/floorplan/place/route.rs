@@ -211,8 +211,14 @@ pub(crate) fn wire(
 ///
 /// Two riders. A hop shorter than [`CROSS_LABEL_LEN_MM`] keeps whatever legal route it has
 /// — a tight cluster must not fragment into label spam over one crossing. And an endpoint
-/// that could not seat a body-clear label forgives one crossing ([`CROWDED_FORGIVES`]),
-/// because naming such a pin only moves the defect onto a label over a body.
+/// that could not seat a body-clear label has no label to degrade to, so its hop is judged
+/// as a LOCAL one however far it reaches, and is forgiven one crossing — literally that
+/// charge, [`geom::CROSSING_COST`], and only when the route actually crosses something.
+/// What it is never forgiven is DETOUR: the length of a hop is a fact about where its pins
+/// were placed, but a perimeter wrap around the pin's own body is a routing choice, and no
+/// pin is so crowded that naming it would be worse. Forgiving the shape cost as one
+/// undifferentiated scalar was what turned every crowded pin on the corpus into a licence
+/// for a sheet-wide snake.
 #[derive(Clone, Copy)]
 pub(crate) struct LabelPolicy {
     pub len_mm: f64,
@@ -230,14 +236,15 @@ impl LabelPolicy {
     }
 
     /// The shape budget for a hop whose ends are `direct` mm apart, or `None` when no
-    /// wire is acceptable at that distance.
+    /// wire is acceptable at that distance. A hop neither of whose ends could seat a
+    /// body-clear label has no label to degrade to, so the LENGTH gate lifts and it is
+    /// judged as a local hop however far it reaches; the SHAPE gate does not lift.
     fn budget(&self, direct: f64, label_clear: bool) -> Option<f64> {
-        let base = match direct {
-            d if d <= self.len_mm => geom::SHAPE_GENERAL,
-            d if d <= self.long_simple_len_mm => geom::SHAPE_SIMPLE,
-            _ => return None,
-        };
-        Some(base + if label_clear { 0.0 } else { CROWDED_FORGIVES })
+        match direct {
+            d if d <= self.len_mm || !label_clear => Some(geom::SHAPE_GENERAL),
+            d if d <= self.long_simple_len_mm => Some(geom::SHAPE_SIMPLE),
+            _ => None,
+        }
     }
 
     /// Whether a routed path is worth drawing rather than naming.
@@ -246,7 +253,13 @@ impl LabelPolicy {
     /// what KiCAD calls a net nobody named, and the sheet it came from draws it as a
     /// plain wire — so for those the wire wins on any shape it can be drawn in, and the
     /// budget only decides between two ways of drawing it.
-    fn keeps(&self, net: &str, path: &[::geom::Point2], crossings: usize, label_clear: bool) -> bool {
+    fn keeps(
+        &self,
+        net: &str,
+        path: &[::geom::Point2],
+        crossings: usize,
+        label_clear: bool,
+    ) -> bool {
         let shape = geom::RouteShape::of(path, crossings);
         let direct = match (path.first(), path.last()) {
             (Some(a), Some(b)) => a.manhattan(*b),
@@ -259,8 +272,12 @@ impl LabelPolicy {
         if direct <= self.cross_len_mm || is_unnamed(net) {
             return true;
         }
+        let forgiven = match label_clear {
+            true => 0.0,
+            false => geom::CROSSING_COST * crossings.min(1) as f64,
+        };
         self.budget(direct, label_clear)
-            .is_some_and(|budget| shape.cost() <= budget)
+            .is_some_and(|budget| shape.cost() - forgiven <= budget)
     }
 }
 
@@ -457,10 +474,16 @@ pub(crate) fn route_signal(
                     _ => false,
                 };
             if across
-                || !label_policy.keeps(net, &p, crossings, term_label_clear[i] && term_label_clear[j])
+                || !label_policy.keeps(
+                    net,
+                    &p,
+                    crossings,
+                    term_label_clear[i] && term_label_clear[j],
+                )
             {
                 continue;
             }
+            audit_hop(net, &p, crossings);
             for seg in p.windows(2) {
                 emit_routed_segment(w, scene, net, seg[0], seg[1]);
             }
@@ -667,6 +690,26 @@ pub(crate) fn route_signal(
         w.add_cluster_label(net, terms[pi].0, side_dir(side), true);
     }
     Ok(())
+}
+
+/// `WIRE_AUDIT=1` dumps every hop the router draws as
+/// `HOP <net> direct drawn bends crossings` so the detour distribution can be measured
+/// on the corpus without guessing at it from the emitted geometry.
+fn audit_hop(net: &str, p: &[::geom::Point2], crossings: usize) {
+    if std::env::var_os("WIRE_AUDIT").is_none() {
+        return;
+    }
+    let drawn: f64 = p.windows(2).map(|s| s[0].manhattan(s[1])).sum();
+    let direct = match (p.first(), p.last()) {
+        (Some(a), Some(b)) => a.manhattan(*b),
+        _ => 0.0,
+    };
+    eprintln!(
+        "HOP {net} {direct:.2} {drawn:.2} {} {crossings} {:?} {:?}",
+        p.len().saturating_sub(2),
+        p.first(),
+        p.last()
+    );
 }
 
 /// Emit only the portions of one routed segment not already covered by same-net geometry.
@@ -1362,11 +1405,6 @@ pub const LONG_SIMPLE_LEN_MM: f64 = 76.2;
 /// drawn as one trunk with drops. 44 grid: past that the node is not a node any more, and
 /// the obstacle-aware router should draw it edge by edge.
 const TRUNK_SPAN_MM: f64 = 55.88;
-
-/// Shape budget added when an endpoint could not seat a body-clear net label: exactly one
-/// crossing. Naming a walled-in pin does not remove the defect, it moves it onto a label
-/// over a body — so such a hop is forgiven a crossing, and nothing more.
-const CROWDED_FORGIVES: f64 = 20.0;
 
 /// Assign each drawn rail (≥3 pins) a y. Rails in a band share a base y, but overlapping
 /// x-ranges are pushed to successive rows (away from the content) via greedy interval

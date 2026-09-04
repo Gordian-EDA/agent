@@ -1334,6 +1334,16 @@
 		)
 		(uuid "5f50e3dd-7af2-50f9-9a96-3873ea0f87c8")
 	)
+	(label "A1_OUT"
+		(at 69.85 78.74 180)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(justify right bottom)
+		)
+		(uuid "92cb083c-8d8a-5ff1-b7b8-78cc84e77b8d")
+	)
 	(label "TXD1"
 		(at 77.47 78.74 0)
 		(effects
@@ -1374,6 +1384,16 @@
 			(justify left bottom)
 		)
 		(uuid "6cee44e9-99d1-5966-ad86-f53a86f04602")
+	)
+	(label "A1_OUT"
+		(at 35.56 76.2 180)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(justify right bottom)
+		)
+		(uuid "c9db573b-ab8a-576c-b0f4-6b8f3149a30e")
 	)
 	(label "A2_OUT"
 		(at 35.56 81.28 180)
@@ -1498,26 +1518,6 @@
 	)
 	(wire
 		(pts
-			(xy 36.83 59.69) (xy 69.85 59.69)
-		)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "c1694c09-ce68-53d5-a534-512a944d4102")
-	)
-	(wire
-		(pts
-			(xy 36.83 76.2) (xy 36.83 59.69)
-		)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "55802dea-7774-5eb1-86b6-fd68b02c4439")
-	)
-	(wire
-		(pts
 			(xy 36.83 86.36) (xy 36.83 83.82)
 		)
 		(stroke
@@ -1528,13 +1528,13 @@
 	)
 	(wire
 		(pts
-			(xy 39.37 76.2) (xy 36.83 76.2)
+			(xy 39.37 76.2) (xy 35.56 76.2)
 		)
 		(stroke
 			(width 0)
 			(type default)
 		)
-		(uuid "43f662de-ef9e-5ec9-b073-84966af8066f")
+		(uuid "ddb57dbf-0714-5286-83b0-3f4f9c229f2b")
 	)
 	(wire
 		(pts
@@ -1635,16 +1635,6 @@
 			(type default)
 		)
 		(uuid "1b4b8f5a-e827-549b-af31-3dc3f8103bc9")
-	)
-	(wire
-		(pts
-			(xy 69.85 59.69) (xy 69.85 78.74)
-		)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "dbb2a93d-09d0-520c-b105-eee8095dd409")
 	)
 	(wire
 		(pts
@@ -1803,24 +1793,6 @@
 		(diameter 0)
 		(color 0 0 0 0)
 		(uuid "e7e56ac0-925f-5cc4-ae05-3323a8ad64f0")
-	)
-	(junction
-		(at 36.83 59.69)
-		(diameter 0)
-		(color 0 0 0 0)
-		(uuid "cc11fd80-0694-5c3f-b238-38aedf94e678")
-	)
-	(junction
-		(at 36.83 76.2)
-		(diameter 0)
-		(color 0 0 0 0)
-		(uuid "86543a80-3cc8-5729-9c3e-e45711f68097")
-	)
-	(junction
-		(at 69.85 59.69)
-		(diameter 0)
-		(color 0 0 0 0)
-		(uuid "6ccd53b4-8b8a-5fbd-b017-11d25bdca404")
 	)
 	(junction
 		(at 77.47 35.56)
