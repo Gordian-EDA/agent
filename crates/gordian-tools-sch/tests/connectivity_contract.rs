@@ -89,12 +89,12 @@ fn place_parts_reports_extracted_pin_nets() {
         }),
     );
     assert_success("place_parts", &placed);
-    assert_eq!(placed["connectivity"], json!(["R5: 2=GND"]));
-    assert_eq!(placed["unconnected"], json!(["R5.1"]));
+    assert_eq!(placed["connectivity"], json!(["R5: 1=TEST_OUT 2=GND"]));
+    assert_eq!(placed["unconnected"], json!([]));
     assert!(
         placed["text"]
             .as_str()
-            .is_some_and(|text| text.contains("CONNECTIVITY\nR5: 2=GND\nUNCONNECTED  R5.1")),
+            .is_some_and(|text| text.contains("CONNECTIVITY\nR5: 1=TEST_OUT 2=GND")),
         "{placed:#}"
     );
 }
