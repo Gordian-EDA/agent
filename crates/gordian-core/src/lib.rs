@@ -33,6 +33,7 @@ mod agent;
 pub mod prompts;
 pub mod review;
 pub mod review_kicad;
+mod review_stop;
 pub mod session;
 pub mod testing;
 mod thrash;
