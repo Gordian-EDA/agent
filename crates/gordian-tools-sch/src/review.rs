@@ -7,9 +7,12 @@
 //! which is what makes a score comparable across circuits.
 //!
 //! A single vision pass has ±1-2 run-to-run variance, so the sheet is graded
-//! [`SAMPLES`] times concurrently and the MODAL run is reported whole: its own
-//! score with its own defects, since averaging incoherent verdicts produces no
-//! verdict.
+//! [`SAMPLES`] times concurrently and scored by the MEAN of the samples — the
+//! estimator whose error falls as the root of the sample count, where a modal or
+//! median read barely moves. The narrative cannot be averaged, so it is taken
+//! whole from the run whose own score sits nearest that mean. This is exactly
+//! what `tools/schematic_critic.py` does, so the tool the agent calls and the
+//! harness fact it is scored by agree on the number.
 
 use anyhow::Result;
 use gordian_llm::{Binary, ChatMessage, ContentPart, MessageContent, Provider, completed_text};
@@ -36,8 +39,9 @@ const DEFAULT_ANCHOR: &[u8] = include_bytes!("../../../quality/anchor/schematic-
 /// How the reference is described back to the model.
 const REFERENCE: &str = "human sheet rated 9";
 
-/// Grades per review. Enough to take a modal score out of a noisy grader.
-pub const SAMPLES: usize = 3;
+/// Grades per review. Seven reads bring the spread on one unchanged sheet to
+/// ~0.3 of a point; three left it at 1-3, which cannot resolve a sheet.
+pub const SAMPLES: usize = 7;
 
 /// Everything the critic looks at, prepared off the async loop.
 pub struct Subject {
@@ -83,7 +87,8 @@ fn png(bytes: Vec<u8>) -> Binary {
     )
 }
 
-/// Grade the sheet [`SAMPLES`] times and report the modal run as the tool result.
+/// Grade the sheet [`SAMPLES`] times and report the mean score with the
+/// narrative of the run nearest that mean.
 pub async fn review(client: &dyn Provider, subject: &Subject) -> Result<Value> {
     let messages = [ChatMessage::user(MessageContent::from_parts(vec![
         ContentPart::from_text(user_prompt(&subject.sheet)),
@@ -111,21 +116,27 @@ pub async fn review(client: &dyn Provider, subject: &Subject) -> Result<Value> {
             "error": "the visual critic returned no parsable verdict; try review_schematic again",
         }));
     }
-    let samples: Vec<f64> = runs.iter().map(|(score, _)| *score).collect();
-    let (score, verdict) = modal(runs);
+    let Graded {
+        score,
+        mean,
+        samples,
+        verdict,
+    } = grade(runs);
     let mut result = json!({
         "ok": true,
         "score": score,
+        "mean": mean,
         "samples": samples,
         "reference": REFERENCE,
         "summary": verdict.get("summary").cloned().unwrap_or(Value::Null),
         "defects": defects(&verdict),
         "note": format!(
             "An independent critic graded the rendered sheet {SAMPLES} times against a {REFERENCE}; \
-             the modal run is reported, and `samples` holds all three. at_mm is in sheet \
-             millimetres, matching read_schematic. This grader reads +/-2 between samples on \
-             one unchanged sheet, so a sheet is finished only when the LOWEST sample reaches 9; \
-             otherwise re-lay-out the blocks the defects name and review again."
+             `mean` is the mean of the `samples`, `score` is it rounded, and the defects come from \
+             the sample nearest the mean. at_mm is in sheet millimetres, matching read_schematic. \
+             A single read of one unchanged sheet swings 1-3 points, so judge only by the MEAN: \
+             the sheet is DONE when the mean reaches 8. Below that, fix the blocks the defects \
+             name and review again; stop when the mean fails to improve on two consecutive reviews."
         ),
     });
     result[IMAGE_PATH_KEY] = json!(subject.annotated_path());
@@ -197,33 +208,39 @@ fn verdict(text: &str) -> Option<(f64, Value)> {
     Some((score, value))
 }
 
-/// The run whose score the grader settled on most often; ties go to the run
-/// nearest the middle of the samples.
-fn modal(mut runs: Vec<(f64, Value)>) -> (f64, Value) {
+/// One review's verdict: the rounded mean, the mean itself, every sample, and
+/// the narrative of the run nearest the mean.
+struct Graded {
+    score: f64,
+    mean: f64,
+    samples: Vec<f64>,
+    verdict: Value,
+}
+
+/// Score by the mean of the samples and keep one coherent narrative: the run
+/// whose own score sits nearest the mean, lowest such run on a tie. Mirrors
+/// `tools/schematic_critic.py`.
+fn grade(mut runs: Vec<(f64, Value)>) -> Graded {
     runs.sort_by(|a, b| a.0.total_cmp(&b.0));
-    let middle = runs[runs.len() / 2].0;
-    let rank = |score: f64| {
-        let count = runs.iter().filter(|(s, _)| *s == score).count();
-        (count, -(score - middle).abs())
-    };
-    let mut candidates: Vec<f64> = runs.iter().map(|(score, _)| *score).collect();
-    candidates.dedup();
-    let best = candidates
+    let samples: Vec<f64> = runs.iter().map(|(score, _)| *score).collect();
+    let mean = samples.iter().sum::<f64>() / samples.len() as f64;
+    let verdict = runs
         .into_iter()
-        .reduce(|best, score| {
-            match rank(score)
-                .partial_cmp(&rank(best))
-                .expect("finite ranks")
-                .then(best.total_cmp(&score))
-            {
-                std::cmp::Ordering::Greater => score,
-                _ => best,
+        .reduce(|best, run| {
+            if (run.0 - mean).abs() < (best.0 - mean).abs() {
+                run
+            } else {
+                best
             }
         })
-        .expect("at least one run");
-    runs.into_iter()
-        .find(|(score, _)| *score == best)
-        .expect("the modal score came from a run")
+        .expect("at least one run")
+        .1;
+    Graded {
+        score: mean.round(),
+        mean: (mean * 100.0).round() / 100.0,
+        samples,
+        verdict,
+    }
 }
 
 /// The critic's defects in the tool's shape: severity, kind, where, what, fix.
@@ -297,8 +314,13 @@ pub fn summary(result: &Value) -> String {
         .get("defects")
         .and_then(Value::as_array)
         .map_or(0, Vec::len);
+    let mean = result
+        .get("mean")
+        .and_then(Value::as_f64)
+        .unwrap_or(score);
     format!(
-        "review {}/10 vs the {REFERENCE} (samples {samples}); {defects} defect(s)",
+        "review mean {mean:.2} (score {}/10) vs the {REFERENCE} (samples {samples}); \
+         {defects} defect(s)",
         trim_zero(score)
     )
 }
@@ -318,16 +340,33 @@ mod tests {
     }
 
     #[test]
-    fn modal_run_wins_and_keeps_its_own_verdict() {
-        let (score, verdict) = modal(vec![run(7.0, "a"), run(9.0, "b"), run(7.0, "c")]);
-        assert_eq!(score, 7.0);
-        assert_eq!(verdict["summary"], "a");
+    fn the_score_is_the_rounded_mean_of_every_sample() {
+        let graded = grade(vec![run(4.0, "a"), run(8.0, "b"), run(8.0, "c"), run(5.0, "d")]);
+        assert_eq!(graded.samples, vec![4.0, 5.0, 8.0, 8.0]);
+        assert_eq!(graded.mean, 6.25);
+        assert_eq!(graded.score, 6.0);
     }
 
     #[test]
-    fn all_distinct_scores_pick_the_middle_run() {
-        let (score, _) = modal(vec![run(5.0, "a"), run(9.0, "b"), run(7.0, "c")]);
-        assert_eq!(score, 7.0);
+    fn the_narrative_comes_from_the_run_nearest_the_mean() {
+        let graded = grade(vec![run(4.0, "low"), run(7.0, "middle"), run(10.0, "high")]);
+        assert_eq!(graded.mean, 7.0);
+        assert_eq!(graded.verdict["summary"], "middle");
+    }
+
+    #[test]
+    fn a_bimodal_sheet_scores_between_its_modes_not_at_one() {
+        let graded = grade(vec![
+            run(4.0, "a"),
+            run(4.0, "b"),
+            run(4.0, "c"),
+            run(4.0, "d"),
+            run(8.0, "e"),
+            run(8.0, "f"),
+            run(8.0, "g"),
+        ]);
+        assert_eq!(graded.mean, 5.71);
+        assert_eq!(graded.score, 6.0);
     }
 
     #[test]

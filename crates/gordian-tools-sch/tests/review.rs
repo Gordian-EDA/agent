@@ -1,6 +1,6 @@
 //! `review_schematic` over a scripted vision model: the tool must read the
-//! critic's verdict JSON, report the modal score of its samples, and hand the
-//! defects back in the shape the agent acts on.
+//! critic's verdict JSON, report the mean of its samples, and hand the defects
+//! back in the shape the agent acts on.
 
 use async_trait::async_trait;
 use gordian_llm::{ChatMessage, MessageContent, Provider, StreamEnd, Tool};
@@ -76,13 +76,25 @@ FINAL_JSON:
 }
 
 #[tokio::test]
-async fn reports_the_modal_score_and_the_mapped_defects() {
-    let critic = ScriptedCritic::new([&verdict(7.0), &verdict(9.0), &verdict(7.0)]);
+async fn reports_the_mean_score_and_the_mapped_defects() {
+    let critic = ScriptedCritic::new([
+        &verdict(4.0),
+        &verdict(4.0),
+        &verdict(4.0),
+        &verdict(4.0),
+        &verdict(8.0),
+        &verdict(8.0),
+        &verdict(8.0),
+    ]);
 
     let result = review(&critic, &subject()).await.expect("review");
 
-    assert_eq!(result["score"], 7.0, "modal of 7, 9, 7");
-    assert_eq!(result["samples"], serde_json::json!([7.0, 9.0, 7.0]));
+    assert_eq!(result["mean"], 5.71, "the mean of four 4s and three 8s");
+    assert_eq!(result["score"], 6.0, "the mean, rounded");
+    assert_eq!(
+        result["samples"],
+        serde_json::json!([4.0, 4.0, 4.0, 4.0, 8.0, 8.0, 8.0])
+    );
     assert_eq!(result["reference"], "human sheet rated 9");
     let defect = &result["defects"][0];
     assert_eq!(defect["kind"], "spacing");
@@ -97,13 +109,22 @@ async fn reports_the_modal_score_and_the_mapped_defects() {
     );
     assert_eq!(
         summary(&result),
-        "review 7/10 vs the human sheet rated 9 (samples 7,9,7); 1 defect(s)"
+        "review mean 5.71 (score 6/10) vs the human sheet rated 9 \
+         (samples 4,4,4,4,8,8,8); 1 defect(s)"
     );
 }
 
 #[tokio::test]
 async fn an_unparsable_grader_is_reported_not_scored() {
-    let critic = ScriptedCritic::new(["the image did not load", "sorry", "n/a"]);
+    let critic = ScriptedCritic::new([
+        "the image did not load",
+        "sorry",
+        "n/a",
+        "no",
+        "cannot",
+        "unavailable",
+        "?",
+    ]);
 
     let result = review(&critic, &subject()).await.expect("review");
 

@@ -12,7 +12,7 @@ async fn scripted(
     instruction: &str,
     mut script: Vec<gordian_core::StreamEnd>,
 ) -> Vec<(String, bool, Value)> {
-    script.extend((0..4).map(|_| final_text("done")));
+    script.extend((0..5).map(|_| final_text("done")));
     let (tx, mut rx) = mpsc::unbounded_channel();
     let mut agent = Agent::new(ScriptedClient::new(script), ctx, system_prompt());
     let outcome = agent.run_turn(instruction, Some(&tx)).await.unwrap();
@@ -64,7 +64,7 @@ async fn a_third_remove_and_place_cycle_is_refused() {
         script.push(place_bridge(cycle));
         script.push(remove_bridge(cycle));
     }
-    script.extend((0..4).map(|_| final_text("done: the bridge is on the sheet")));
+    script.extend((0..5).map(|_| final_text("done: the bridge is on the sheet")));
 
     let (tx, mut rx) = mpsc::unbounded_channel();
     let mut agent = Agent::new(ScriptedClient::new(script), ctx, system_prompt());

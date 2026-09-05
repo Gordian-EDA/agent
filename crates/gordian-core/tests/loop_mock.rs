@@ -28,6 +28,7 @@ async fn clean_check_followed_by_final_text_completes_without_a_quality_nudge() 
         place_two_resistors(),
         tool_call("check", "check_schematic", json!({})),
         final_text("done"),
+        final_text("done"),
         final_text("done: R1 and R2 are on the sheet"),
     ]);
     let mut agent = Agent::new(client, ctx, system_prompt());
@@ -39,9 +40,10 @@ async fn clean_check_followed_by_final_text_completes_without_a_quality_nudge() 
 
     assert_eq!(outcome.stop_reason, StopReason::Completed);
     assert_eq!(outcome.tool_calls_made, 2);
-    // A clean check costs no ERC nudge; the one extra request is the coverage
-    // check every part-creating turn answers before its summary stands.
-    assert_eq!(seen.lock().unwrap().len(), 4);
+    // A clean check costs no ERC nudge; the two extra requests are the coverage
+    // check and the visual review every part-creating turn answers before its
+    // summary stands.
+    assert_eq!(seen.lock().unwrap().len(), 5);
 }
 
 #[tokio::test]
@@ -53,6 +55,7 @@ async fn reviewed_turn_uses_check_schematic_without_a_reviewer_model_call() {
     let (client, seen) = ScriptedClient::recording(vec![
         place_two_resistors(),
         tool_call("check", "check_schematic", json!({})),
+        final_text("done"),
         final_text("done"),
         final_text("done: R1 and R2 are on the sheet"),
     ]);
@@ -69,7 +72,7 @@ async fn reviewed_turn_uses_check_schematic_without_a_reviewer_model_call() {
         .unwrap();
 
     assert_eq!(outcome.stop_reason, StopReason::Completed);
-    assert_eq!(seen.lock().unwrap().len(), 4, "review used no VLM request");
+    assert_eq!(seen.lock().unwrap().len(), 5, "review used no VLM request");
 }
 
 /// The loop has no turn budget: it ends when the model stops asking for tools,
