@@ -18,9 +18,6 @@ const BODY_PAD: f64 = 2.54;
 const BODY_MIN: f64 = 5.08;
 /// Reach of a power symbol on a pin stub, and of a net label's stub before its text.
 const POWER_STUB: f64 = 7.62;
-/// How far the rail glyph itself reaches past the stub end: one grid step, the height the
-/// symbol is drawn at.
-const POWER_GLYPH: f64 = 2.54;
 const LABEL_STUB: f64 = 3.81;
 
 /// What the writer will hang off a pin beyond its tip.
@@ -186,12 +183,8 @@ impl<'a> Part<'a> {
             let d = dir.vec();
             let at = Point2::new(tip.x + d.x * attach.stub, tip.y + d.y * attach.stub);
             let glyph = if attach.power {
-                // A rail glyph stands ON the stub end and says its own name past it: the
-                // symbol's body reaches one grid step beyond, and the name a line beyond
-                // that. Reserving only a name's half-width in every direction left a SHORT
-                // name — GND, 3V3 — hanging over whatever the writer drew next to it.
-                let half = (sch_model::text::text_width(&attach.net) / 2.0)
-                    .max(POWER_GLYPH + sch_model::text::FONT_SIZE);
+                // A rail glyph says its own name, centred on the stub it stands on.
+                let half = (sch_model::text::text_width(&attach.net) / 2.0).max(BODY_PAD);
                 Rect::from_center_half(at, (half, half))
             } else {
                 sch_model::text::label_box(at, dir, &attach.net)
