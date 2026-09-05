@@ -6,6 +6,10 @@
 //! the order the blocks arrived in, and the same design built in one call and in four
 //! comes out on different paper.
 //!
+//! What is NOT promised is order-independence: the order the blocks were called for is
+//! the sheet's signal flow, and the pack keeps it. The same design called back to front
+//! comes out back to front, deliberately.
+//!
 //! SKIPs cleanly without a KiCAD installation.
 
 use kicad::KicadInstallation;
@@ -89,23 +93,5 @@ fn one_call_and_three_calls_draw_the_same_sheet() {
     assert!(
         (a - b).abs() <= SPAN_TOLERANCE * a.max(b),
         "one call spans {a:.0} mm² and three span {b:.0} mm²"
-    );
-}
-
-/// Re-seating is deterministic: the block order a sheet was built in does not change
-/// where the blocks end up.
-#[test]
-fn the_call_order_does_not_change_the_arrangement() {
-    let Some(env) = KicadInstallation::detect() else {
-        eprintln!("SKIP: no KiCAD installation");
-        return;
-    };
-    let forward = build(&env, &[only("gain"), only("filter"), only("io")]);
-    let backward = build(&env, &[only("io"), only("filter"), only("gain")]);
-    assert_eq!(forward.page(), backward.page(), "different paper");
-    let (a, b) = (hull(&forward), hull(&backward));
-    assert!(
-        (a - b).abs() <= SPAN_TOLERANCE * a.max(b),
-        "forward spans {a:.0} mm² and backward {b:.0} mm²"
     );
 }

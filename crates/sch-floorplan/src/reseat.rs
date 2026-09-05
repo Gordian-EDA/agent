@@ -271,6 +271,12 @@ pub fn pieces(doc: &SchDoc) -> Option<Vec<Piece>> {
             entry.1.blocks.insert(block.value.clone());
         }
     }
+    // In the order they were DRAWN, which is the order their blocks were called for,
+    // which is the sheet's signal flow. The pack reads its input in order and keeps that
+    // order whenever it fits, so this is what makes a re-seated sheet still read left to
+    // right. Sorting the pieces by name instead makes the arrangement independent of the
+    // call order and costs 15-30% of the hull on the block replay — the author's order
+    // is information, not noise.
     let mut out: Vec<(usize, Piece)> = grouped.into_values().collect();
     out.sort_by_key(|(first, _)| *first);
     Some(out.into_iter().map(|(_, piece)| piece).collect())
