@@ -17,6 +17,16 @@ All notable changes to this project are documented here. The format is based on
   turns use those facts instead of a visual or semantic LLM critic.
 
 ### Fixed
+- **The picture the visual critic grades no longer passes through an SVG
+  rasterizer.** Schematics are exported as PDF and rasterized by poppler, the
+  renderer KiCAD writes that PDF for. ImageMagick refused seven of the
+  twenty-four corpus sheets outright (`vector graphics nested too deeply`) —
+  every dense one — and `resvg` only drew KiCAD's wires because the exporter
+  patched their stroke widths first. `tools/render_ink_audit.py` now settles
+  "that label is missing" objectively: `pdftotext -bbox` names every string
+  KiCAD plotted, and each one's own rectangle in the render either holds ink or
+  does not. New projects also carry KiCad 10's netclass drawing fields, so wires
+  are never plotted zero-width in the first place.
 - **Queued prompts could interleave out of order.** `AgentEvent`s (a turn's
   final reply, `TurnDone`) and its completion signal (which drains the queue
   and spawns the next turn) travel on two separate channels; a bare
