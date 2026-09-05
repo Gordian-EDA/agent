@@ -37,9 +37,48 @@ fn bits(p: Point2) -> (u64, u64) {
 /// long enough to read as a wire, short enough to keep the text beside its pin.
 pub(crate) const DEFAULT_STUB_MM: f64 = 3.81;
 
+/// How many rings of candidate seats a power-symbol rail name may try before the
+/// solver falls back to burying it: the tip-and-two-sides ring, repeated at
+/// one-grid-step increments outward from the glyph. Past this the name has
+/// drifted far enough that the reader can no longer tell which glyph it names.
+const RAIL_NAME_RINGS: u8 = 6;
+
+/// The candidate that covers the least foreign ink, for a rail name no tier
+/// could seat clear. Overlap AREA, not a count: clipping the corner of one pin
+/// name still reads, sitting square on three of them does not.
+///
+/// `placed` is read LIVE rather than from the tier's frozen scene: the names
+/// seated moments ago are the ones a fallback is likeliest to fuse with, and two
+/// different rails printed as one run ("3V31V2") name neither.
+fn least_buried(
+    seats: &[(TextPos, Rect)],
+    fixed: &[sch_model::text::Obstacle],
+    placed: &[sch_model::text::Obstacle],
+) -> usize {
+    let buried = |b: &Rect| -> f64 {
+        fixed
+            .iter()
+            .chain(placed)
+            .filter_map(|o| b.intersection(&o.bbox))
+            .map(|hit| hit.width() * hit.height())
+            .sum()
+    };
+    (0..seats.len())
+        .min_by(|&a, &b| buried(&seats[a].1).total_cmp(&buried(&seats[b].1)))
+        .unwrap_or(0)
+}
+
 /// Sentinel "net" for no-connect anchors: a stub on a no-connect pin is still a
 /// wrong attachment, so it counts as a foreign net.
 const NC: &str = "\0no_connect";
+
+/// How much room a symbol claims from solved text: the ink it draws, or the
+/// padded cell `approx_size` reserves around it for placement.
+#[derive(Clone, Copy)]
+enum Bodies {
+    Ink,
+    Cell,
+}
 
 enum Apply {
     /// labels[i]: candidate 1 retracts onto the pin endpoint.
@@ -48,8 +87,6 @@ enum Apply {
     SwivelLabel(usize, Vec<Dir>),
     /// instances[i]: per-candidate (Reference, Value) anchors.
     Fields(usize, Vec<(TextPos, TextPos)>),
-    /// instances[i]: per-candidate Value anchor (power rail name).
-    PowerVal(usize, Vec<TextPos>),
 }
 
 impl SchematicWriter {
@@ -201,11 +238,8 @@ impl SchematicWriter {
                 .enumerate()
                 .map(|(rank, k)| {
                     let len = k as f64 * pitch;
-                    let seats: Vec<usize> = members
-                        .iter()
-                        .copied()
-                        .filter(|&i| clear(i, len))
-                        .collect();
+                    let seats: Vec<usize> =
+                        members.iter().copied().filter(|&i| clear(i, len)).collect();
                     (rank, len, seats)
                 })
                 // Ties keep the earlier — and therefore more preferred — rung.
@@ -350,12 +384,14 @@ impl SchematicWriter {
     }
 
     /// Assign collision-free positions to all movable text via the greedy
-    /// candidate solver [`crate::label::choose`].
+    /// candidate solver [`crate::label::GreedyText`].
     ///
-    /// Builds the obstacle scene ([`Self::build_obstacles`]) then the movables
-    /// in most-constrained-first order — stub signal labels
-    /// ([`Self::stub_label_movables`]) ahead of the refdes-ordered field/power
-    /// pass ([`Self::field_movables`]) — solves, and applies each pick.
+    /// Builds the obstacle scene ([`Self::build_obstacles`]), seats the power
+    /// rail names first ([`Self::seat_rail_names`] — they outrank every other
+    /// movable and are never hidden), then solves the rest in
+    /// most-constrained-first order: stub signal labels
+    /// ([`Self::stub_label_movables`]) ahead of the refdes-ordered field pass
+    /// ([`Self::field_movables`]).
     ///
     /// Idempotent: every assignment is recomputed from scratch on each call
     /// (a retract-chosen label has no stub on the re-run and becomes a fixed
@@ -365,7 +401,10 @@ impl SchematicWriter {
         use crate::label::GreedyText;
         use sch_model::text::TextSolver;
 
-        let obstacles = self.build_obstacles();
+        let seated = self.seat_rail_names(&self.build_obstacles(Bodies::Ink));
+        let mut obstacles = self.build_obstacles(Bodies::Cell);
+        obstacles.extend(seated);
+
         let (mut movables, mut applies) = self.stub_label_movables();
         for (m, a) in [self.swivel_label_movables(), self.field_movables()] {
             movables.extend(m);
@@ -376,8 +415,7 @@ impl SchematicWriter {
         for (
             apply,
             sch_model::text::Pick {
-                candidate: pick,
-                fits,
+                candidate: pick, ..
             },
         ) in applies.into_iter().zip(picks)
         {
@@ -415,14 +453,6 @@ impl SchematicWriter {
                     self.instances[i].ref_pos = Some(r);
                     self.instances[i].val_pos = Some(v);
                 }
-                Apply::PowerVal(i, cands) => {
-                    // A rail name with no free spot is OPTIONAL text: hide it
-                    // rather than smear it over a sibling. Greedy order means
-                    // the first symbol of a tight same-rail run shows the
-                    // name and the rest hide — the conventional tidy look.
-                    self.instances[i].val_pos = Some(cands[pick]);
-                    self.instances[i].val_hidden = !fits;
-                }
             }
         }
     }
@@ -430,19 +460,31 @@ impl SchematicWriter {
     /// Everything solved text must avoid: symbol bodies (angle-aware, exempt
     /// for their own refdes), pin name/number text, wires, no-connect markers,
     /// and fixed (stub-less) labels.
-    fn build_obstacles(&self) -> Vec<sch_model::text::Obstacle> {
+    ///
+    /// `bodies` picks how much room a symbol claims. A rail name belongs in the
+    /// padding beside the part it serves, so it is solved against
+    /// [`Bodies::Ink`] — what the symbol actually draws, and what
+    /// [`crate::visual::measure`] scores. Field pairs and net labels are still
+    /// held out of the whole placement cell ([`Bodies::Cell`]); the cell is a
+    /// placement clearance rather than ink, so that is stricter than it needs to
+    /// be, but relaxing it moves every field on every sheet and belongs to the
+    /// lane that owns them.
+    fn build_obstacles(&self, bodies: Bodies) -> Vec<sch_model::text::Obstacle> {
         use sch_model::text::{Obstacle, Owner, pin_text_boxes, wire_box};
         let mut obstacles: Vec<Obstacle> = Vec::new();
         for inst in &self.instances {
             let h = inst.half_extents.rotated_half_extents(inst.angle);
             obstacles.push(Obstacle {
-                bbox: [
-                    inst.at[0] - h[0],
-                    inst.at[1] - h[1],
-                    inst.at[0] + h[0],
-                    inst.at[1] + h[1],
-                ]
-                .into(),
+                bbox: match bodies {
+                    Bodies::Ink => crate::write::build::ink_box(inst),
+                    Bodies::Cell => [
+                        inst.at[0] - h[0],
+                        inst.at[1] - h[1],
+                        inst.at[0] + h[0],
+                        inst.at[1] + h[1],
+                    ]
+                    .into(),
+                },
                 owner: Some(Owner::Symbol(inst.refdes.clone())),
             });
             // Pin name/number text (skip power/flag graphics — single
@@ -542,56 +584,177 @@ impl SchematicWriter {
                 let dirs = swivel_poses(home);
                 let movable = Movable {
                     owner: Some(Owner::Net(l.net.clone())),
-                    candidates: dirs
-                        .iter()
-                        .map(|&dir| label_rect(l, l.at, dir))
-                        .collect(),
+                    candidates: dirs.iter().map(|&dir| label_rect(l, l.at, dir)).collect(),
                 };
                 (movable, Apply::SwivelLabel(i, dirs.to_vec()))
             })
             .unzip()
     }
 
-    /// Reference+Value field pairs and power-symbol rail names, in deterministic
-    /// refdes order (one shared pass, so greedy solve order is stable). Each
-    /// instance dispatches to [`Self::power_value_movable`] (power symbols) or
-    /// [`Self::field_pair_movable`] (everything else).
+    /// Reference+Value field pairs, in deterministic refdes order so the greedy
+    /// solve order is stable. Power symbols carry no such pair — their rail name
+    /// is seated ahead of everything by [`Self::seat_rail_names`].
     fn field_movables(&self) -> (Vec<sch_model::text::Movable>, Vec<Apply>) {
-        let mut movables: Vec<sch_model::text::Movable> = Vec::new();
-        let mut applies = Vec::new();
-        let mut order: Vec<usize> = (0..self.instances.len()).collect();
+        let mut order: Vec<usize> = (0..self.instances.len())
+            .filter(|&i| !self.instances[i].refdes.starts_with('#'))
+            .collect();
         order.sort_by(|&a, &b| self.instances[a].refdes.cmp(&self.instances[b].refdes));
-        for &i in &order {
-            let pair = if self.instances[i].refdes.starts_with('#') {
-                self.power_value_movable(i)
-            } else {
-                Some(self.field_pair_movable(i))
-            };
-            if let Some((m, a)) = pair {
-                movables.push(m);
-                applies.push(a);
-            }
-        }
-        (movables, applies)
+        order
+            .into_iter()
+            .map(|i| self.field_pair_movable(i))
+            .unzip()
     }
 
-    /// Power-symbol Value (the rail name): beyond the symbol tip (below for
-    /// down-pointing GND-family rails, above otherwise), else right / left — so
-    /// adjacent rails never merge their names. `None` for `power:PWR_FLAG`,
-    /// whose Value is hidden and has nothing to place.
-    fn power_value_movable(&self, i: usize) -> Option<(sch_model::text::Movable, Apply)> {
-        use sch_model::text::Movable;
+    /// Seat every power-symbol rail name, ahead of all other movable text.
+    ///
+    /// A rail glyph with no name beside it is a power connection the reader
+    /// cannot identify, so this text is not optional: it is never hidden, and it
+    /// is solved FIRST — the boxes returned here become obstacles, so net labels
+    /// and field text move around a rail name rather than the reverse.
+    ///
+    /// Acceptance relaxes in tiers, nearest spot first within each, until every
+    /// name is seated. The tiers are the obstacle classes, told apart by their
+    /// [`sch_model::text::Owner`]:
+    ///
+    /// 1. clear of everything, the movable labels' current spots included —
+    ///    outranking a label is not a reason to evict one that has nowhere else
+    ///    to go, when this rail does;
+    /// 2. crossing a WIRE ([`Owner::Net`]) allowed — a name over a wire still
+    ///    reads — and the labels' courtesy dropped;
+    /// 3. crossing a BODY ([`Owner::Symbol`]) allowed too, leaving only unowned
+    ///    ink — pin text, no-connects, fixed labels — to dodge. Two names merged
+    ///    into one unreadable run is the artifact worth avoiding longest.
+    ///
+    /// A name that clears nothing even then takes its least-buried candidate.
+    ///
+    /// The one name that goes undrawn is a duplicate: a part's repeated power
+    /// pins share an endpoint, so its ten grounds are ten `power:GND` symbols on
+    /// ONE point, drawing as ONE glyph. That glyph gets one name and the stack's
+    /// other nine are [`Instance::val_hidden`] — no glyph is left unnamed.
+    fn seat_rail_names(
+        &mut self,
+        obstacles: &[sch_model::text::Obstacle],
+    ) -> Vec<sch_model::text::Obstacle> {
+        use crate::label::GreedyText;
+        use sch_model::text::{Obstacle, Owner, TextSolver};
+
+        let mut order: Vec<usize> = (0..self.instances.len())
+            .filter(|&i| {
+                self.instances[i].refdes.starts_with('#')
+                    && self.instances[i].lib_id != "power:PWR_FLAG"
+            })
+            .collect();
+        order.sort_by(|&a, &b| self.instances[a].refdes.cmp(&self.instances[b].refdes));
+        // A symbol's duplicate power pins land on ONE endpoint, so a part with
+        // ten grounds gets ten GND symbols stacked on the same point. They draw
+        // as a SINGLE glyph and take a single name; the rest would pile ten
+        // copies of "GND" on top of each other and each other's neighbours.
+        let mut seen: BTreeSet<((u64, u64), String)> = BTreeSet::new();
+        for inst in &mut self.instances {
+            inst.val_hidden = false;
+        }
+        order.retain(|&i| {
+            let inst = &self.instances[i];
+            let first = seen.insert((bits(inst.at), inst.value.clone()));
+            self.instances[i].val_hidden = !first;
+            first
+        });
+        let seats: Vec<Vec<(TextPos, Rect)>> =
+            order.iter().map(|&i| self.rail_name_seats(i)).collect();
+
+        // Where the movable labels currently sit. They are solved AFTER the rail
+        // names and will give way, so this is not a constraint — but a rail with
+        // a free alternative should take it rather than evict a label that then
+        // has nowhere of its own to go.
+        let courtesy: Vec<Obstacle> = self
+            .labels
+            .iter()
+            .filter(|l| !matches!(l.anchor, Anchor::Fixed))
+            .map(|l| Obstacle {
+                bbox: label_rect(l, l.at, l.dir),
+                owner: None,
+            })
+            .collect();
+
+        let tiers: [fn(&Owner) -> bool; 3] = [
+            |_| true,
+            |o| !matches!(o, Owner::Net(_)),
+            |o| !matches!(o, Owner::Net(_) | Owner::Symbol(_)),
+        ];
+        let mut pending: Vec<usize> = (0..order.len()).collect();
+        let mut placed: Vec<Obstacle> = Vec::new();
+        for (tier, &keeps) in tiers.iter().enumerate() {
+            if pending.is_empty() {
+                break;
+            }
+            let fixed: Vec<Obstacle> = obstacles
+                .iter()
+                .filter(|o| o.owner.as_ref().is_none_or(keeps))
+                .chain(if tier == 0 { courtesy.as_slice() } else { &[] })
+                .cloned()
+                .collect();
+            let scene: Vec<Obstacle> = fixed.iter().chain(placed.iter()).cloned().collect();
+            let movables: Vec<sch_model::text::Movable> = pending
+                .iter()
+                .map(|&k| sch_model::text::Movable {
+                    owner: Some(Owner::Symbol(self.instances[order[k]].refdes.clone())),
+                    candidates: seats[k].iter().map(|c| c.1).collect(),
+                })
+                .collect();
+            let picks = GreedyText.solve(&scene, &movables);
+            let last = tier + 1 == tiers.len();
+            let mut still = Vec::new();
+            for (&k, pick) in pending.iter().zip(picks) {
+                if !pick.fits && !last {
+                    still.push(k);
+                    continue;
+                }
+                // Out of tiers: no candidate clears the remaining ink, so take
+                // the one that hides the least of it rather than the first.
+                let candidate = match pick.fits {
+                    true => pick.candidate,
+                    false => least_buried(&seats[k], &fixed, &placed),
+                };
+                let (pos, bbox) = seats[k][candidate];
+                self.instances[order[k]].val_pos = Some(pos);
+                placed.push(Obstacle { bbox, owner: None });
+            }
+            pending = still;
+        }
+        placed
+    }
+
+    /// Which way a power symbol's GLYPH points out of its anchor: the opposite
+    /// of the direction its single pin connects.
+    ///
+    /// `power:GND` draws below its pin and `power:+3V3` above, both at instance
+    /// angle 0 — the instance angle alone cannot tell them apart, and guessing
+    /// from it seats half the rail names straight through the part they hang off.
+    fn rail_glyph_dir(&self, inst: &super::Instance) -> Dir {
+        use sch_model::geometry::quantize_dir;
+        self.sym_pins
+            .get(&inst.lib_id)
+            .and_then(|pins| pins.first())
+            .map(|pg| quantize_dir(pg.angle, inst.angle, inst.mirror).opposite())
+            .unwrap_or(Dir::North)
+    }
+
+    /// Candidate seats for one power symbol's rail name, nearest first: every
+    /// spot beyond the glyph tip, at [`RAIL_NAME_RINGS`] increasing removes, then
+    /// the same rings to either side of it.
+    ///
+    /// Offsets are measured from the DRAWN glyph — a stubby wedge on one side of
+    /// the anchor — not from the symbol's placement cell, which `approx_size`
+    /// floors to 10 mm square: seating off the cell strands the name 5 mm out in
+    /// open space and leaves two rails a hand's width apart declaring each other
+    /// blocked.
+    ///
+    /// Each candidate is the anchor the writer will emit, boxed by the model that
+    /// measures what KiCAD then draws there — so a spot the solver approves is a
+    /// spot the readability lint clears.
+    fn rail_name_seats(&self, i: usize) -> Vec<(TextPos, Rect)> {
         let r2 = |v: f64| (v * 100.0).round() / 100.0;
         let inst = &self.instances[i];
-        if inst.lib_id == "power:PWR_FLAG" {
-            return None;
-        }
-        let h = inst.half_extents.rotated_half_extents(inst.angle);
-        let (cx, cy) = (inst.at[0], inst.at[1]);
-        let (minx, miny, maxx, maxy) = (cx - h[0], cy - h[1], cx + h[0], cy + h[1]);
-        // Each candidate is the anchor the writer will emit, boxed by the model
-        // that measures what KiCAD then draws there — so a spot the solver
-        // approves is a spot the readability lint clears.
         let seat = |at: [f64; 2], justify: Justify| {
             let pos = TextPos {
                 at: [r2(at[0]), r2(at[1])],
@@ -599,25 +762,41 @@ impl SchematicWriter {
             };
             (pos, field_box(pos.at, justify, &inst.value))
         };
-        let above = seat([cx, miny - 0.64], Justify::Center);
-        let below = seat([cx, maxy + 2.24], Justify::Center);
-        let right = seat([maxx + 0.64, cy + 0.8], Justify::Left);
-        let left = seat([minx - 0.64, cy + 0.8], Justify::Right);
-        // A 180-rotated power symbol points down (GND family): the
-        // name goes below the graphic; otherwise above.
-        let cands = if inst.angle == 180.0 {
-            vec![below, right, left]
-        } else {
-            vec![above, right, left]
+        let (cx, cy) = (inst.at[0], inst.at[1]);
+        let out = self.rail_glyph_dir(inst);
+        // Where KiCAD's own power symbols carry their Value: 3.556 mm past an
+        // up-arrow's head, 3.81 mm past a ground bar's last rung. The box is
+        // CENTRED on the anchor, so a glyph reaching 2.54 mm out leaves barely a
+        // quarter millimetre of air at these offsets — seating the name any
+        // nearer draws the glyph through it.
+        const TIP_MM: f64 = 3.81;
+        const ARROW_MM: f64 = 3.556;
+        let tip = |d: f64| match out {
+            Dir::North => seat([cx, cy - ARROW_MM - d], Justify::Center),
+            Dir::South => seat([cx, cy + TIP_MM + d], Justify::Center),
+            Dir::East => seat([cx + TIP_MM + d, cy + 0.8], Justify::Left),
+            Dir::West => seat([cx - TIP_MM - d, cy + 0.8], Justify::Right),
         };
-        let movable = Movable {
-            owner: Some(sch_model::text::Owner::Symbol(inst.refdes.clone())),
-            candidates: cands.iter().map(|c| c.1).collect(),
+        // Beside the glyph rather than beyond it, for a rail with no room ahead.
+        // Clear of the wedge's WIDTH (1.27 mm) plus the same air the tip leaves,
+        // or the text butts against the glyph outline.
+        const SIDE_MM: f64 = 2.54;
+        let side = |d: f64| match out {
+            Dir::North | Dir::South => [
+                seat([cx + SIDE_MM + d, cy + 0.8], Justify::Left),
+                seat([cx - SIDE_MM - d, cy + 0.8], Justify::Right),
+            ],
+            Dir::East | Dir::West => [
+                seat([cx, cy - SIDE_MM - d], Justify::Center),
+                seat([cx, cy + SIDE_MM + d], Justify::Center),
+            ],
         };
-        Some((
-            movable,
-            Apply::PowerVal(i, cands.into_iter().map(|c| c.0).collect()),
-        ))
+        // Every tip before any side: a name further out along the glyph's own
+        // axis still reads as that glyph's, where one tucked beside the wedge
+        // reads as the neighbour's. Only when the whole axis is taken does the
+        // name step aside.
+        let rings = || (0..RAIL_NAME_RINGS).map(|r| f64::from(r) * GRID_50_MIL.pitch());
+        rings().map(tip).chain(rings().flat_map(side)).collect()
     }
 
     /// Reference+Value field pair for a non-power instance: right / left / above
@@ -875,7 +1054,8 @@ impl SchematicWriter {
             self.wires.remove(j);
             // The recorded tap that split the run here is not a dot and no longer a
             // wire end; leaving it would have the next `prepare` split the run again.
-            self.junctions.retain(|junction| key(junction.at) != key(at));
+            self.junctions
+                .retain(|junction| key(junction.at) != key(at));
         }
     }
 
@@ -908,9 +1088,7 @@ impl SchematicWriter {
                 .enumerate()
                 .filter(|(k, _)| *k != i && *k != j)
                 .any(|(_, w)| Segment::new(w.a, w.b).contains_point(at))
-                || beside
-                    .iter()
-                    .any(|(segment, _)| segment.contains_point(at));
+                || beside.iter().any(|(segment, _)| segment.contains_point(at));
             (straight && !crossed).then_some((i, j, at))
         })
     }
@@ -1294,16 +1472,9 @@ impl SchematicWriter {
                 }
                 continue;
             }
-            let h = inst.half_extents.rotated_half_extents(inst.angle);
             items.push((
                 format!("symbol {}", inst.refdes),
-                [
-                    inst.at[0] - h[0],
-                    inst.at[1] - h[1],
-                    inst.at[0] + h[0],
-                    inst.at[1] + h[1],
-                ]
-                .into(),
+                crate::write::build::ink_box(inst),
                 inst.refdes.clone(),
                 Kind::Body,
             ));
@@ -1566,6 +1737,83 @@ mod tests {
                 .all(|c| c.max_y < 80.1 || c.min_y > 119.9),
             "IC fields should never use side bands over pin text: {:?}",
             movable.candidates
+        );
+    }
+
+    /// A rail name reads on the far side of its glyph, whichever way that glyph
+    /// points — `power:GND` draws below its pin and `power:+3V3` above, both at
+    /// instance angle 0, so the seat cannot be read off the instance angle.
+    #[test]
+    fn rail_names_seat_beyond_the_glyph() {
+        let Some(env) = detect_env() else { return };
+        let mut w = SchematicWriter::new();
+        w.add_symbol(&env, "power:GND", "#PWR_GND_0", "GND", [127.0, 63.5], 0.0)
+            .unwrap();
+        w.add_symbol(&env, "power:+3V3", "#PWR_3V3_0", "+3V3", [190.5, 63.5], 0.0)
+            .unwrap();
+        w.solve_text_positions();
+
+        let gnd = w.instances[0].val_pos.expect("GND name seated");
+        assert!(
+            gnd.at[1] > 63.5,
+            "a ground name reads BELOW the bar: {:?}",
+            gnd.at
+        );
+        let rail = w.instances[1].val_pos.expect("+3V3 name seated");
+        assert!(
+            rail.at[1] < 63.5,
+            "an up-arrow rail name reads ABOVE the glyph: {:?}",
+            rail.at
+        );
+    }
+
+    /// Rail names crowded onto one pitch still ALL get drawn: the seat degrades
+    /// outward, but a glyph is never left unnamed. Only an exact DUPLICATE — a
+    /// symbol stacked on another with the same name — gives its name up.
+    #[test]
+    fn crowded_rail_names_are_all_seated() {
+        let Some(env) = detect_env() else { return };
+        let mut w = SchematicWriter::new();
+        for i in 0..8 {
+            let x = 127.0 + f64::from(i) * 2.54;
+            w.add_symbol(
+                &env,
+                "power:GND",
+                &format!("#PWR_GND_{i}"),
+                "GND",
+                [x, 63.5],
+                0.0,
+            )
+            .unwrap();
+        }
+        w.solve_text_positions();
+        assert!(
+            w.instances
+                .iter()
+                .all(|i| i.val_pos.is_some() && !i.val_hidden),
+            "every crowded rail keeps a seated, visible name"
+        );
+
+        // Stack four grounds on ONE point, as a part's duplicate GND pins do:
+        // that is a single drawn glyph, so it carries a single name.
+        let mut stack = SchematicWriter::new();
+        for i in 0..4 {
+            stack
+                .add_symbol(
+                    &env,
+                    "power:GND",
+                    &format!("#PWR_S{i}"),
+                    "GND",
+                    [127.0, 63.5],
+                    0.0,
+                )
+                .unwrap();
+        }
+        stack.solve_text_positions();
+        assert_eq!(
+            stack.instances.iter().filter(|i| !i.val_hidden).count(),
+            1,
+            "a coincident rail stack draws its name once"
         );
     }
 

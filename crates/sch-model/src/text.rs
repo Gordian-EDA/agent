@@ -616,6 +616,7 @@ pub enum Owner {
 }
 
 /// Fixed geometry a movable must not collide with.
+#[derive(Clone)]
 pub struct Obstacle {
     pub bbox: Rect,
     /// `None` for geometry nothing is exempt from: pin text, no-connects, fixed labels.
@@ -623,6 +624,7 @@ pub struct Obstacle {
 }
 
 /// One piece of movable text with its candidate boxes in preference order.
+#[derive(Clone)]
 pub struct Movable {
     /// What this text belongs to; obstacles with the same owner do not block it.
     pub owner: Option<Owner>,
