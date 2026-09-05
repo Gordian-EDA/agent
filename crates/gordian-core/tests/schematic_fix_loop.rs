@@ -69,7 +69,7 @@ fn returned_fix_closes_a_broken_passive_connection_verbatim() {
 }
 
 #[test]
-fn reversed_led_does_not_offer_a_rotation_that_preserves_the_wrong_connections() {
+fn a_reversed_led_is_repaired_by_the_half_turn_the_finding_names() {
     let Some(ctx) = AgentRuntime::detect_for_test() else {
         eprintln!("SKIP: no KiCad detected");
         return;
@@ -100,6 +100,74 @@ fn reversed_led_does_not_offer_a_rotation_that_preserves_the_wrong_connections()
         .iter()
         .find(|finding| finding["code"] == "led-polarity")
         .expect("reversed LED finding");
-    assert!(finding["fix"].is_null(), "{finding:#}");
-    assert!(finding["why"].as_str().unwrap().contains("swapped safely"));
+    let fix = finding["fix"].clone();
+    assert_eq!(fix["tool"], "move_symbols", "{finding:#}");
+    let mv = &fix["args"]["moves"][0];
+    assert_eq!(mv["ref"], "D1");
+    assert_eq!(mv["turn_in_place"], true, "{finding:#}");
+
+    tool(&ctx, "move_symbols", fix["args"].clone());
+    let repaired = tool(&ctx, "check_schematic", json!({"detail": true}));
+    assert!(
+        !repaired["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|finding| finding["code"] == "led-polarity"),
+        "the named fix must clear the finding it was attached to: {repaired:#}"
+    );
+}
+
+/// An electrical rule the planner cannot turn into a call must be reported, not
+/// blocked on — a blocking finding with no fix is what drove the agent to delete
+/// the parts and rails the request named.
+#[test]
+fn an_unrepairable_electrical_rule_is_reported_instead_of_blocking() {
+    let Some(ctx) = AgentRuntime::detect_for_test() else {
+        eprintln!("SKIP: no KiCad detected");
+        return;
+    };
+    tool(
+        &ctx,
+        "place_parts",
+        json!({"block": "shorted", "parts": [
+            {
+                "ref": "C1",
+                "part": "Device:C",
+                "value": "100n",
+                "footprint": "Capacitor_SMD:C_0603_1608Metric",
+                "pins": {"1": "GND", "2": "GND"}
+            }
+        ]}),
+    );
+    let report = tool(&ctx, "check_schematic", json!({"detail": true}));
+    let reported = report["reported_not_blocking"]
+        .as_array()
+        .expect("a fix-less electrical rule is listed as reported")
+        .clone();
+    assert!(
+        reported
+            .iter()
+            .any(|finding| finding["code"] == "dangling-passive"),
+        "{report:#}"
+    );
+    assert!(
+        !report["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|finding| finding["code"] == "dangling-passive" && finding["severity"] == "error"),
+        "{report:#}"
+    );
+    assert!(
+        reported[0]["why"]
+            .as_str()
+            .unwrap()
+            .contains("not a repair")
+            || reported[0]["why"]
+                .as_str()
+                .unwrap()
+                .contains("do not delete"),
+        "{reported:#?}"
+    );
 }
