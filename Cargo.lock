@@ -2373,6 +2373,7 @@ dependencies = [
  "fuzzy-matcher",
  "indexmap 2.14.0",
  "kicad-symbol",
+ "sch-doc",
  "sch-model",
  "serde",
  "serde_json",

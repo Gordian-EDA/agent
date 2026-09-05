@@ -897,6 +897,41 @@ fn diagnostic_finding(
 
 /// Findings that count toward `checks`: everything the sheet itself states,
 /// as opposed to advice (completeness), a reference comparison, or KiCAD's ERC.
+/// Two nets whose names say they are one signal, with the wire that would join
+/// them when the sheet makes the two ends unambiguous.
+fn near_twin_finding(locator: &FindingLocator<'_>, twin: &sch_check::NearTwin) -> Finding {
+    let message = format!(
+        "probable missing connection between `{}` and `{}` — the names say one signal, \
+         the sheet draws two nets with nothing between them",
+        twin.a, twin.b
+    );
+    let (refs, nets, at) = locator.locate(&message, [], [twin.a.clone(), twin.b.clone()]);
+    Finding {
+        severity: "warning".to_string(),
+        source: "near_twin_nets",
+        code: "near-twin-nets".to_string(),
+        message,
+        refs,
+        nets,
+        at,
+        fix: twin.join.as_ref().map(|(from, to)| ToolFix {
+            tool: "connect",
+            args: json!({"from": from, "to": to}),
+        }),
+        why: match &twin.join {
+            Some((from, to)) => format!(
+                "{from} and {to} are the only pins these nets put on a header or an IC, so they \
+                 are the two ends of the signal. Join them, or rename one net if they really are \
+                 different signals."
+            ),
+            None => "Join the two nets, or rename one of them if they really are different \
+                     signals."
+                .to_string(),
+        },
+        advisory: true,
+    }
+}
+
 fn local_findings(findings: &[Finding], severity: &str) -> usize {
     findings
         .iter()
@@ -1257,6 +1292,11 @@ fn inspect_schematic(path: &Path, ctx: &AgentRuntime) -> Result<Inspection> {
         lint.0
             .iter()
             .map(|diagnostic| diagnostic_finding(&locator, diagnostic, "lint")),
+    );
+    findings.extend(
+        sch_check::twins::near_twins(&design)
+            .iter()
+            .map(|twin| near_twin_finding(&locator, twin)),
     );
     for defect in sch_check::erc::defects(&design, ctx.provider()) {
         let diagnostic = if defect.blocking {
@@ -1628,6 +1668,20 @@ mod tests {
         );
         assert_eq!(fix_groups(&findings).len(), 1);
         assert_eq!(fix_groups(&findings)[0]["closes"], 3);
+    }
+
+    /// The audit works the two ends out from the netlist; the planner has no
+    /// rule that knows better, so it must not claim the finding and overwrite it.
+    #[test]
+    fn a_near_twin_keeps_the_connect_the_audit_worked_out() {
+        let code = "near-twin-nets";
+        let message = "probable missing connection between `nrst` and `reset` — the names \
+                       say one signal, the sheet draws two nets with nothing between them";
+        assert!(!is_connection_finding(code, message));
+        assert!(!is_power_finding(code, message));
+        assert!(!is_output_conflict(code, message));
+        assert!(!is_assignable_footprint(code, message));
+        assert!(!code.contains("polarity"));
     }
 
     #[test]

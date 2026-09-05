@@ -252,6 +252,13 @@ impl LabelPolicy {
     /// what KiCAD calls a net nobody named, and the sheet it came from draws it as a
     /// plain wire — so for those the wire wins on any shape it can be drawn in, and the
     /// budget only decides between two ways of drawing it.
+    ///
+    /// The wider question — whether the exemption should follow the net's ORIGIN, so a
+    /// readable mint like `D1_K` keeps it too — was measured and answered NO. Widening
+    /// it converts four label pairs per corpus into wires, and every one of them is a
+    /// wire the router draws THROUGH a symbol body or around its perimeter, because
+    /// neither the length gate nor the shape budget can see a body. Re-open it when the
+    /// router treats bodies and pin text as obstacles.
     fn keeps(
         &self,
         net: &str,
@@ -280,17 +287,9 @@ impl LabelPolicy {
     }
 }
 
-/// A net named by a tool rather than by a person: KiCAD's `Net-(D1-A)` after whichever
-/// pin sorts first, its `unconnected-(…)`, or the `N$7` an older editor hands out. None
-/// of them tells a reader anything, and a sheet of them reads as a parts bin with
-/// numbers on it rather than a circuit.
-pub(crate) fn is_unnamed(net: &str) -> bool {
-    net.starts_with("Net-(")
-        || net.starts_with("unconnected-(")
-        || net
-            .strip_prefix("N$")
-            .is_some_and(|rest| !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit()))
-}
+/// `sch_doc`'s one copy of "this name was recomputed from the net's own pins",
+/// under the name the live-edit path asks the placement module for.
+pub(crate) use sch_doc::netname::is_derived as is_unnamed;
 
 /// Route one signal/port net's terminals as a tree (MST) with the direction-
 /// aware elbow router. A port adds a virtual terminal just past the net's extent
