@@ -651,15 +651,10 @@ pub(crate) fn route_signal(
         }
     }
 
-    // Junction dots: 3-way meets among the routed paths.
-    let mut all = paths.clone();
-    for segment in w.wire_segments_on_net(net) {
-        all.push(vec![segment.a, segment.b]);
-    }
-    for j in crate::wire::junction_points(&all) {
-        w.add_junction_on_net(j, net);
-    }
-    // A terminal landing inside another same-net segment is a T-join.
+    // A terminal landing inside another same-net segment is a T-join: the tap splits
+    // the segment there, which is what joins them. Meets among the routed paths need
+    // no tap — their ends already coincide, and the split pass cuts at every same-net
+    // wire end anyway.
     for (p, _) in &terms {
         let interior = w.wire_segments_on_net(net).iter().any(|segment| {
             let point = ::geom::Point2::from(*p);

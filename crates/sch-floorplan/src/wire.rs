@@ -229,29 +229,6 @@ pub fn mst_edges(terminals: &[Point2]) -> Vec<(usize, usize)> {
     edges
 }
 
-/// Junction dots for one net's emitted paths: every point where >= 3 segment
-/// ENDS meet (a T or X formed by deliberate same-net joins).
-pub fn junction_points(paths: &[Vec<Point2>]) -> Vec<Point2> {
-    let mut counts: std::collections::BTreeMap<(u64, u64), (Point2, usize)> =
-        std::collections::BTreeMap::new();
-    for path in paths {
-        for w in path.windows(2) {
-            for p in [w[0], w[1]] {
-                let key = (p.x.to_bits(), p.y.to_bits());
-                counts.entry(key).or_insert((p, 0)).1 += 1;
-            }
-        }
-    }
-    // Interior vertices of one polyline count twice (end of one segment,
-    // start of the next) without being junctions; >= 3 distinct segment ends
-    // at a point only happens where separate runs join.
-    counts
-        .into_values()
-        .filter(|(_, c)| *c >= 3)
-        .map(|(p, _)| p)
-        .collect()
-}
-
 /// Orientation-aware elbows with best-first collision repair.
 pub struct ElbowRouter;
 
@@ -360,30 +337,6 @@ mod tests {
         // Adjacent pairs, never the redundant 0-2 long edge.
         assert!(edges.contains(&(0, 1)));
         assert!(edges.contains(&(1, 2)));
-    }
-
-    #[test]
-    fn junctions_at_three_way_meets_only() {
-        // A horizontal run plus a vertical drop ending mid-run: the meet point
-        // collects 3 segment ends -> junction. The plain corner of an L does
-        // not (2 ends).
-        let paths = vec![
-            vec![Point2::new(0.0, 0.0), Point2::new(10.0, 0.0)],
-            vec![
-                Point2::new(5.0, -5.0),
-                Point2::new(5.0, 0.0),
-                Point2::new(8.0, 0.0),
-            ],
-        ];
-        // ...but if the drop TERMINATES on the run, the run is split at the
-        // tap in real emission. Model that split:
-        let split = vec![
-            vec![Point2::new(0.0, 0.0), Point2::new(5.0, 0.0)],
-            vec![Point2::new(5.0, 0.0), Point2::new(10.0, 0.0)],
-            vec![Point2::new(5.0, -5.0), Point2::new(5.0, 0.0)],
-        ];
-        assert_eq!(junction_points(&paths), Vec::<Point2>::new());
-        assert_eq!(junction_points(&split), vec![Point2::new(5.0, 0.0)]);
     }
 
     #[test]

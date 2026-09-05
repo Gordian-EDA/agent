@@ -61,6 +61,7 @@ mod drawn;
 mod edit;
 mod error;
 mod libsyms;
+mod meets;
 mod model;
 mod page;
 mod pins;
@@ -74,6 +75,7 @@ pub use drawn::drawn_texts;
 pub use edit::{WireClip, is_drawing};
 pub use error::{Error, Result};
 pub use libsyms::SymbolSource;
+pub use meets::{Meet, MeetKey, drawn_dots, meets};
 pub use model::{
     Field, Item, Junction, Label, LabelKind, LibSymbols, Mirror, NoConnect, Pose, Rectangle,
     Retained, Sheet, SheetPin, SymbolInst, Text, Wire, WireFault, WireFaultKind,
