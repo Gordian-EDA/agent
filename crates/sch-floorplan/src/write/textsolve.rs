@@ -46,10 +46,19 @@ const RAIL_NAME_RINGS: u8 = 6;
 /// The candidate that covers the least foreign ink, for a rail name no tier
 /// could seat clear. Overlap AREA, not a count: clipping the corner of one pin
 /// name still reads, sitting square on three of them does not.
-fn least_buried(seats: &[(TextPos, Rect)], scene: &[sch_model::text::Obstacle]) -> usize {
+///
+/// `placed` is read LIVE rather than from the tier's frozen scene: the names
+/// seated moments ago are the ones a fallback is likeliest to fuse with, and two
+/// different rails printed as one run ("3V31V2") name neither.
+fn least_buried(
+    seats: &[(TextPos, Rect)],
+    fixed: &[sch_model::text::Obstacle],
+    placed: &[sch_model::text::Obstacle],
+) -> usize {
     let buried = |b: &Rect| -> f64 {
-        scene
+        fixed
             .iter()
+            .chain(placed)
             .filter_map(|o| b.intersection(&o.bbox))
             .map(|hit| hit.width() * hit.height())
             .sum()
@@ -678,13 +687,13 @@ impl SchematicWriter {
             if pending.is_empty() {
                 break;
             }
-            let scene: Vec<Obstacle> = obstacles
+            let fixed: Vec<Obstacle> = obstacles
                 .iter()
                 .filter(|o| o.owner.as_ref().is_none_or(keeps))
-                .chain(placed.iter())
                 .chain(if tier == 0 { courtesy.as_slice() } else { &[] })
                 .cloned()
                 .collect();
+            let scene: Vec<Obstacle> = fixed.iter().chain(placed.iter()).cloned().collect();
             let movables: Vec<sch_model::text::Movable> = pending
                 .iter()
                 .map(|&k| sch_model::text::Movable {
@@ -704,7 +713,7 @@ impl SchematicWriter {
                 // the one that hides the least of it rather than the first.
                 let candidate = match pick.fits {
                     true => pick.candidate,
-                    false => least_buried(&seats[k], &scene),
+                    false => least_buried(&seats[k], &fixed, &placed),
                 };
                 let (pos, bbox) = seats[k][candidate];
                 self.instances[order[k]].val_pos = Some(pos);
