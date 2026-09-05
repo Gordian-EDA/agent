@@ -337,9 +337,15 @@ fn place_parts_inner(
 
     let mut design = added;
     // A net the sheet already carries is joined by NAME: the new block hangs a label on
-    // it rather than reaching across to a pin the region placement cannot draw to.
-    for net in shared_nets(&design, &before) {
-        design.nets.entry(net).or_default().port = true;
+    // it rather than reaching across to a pin the region placement cannot draw to. Once
+    // both ends are drawn, `stitch_short_seams` takes the name back off the ones that
+    // turned out to be near neighbours.
+    let seams: BTreeSet<String> = shared_nets(&design, &before)
+        .into_iter()
+        .filter(|net| !circuit_graph::netclass::is_power_net(net))
+        .collect();
+    for net in &seams {
+        design.nets.entry(net.clone()).or_default().port = true;
     }
     sch_check::nets::derive_attrs(&mut design);
 
@@ -377,6 +383,10 @@ fn place_parts_inner(
     let placed = posed(movable, &out.poses);
     let inc = incidence(&placed);
     let was_global = global_label_nets(doc);
+    // The labels the sheet had settled on before this block was drawn: a seam stitch
+    // may take back only the one this call itself added.
+    let settled_labels: BTreeSet<String> =
+        doc.labels().map(|label| label.uuid.clone()).collect();
     let typeset_warnings = out.warnings.clone();
     let warnings = live_phase("realise",
         placed.len(),
@@ -402,6 +412,10 @@ fn place_parts_inner(
             Ok(warnings)
         },
     )?;
+    let stitched = stitch_short_seams(doc, &seams, &settled_labels);
+    if !stitched.is_empty() {
+        tracing::info!(?stitched, "wired the seams that were too short to need a name");
+    }
     enforce_label_scopes(doc, &was_global);
 
     let mut mismatch = live_phase("verify", placed.len(), inc.len(), || {
@@ -627,7 +641,7 @@ fn rearrange_inner(
     replace: bool,
 ) -> Result<ArrangeReport> {
     let chosen = selection.resolve(doc);
-    let (before, design, boundary) = live_phase("lower", chosen.len(), 0, || {
+    let (before, design, boundary, interior) = live_phase("lower", chosen.len(), 0, || {
         let before = connect::extract(doc);
         let mut design = Design::default();
         design
@@ -643,6 +657,14 @@ fn rearrange_inner(
             }
             design.nets.entry(net.drawn().to_string()).or_default().port = true;
         }
+        // A net the sheet has no name for is lifted under KiCAD's own `Net-(U3--)`,
+        // and the redraw is then free to write that down as a label — a name recomputed
+        // from the net's own pins, so the sheet forks it the moment one moves. It gets
+        // the same stable mint a boundary net gets.
+        let interior = interior_mints(&before, &chosen);
+        for (from, to) in &interior {
+            rename_net(&mut design, from, to);
+        }
         // A net the sheet NAMED with a label keeps its name: the redraw erases that
         // label, and drawing the net as a bare wire instead would hand it back to
         // KiCAD's `Net-(…)` derivation — a rename the board's rules and pours would
@@ -651,12 +673,13 @@ fn rearrange_inner(
             design.nets.entry(net).or_default().port = true;
         }
         sch_check::nets::derive_attrs(&mut design);
-        (before, design, boundary)
+        (before, design, boundary, interior)
     });
 
     let renames: BTreeMap<&str, &str> = boundary
         .iter()
         .filter_map(|net| Some((net.name.as_str(), net.mint.as_deref()?)))
+        .chain(interior.iter().map(|(from, to)| (from.as_str(), to.as_str())))
         .collect();
     let (mut movable, held): (Vec<Item>, Vec<Item>) = seated_items(doc, &before)
         .into_iter()
@@ -781,31 +804,20 @@ fn rearrange_inner(
     // out call after call while the drawing never changes.
     let mut laid_out = true;
     if !mismatch.is_empty() {
+        // The redraw did not mean what the sheet meant, so the sheet's own drawing is
+        // what stands. The snapshot predates the erase and nothing between it and the
+        // extraction of `before` touches the document, so restoring it puts the netlist
+        // back exactly as `before` had it — there is nothing left for a label to fix.
         doc.restore(snapshot)?;
         laid_out = false;
-        let fallback = label_selection_debits(doc, &before, &chosen);
-        enforce_label_scopes(doc, &was_global);
-        mismatch = Mismatch {
-            disturbed: disturbed(&before, &connect::extract(doc)),
-            ..Default::default()
-        };
-        if mismatch.is_empty() {
-            warnings.push(format!(
-                "wire redraw could not preserve the netlist cleanly; NOTHING WAS MOVED — kept the original positions and routes and added {} same-named pin labels",
-                fallback
-            ));
-            redrawn = 0;
-            labelled = fallback;
-        } else {
-            doc.restore(snapshot)?;
-            warnings.push(
-                "wire redraw and its label fallback could not improve the selection; nothing was moved and the original drawing stands"
-                    .to_string(),
-            );
-            redrawn = 0;
-            labelled = 0;
-            mismatch = Mismatch::default();
-        }
+        warnings.push(
+            "wire redraw could not preserve the netlist; NOTHING WAS MOVED — the original \
+             positions and routes stand"
+                .to_string(),
+        );
+        redrawn = 0;
+        labelled = 0;
+        mismatch = Mismatch::default();
     }
     let landed_on = overlaps_created(&overlaps_before, doc);
     if !landed_on.is_empty() {
@@ -842,39 +854,6 @@ fn rearrange_inner(
         mismatch,
         committed: true,
     })
-}
-
-/// Add same-named pin labels at selected terminals whose clean redraw failed.
-fn label_selection_debits(
-    doc: &mut SchDoc,
-    before: &Netlist,
-    chosen: &BTreeSet<String>,
-) -> usize {
-    let pins = sch_doc::placed_pins(doc);
-    let mut labelled = BTreeSet::new();
-    for net in before
-        .nets
-        .iter()
-        .filter(|net| net.pins.iter().any(|pin| chosen.contains(&pin.refdes)))
-    {
-        let kind = match net.source {
-            NetSource::Global => LabelKind::Global,
-            NetSource::Hier => LabelKind::Hier,
-            _ => LabelKind::Local,
-        };
-        for member in net.pins.iter().filter(|pin| chosen.contains(&pin.refdes)) {
-            let Some(pin) = pins.iter().find(|pin| {
-                pin.refdes == member.refdes && pin.unit == member.unit && pin.number == member.pin
-            }) else {
-                continue;
-            };
-            let key = (net.name.clone(), coord(pin.at));
-            if labelled.insert(key) {
-                doc.add_label(kind, &net.name, Pose::new(pin.at.x, pin.at.y, 0.0));
-            }
-        }
-    }
-    labelled.len()
 }
 
 enum WorkerReply<T> {
@@ -1314,6 +1293,29 @@ fn name_held_halves(doc: &mut SchDoc, boundary: &[BoundaryNet]) {
     }
 }
 
+/// Every net WHOLLY inside `chosen` that the sheet has no name of its own for.
+///
+/// Lifted straight off the extractor such a net arrives called `Net-(U3--)`, a name
+/// KiCAD recomputes from the net's own pins; a redraw that writes it down as a label
+/// freezes a name that stops being true the moment a pin moves. These get the stable
+/// mint a boundary net gets. Only the wholly-inside ones: a net with a pin left
+/// standing outside the selection is a boundary net, whose held side has to be kept
+/// in step and is named by [`name_held_halves`].
+fn interior_mints(before: &Netlist, chosen: &BTreeSet<String>) -> BTreeMap<String, String> {
+    before
+        .nets
+        .iter()
+        .filter(|net| net.source == NetSource::Auto)
+        .filter_map(|net| {
+            let mut real = net.pins.iter().filter(|pin| !pin.refdes.starts_with('#'));
+            let lead = real.next()?;
+            let inside = chosen.contains(&lead.refdes)
+                && real.all(|pin| chosen.contains(&pin.refdes));
+            inside.then(|| (net.name.clone(), minted_net_name(&lead.refdes, &lead.pin)))
+        })
+        .collect()
+}
+
 /// Nets touching `chosen` that the sheet names with a label of its own.
 fn named_nets(before: &Netlist, chosen: &BTreeSet<String>) -> Vec<String> {
     use sch_doc::NetSource::{Global, Hier, Local};
@@ -1353,6 +1355,121 @@ fn rename_net(design: &mut Design, from: &str, to: &str) {
     if let Some(attrs) = design.nets.shift_remove(from) {
         design.nets.insert(to.to_string(), attrs);
     }
+}
+
+/// How far apart the two ends of one seam may be and still be worth a wire.
+///
+/// The router's own long-hop reach: within it a straight run or one elbow is a shape
+/// the engine already considers drawable, so a seam inside that reach is one a human
+/// would draw rather than name.
+const STITCH_REACH_MM: f64 = crate::floorplan::place::LONG_SIMPLE_LEN_MM;
+
+/// Wire the seams that are short and clear enough not to need a second name.
+///
+/// A block joins an earlier one by NAME because that is what the region placement can
+/// always draw. But whether a connection wants a name is a question of DISTANCE and
+/// CLUTTER, not of which block each end sits in: when the two ends land within the
+/// router's own reach and the run between them crosses nothing, the wire is what a
+/// human draws. The net keeps the name it already had — only the label this call just
+/// added comes off — so nothing the sheet answered to stops being true.
+///
+/// Deliberately narrow. Both ends must be plain local labels: a global pennant or a
+/// hierarchical label is the sheet's interface to somewhere this document cannot see,
+/// and no local tidy-up may delete one.
+fn stitch_short_seams(
+    doc: &mut SchDoc,
+    seams: &BTreeSet<String>,
+    settled: &BTreeSet<String>,
+) -> Vec<String> {
+    let mut stitched = Vec::new();
+    let mut drop: BTreeSet<String> = BTreeSet::new();
+    for net in seams {
+        let ends: Vec<(&str, bool, Point2)> = doc
+            .labels()
+            .filter(|label| sch_doc::unescape(&label.text) == *net)
+            .map(|label| {
+                (
+                    label.uuid.as_str(),
+                    label.kind == LabelKind::Local,
+                    label.at.point(),
+                )
+            })
+            .collect();
+        // One label per side and no more: the pair this join created. Three or more
+        // means a third block is on the net too, and the name is carrying it.
+        let [(first, first_local, a), (second, second_local, b)] = ends.as_slice() else {
+            continue;
+        };
+        if !first_local || !second_local {
+            continue;
+        }
+        // The one this call added is the one the sheet had not settled on before.
+        let fresh = match (settled.contains(*first), settled.contains(*second)) {
+            (true, false) => second,
+            (false, true) => first,
+            _ => continue,
+        }
+        .to_string();
+        if !worth_wiring(*a, *b) {
+            continue;
+        }
+        // Rebuilt per seam: a wire drawn for an earlier one is drawing this one has to
+        // respect. Bodies go in as solids — `beside_scene` carries none, and a seam is
+        // exactly the long run that would otherwise cross a symbol.
+        let mut scene = beside_scene(doc);
+        scene.solids = sch_doc::body_rects(doc)
+            .into_iter()
+            .map(|(_, body)| body)
+            .collect();
+        let Some(path) = clear_seam_path(*a, *b, net, &scene) else {
+            continue;
+        };
+        for step in path.windows(2) {
+            doc.add_wire(step[0], step[1]);
+        }
+        drop.insert(fresh);
+        stitched.push(net.clone());
+    }
+    if !drop.is_empty() {
+        doc.retain_drawing(|item| match item {
+            sch_doc::Item::Label(label) => !drop.contains(&label.uuid),
+            _ => true,
+        });
+    }
+    stitched
+}
+
+/// Whether two seam ends are far enough apart to be two things and near enough to be
+/// worth joining with a line.
+fn worth_wiring(a: Point2, b: Point2) -> bool {
+    let span = (a.x - b.x).abs() + (a.y - b.y).abs();
+    span > geom::EPS && span <= STITCH_REACH_MM
+}
+
+/// The orthogonal run between two seam ends, if one can be drawn without touching
+/// anything that is not this net AND without crossing another net on the way.
+///
+/// The crossing test is what keeps this honest: a run that is merely legal but cuts
+/// through the middle of the sheet reads as spaghetti, and a name is the better
+/// drawing for it. That is the router's own wire-vs-label rule, applied at the seam.
+fn clear_seam_path(
+    a: Point2,
+    b: Point2,
+    net: &str,
+    scene: &sch_model::route::RouteScene,
+) -> Option<Vec<Point2>> {
+    let aligned = (a.x - b.x).abs() < geom::EPS || (a.y - b.y).abs() < geom::EPS;
+    let candidates: Vec<Vec<Point2>> = match aligned {
+        true => vec![vec![a, b]],
+        false => vec![
+            vec![a, Point2::new(b.x, a.y), b],
+            vec![a, Point2::new(a.x, b.y), b],
+        ],
+    };
+    candidates.into_iter().find(|path| {
+        sch_model::route::path_ok(path, net, scene)
+            && sch_model::route::path_crossings(path, net, scene) == 0
+    })
 }
 
 /// The authored net of every pin whose name the drawing does not carry, read back off
