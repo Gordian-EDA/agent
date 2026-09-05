@@ -1177,11 +1177,12 @@
 			)
 		)
 		(property "Value" "P12V"
-			(at 114.3 45.97 0)
+			(at 111.76 52.87 0)
 			(effects
 				(font
 					(size 1.27 1.27)
 				)
+				(justify right)
 			)
 		)
 		(property "Footprint" ""

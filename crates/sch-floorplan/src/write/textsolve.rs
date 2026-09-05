@@ -1005,8 +1005,36 @@ impl SchematicWriter {
         // reads as the neighbour's. Only when the whole axis is taken does the
         // name step aside.
         let rings = || (0..RAIL_NAME_RINGS).map(|r| f64::from(r) * GRID_50_MIL.pitch());
-        rings().map(tip).chain(rings().flat_map(side)).collect()
+        let seats: Vec<(TextPos, Rect)> = rings().map(tip).chain(rings().flat_map(side)).collect();
+
+        // A power symbol reads as ONE object — the glyph and the name beside it — so a
+        // foreign wire threading the paper BETWEEN them reads as that rail, however
+        // clear the name's own box is. The wires are drawn by the time the names are
+        // seated, so a seat whose cluster a stranger runs through is demoted behind the
+        // seats whose cluster is clear.
+        //
+        // Demoted, never dropped: a name has to stand SOMEWHERE, and one sharing its
+        // corridor with a wire still beats one flung out to a ring where it reads as the
+        // neighbouring rail's. Pricing only the gap — excluding the glyph, so a seat
+        // tight against it can never be demoted — was tried and reviewed worse: it
+        // relocated names that were already correct.
+        let glyph = crate::write::build::ink_box(inst);
+        let threaded = |name: &Rect| {
+            let hull = Rect::new(
+                glyph.min_x.min(name.min_x),
+                glyph.min_y.min(name.min_y),
+                glyph.max_x.max(name.max_x),
+                glyph.max_y.max(name.max_y),
+            );
+            self.wires.iter().any(|w| {
+                w.net != inst.value
+                    && geom::Segment::new(w.a, w.b).axis_aligned_hits_rect_interior(&hull)
+            })
+        };
+        let (clear, shared): (Vec<_>, Vec<_>) = seats.iter().partition(|(_, name)| !threaded(name));
+        clear.into_iter().chain(shared).collect()
     }
+
 
     /// Reference+Value field pair for a non-power instance: every seat around
     /// the part at every [`FIELD_PAD_RINGS`] remove, nearest to the part's ink

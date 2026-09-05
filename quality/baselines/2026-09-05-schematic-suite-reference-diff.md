@@ -189,3 +189,28 @@ renders ≥ 8: 5. No ERC-only failures remain except one new one:
   `connect` call at a time (33 calls), was told the same thing again, and deleted the
   labels. Attempt 0 never touched them and passed ERC with 10. Fix: the lint is a
   warning phrased as a port; nothing in the drawing can "repair" a port but stripping it.
+
+Side-by-side (fresh reviewer, human original vs ours) on the two cases lowest on both
+attempts, current-sense 5.43/5.43 and sallen-key 6.0/6.0:
+- Every `place_parts` after the first is a graft beside what is drawn and nothing is
+  ever re-seated: four good blocks strewn across the top 1/12 of an A2 page, density
+  0.87 parts/1000 mm² vs the human's 3.5 on A4, captions 300 px from their block,
+  `arrange` on a seated block a no-op. → lane/reseat.
+- `place_parts` marked a lone pin on an author-named net no-connect (route.rs
+  `terms.len() < 2`), so port nets came out bare and the model spent 55 requests
+  (current-sense#0) and 27 (ddr#1) re-naming them. Fixed 86b8aeea: labelled on a stub.
+  Replay labels 837→853, text collisions 7→2; reviewer KEEP on three fixtures.
+- Machine names printed as labels: `N$3`/`N$7` (the dataset's unnamed nets, which
+  `machine_parts` does not recognise) and `N_U11_8` (INA240's pin 8 is named `+`, so
+  no readable name exists; the human wires it). Open.
+
+## Suite 10 — main a03c4e5f (single-pin-net demoted, router obstacles), 14 renders (one attempt), 7-sample mean
+
+critic 7.18 (v9 per-case worst 6.55 / best 7.38), look 6.00, requests 596 for 14 (v9: 1009 for 28).
+Passing all checks: current-sense, ecg, ibm, rp2040, hbridge (5 of 14).
+- current-sense 5.43 → 8.86 in 19 requests (v9: 55). The `single-pin-net` error was the
+  whole thrash: with it a warning the model placed, checked, reviewed and finished.
+- ddr 42 → 0 ERC errors; critic 6 (dense BGA sheet, no thrash left, 22 requests).
+- Low and consistent: three-phase 5.29 (4 ERC), light-accessory 5.86 (77 requests),
+  sallen-key 5.71, ddr 6.0 — the next side-by-side targets.
+- This binary predates the port-label rule (86b8aeea) and the wire-more merge.

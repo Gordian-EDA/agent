@@ -53,12 +53,39 @@ pub struct SymbolInk {
 }
 
 impl SymbolInk {
-    /// Whether `seg` may cross this symbol's ink: only as the stub leaving one of its
-    /// own pins.
-    pub(crate) fn own_stub(&self, seg: Segment) -> bool {
+    /// Whether `seg` starts or ends on one of this symbol's pins — its own wire, which
+    /// stands next to its own ink by construction and is not judged for hugging it.
+    pub(crate) fn touches_pin(&self, seg: Segment) -> bool {
         self.pins
             .iter()
             .any(|p| p.dist(seg.a) < EPS || p.dist(seg.b) < EPS)
+    }
+
+    /// Whether `seg` crosses this symbol's drawn ink.
+    ///
+    /// Landing on one of the symbol's own pins is not on its own a licence to cross it.
+    /// A pin sits on the EDGE of the ink it belongs to, so the stub leaving it outward
+    /// never enters the interior in the first place, while a wire that arrives at that
+    /// same pin from across the body is the defect itself — the run down a switch's own
+    /// axis, or along a pin row. The one pin that does need forgiving is one the ink
+    /// ENCLOSES — a power symbol's origin inside its glyph — which no wire could reach
+    /// otherwise; and only for the box that encloses it.
+    pub(crate) fn crossed_by(&self, seg: Segment) -> bool {
+        self.boxes
+            .iter()
+            .any(|r| seg.axis_aligned_hits_rect_interior(r) && !self.reachable_only_through(r, seg))
+    }
+
+    /// Whether `seg` is the wire of a pin this box ENCLOSES, which cannot be drawn
+    /// without entering it.
+    fn reachable_only_through(&self, r: &Rect, seg: Segment) -> bool {
+        self.pins.iter().any(|p| {
+            (p.dist(seg.a) < EPS || p.dist(seg.b) < EPS)
+                && p.x > r.min_x + EPS
+                && p.x < r.max_x - EPS
+                && p.y > r.min_y + EPS
+                && p.y < r.max_y - EPS
+        })
     }
 }
 
@@ -120,13 +147,7 @@ pub fn path_ok(path: &[Point2], net: &str, scene: &RouteScene) -> bool {
         {
             return false;
         }
-        if scene.ink.iter().any(|ink| {
-            !ink.own_stub(seg)
-                && ink
-                    .boxes
-                    .iter()
-                    .any(|r| seg.axis_aligned_hits_rect_interior(r))
-        }) {
+        if scene.ink.iter().any(|ink| ink.crossed_by(seg)) {
             return false;
         }
     }
@@ -173,7 +194,7 @@ pub fn path_hugs(path: &[Point2], net: &str, scene: &RouteScene) -> usize {
         let boxes = scene
             .ink
             .iter()
-            .filter(|ink| !ink.own_stub(seg))
+            .filter(|ink| !ink.touches_pin(seg))
             .flat_map(|ink| ink.boxes.iter())
             .chain(
                 scene

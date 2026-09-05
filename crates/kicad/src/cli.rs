@@ -135,46 +135,28 @@ impl KicadInstallation {
         parse_netlist_xml(&xml)
     }
 
-    /// Run `kicad-cli sch export svg` on `schematic`, writing into `out_dir`.
-    pub fn export_svg(&self, schematic: &Path, out_dir: &Path) -> io::Result<PathBuf> {
-        self.export_svg_opts(schematic, out_dir, false)
-    }
-
-    /// Like [`Self::export_svg`] but omits the drawing sheet when requested.
-    pub fn export_svg_opts(
-        &self,
-        schematic: &Path,
-        out_dir: &Path,
-        exclude_sheet: bool,
-    ) -> io::Result<PathBuf> {
-        std::fs::create_dir_all(out_dir)?;
-        let mut cmd = self.command();
-        cmd.args(["sch", "export", "svg"])
+    /// Run `kicad-cli sch export pdf` on `schematic`, plotting the circuit
+    /// alone — no drawing sheet, no background fill — into `out_file`.
+    pub fn export_sch_pdf(&self, schematic: &Path, out_file: &Path) -> io::Result<PathBuf> {
+        if let Some(parent) = out_file.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let output = self
+            .command()
+            .args(["sch", "export", "pdf"])
             .arg("--output")
-            .arg(out_dir);
-        if exclude_sheet {
-            cmd.arg("--exclude-drawing-sheet")
-                .arg("--no-background-color");
-        }
-        let output = cmd.arg(schematic).output()?;
-        check_status(&output, "kicad-cli sch export svg")?;
-
-        let stem = schematic
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "schematic has no stem"))?;
-        let svg = out_dir.join(format!("{stem}.svg"));
-        if svg.is_file() {
-            return Ok(svg);
-        }
-
-        let mut svgs = files_with_ext(out_dir, "svg")?;
-        match svgs.drain(..).next() {
-            Some(path) => Ok(path),
-            None => Err(io::Error::new(
+            .arg(out_file)
+            .args(["--exclude-drawing-sheet", "--no-background-color"])
+            .arg(schematic)
+            .output()?;
+        check_status(&output, "kicad-cli sch export pdf")?;
+        if out_file.is_file() {
+            Ok(out_file.to_path_buf())
+        } else {
+            Err(io::Error::new(
                 io::ErrorKind::NotFound,
-                format!("expected SVG not produced at {}", svg.display()),
-            )),
+                format!("schematic PDF not produced at {}", out_file.display()),
+            ))
         }
     }
 

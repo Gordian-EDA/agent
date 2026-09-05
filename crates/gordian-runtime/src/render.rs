@@ -1,7 +1,15 @@
-//! Rasterize a `kicad-cli`-exported SVG into a PNG the LLM can see.
+//! Turn a KiCAD export into a PNG the LLM can see.
 //!
-//! Pure-Rust via `resvg` — no system rasterizer needed. KiCAD plots its text as
-//! stroked polylines; system fonts render Gordian's coordinate labels.
+//! The schematic is exported as PDF and rasterized by poppler (`pdftoppm`), so
+//! the drawing reaches the grader through the renderer KiCAD writes it for.
+//! Rasterizing KiCAD's SVG means trusting a second reading of it, and both
+//! readings available here are lossy: ImageMagick refuses seven of the
+//! twenty-four corpus sheets outright (`vector graphics nested too deeply`),
+//! and `resvg` had to have KiCAD's zero-width wire strokes patched before it
+//! would draw them at all.
+//!
+//! `resvg` still draws SVGs this workspace writes itself: the coordinate
+//! overlay, with the poppler raster embedded beneath it, and the PCB exports.
 
 use std::fmt::Write as _;
 use std::path::Path;
@@ -10,11 +18,14 @@ use std::sync::{Arc, OnceLock};
 use anyhow::{Context, Result};
 use kicad::KicadInstallation;
 
+/// Poppler's PDF rasterizer: the renderer KiCAD's PDF export is written for.
+const POPPLER: &str = "pdftoppm";
+
 const DENSE_RENDER_ITEMS: usize = 40;
 const REFERENCE_TEXT_HEIGHT_MM: f64 = 0.8;
 const TARGET_REFERENCE_HEIGHT_PX: f64 = 10.0;
 
-/// Physical coordinate bounds represented by an SVG view box.
+/// A rectangle of sheet millimetres: an SVG view box, or a crop of a PDF page.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct RenderBounds {
     pub min_x: f64,
@@ -388,75 +399,119 @@ fn fmt_axis_label(value: f64) -> String {
     }
 }
 
-/// Export a committed `.kicad_sch` to a wire-readable SVG without its drawing sheet.
-pub fn schematic_svg(env: &KicadInstallation, sch: &Path) -> Result<String> {
-    let tmp = tempfile::tempdir().context("temp dir for schematic SVG export")?;
-    let svg_path = env
-        // The in-loop critic needs circuit detail, not the drawing sheet.
-        .export_svg_opts(sch, tmp.path(), true)
-        .context("exporting schematic SVG")?;
-    let svg = std::fs::read_to_string(&svg_path).context("reading exported SVG")?;
-    Ok(thicken_schematic_wires(&svg))
+/// One schematic exported to PDF, rasterizable at any crop and resolution.
+pub struct SchematicSheet {
+    _dir: tempfile::TempDir,
+    pdf: std::path::PathBuf,
 }
 
-/// Crop an SVG view box to physical coordinates while preserving its drawing coordinates.
-pub fn crop_svg(svg: &str, bounds: RenderBounds) -> String {
-    if bounds.width() <= 0.0 || bounds.height() <= 0.0 {
-        return svg.to_owned();
+/// A rasterized crop and the physical rectangle its pixels actually cover.
+///
+/// `bounds` is the requested rectangle snapped to whole pixels, so overlay
+/// coordinates drawn over the image land where the drawing puts them.
+pub struct Raster {
+    pub png: Vec<u8>,
+    pub bounds: RenderBounds,
+    pub width_px: u32,
+    pub height_px: u32,
+}
+
+/// Export `sch` to a PDF that can be rasterized repeatedly.
+pub fn schematic_sheet(env: &KicadInstallation, sch: &Path) -> Result<SchematicSheet> {
+    let dir = tempfile::tempdir().context("temp dir for schematic PDF export")?;
+    let pdf = dir.path().join("sheet.pdf");
+    env.export_sch_pdf(sch, &pdf)
+        .context("exporting schematic PDF")?;
+    Ok(SchematicSheet { _dir: dir, pdf })
+}
+
+impl SchematicSheet {
+    /// Rasterize `bounds` so its long edge is `long_edge_px` pixels.
+    pub fn raster(&self, bounds: RenderBounds, long_edge_px: u32) -> Result<Raster> {
+        let Some(Crop { dpi, x, y, w, h }) = crop(bounds, long_edge_px) else {
+            anyhow::bail!("empty render bounds {bounds:?}");
+        };
+
+        let out = tempfile::tempdir().context("temp dir for schematic raster")?;
+        let root = out.path().join("page");
+        let status = std::process::Command::new(POPPLER)
+            .args(["-r", &format!("{dpi:.6}"), "-png", "-singlefile"])
+            .args(["-x", &x.to_string(), "-y", &y.to_string()])
+            .args(["-W", &w.to_string(), "-H", &h.to_string()])
+            .arg(&self.pdf)
+            .arg(&root)
+            .output()
+            .with_context(|| format!("running {POPPLER}"))?;
+        anyhow::ensure!(
+            status.status.success(),
+            "{POPPLER} failed: {}",
+            String::from_utf8_lossy(&status.stderr).trim(),
+        );
+        let png = std::fs::read(root.with_extension("png"))
+            .with_context(|| format!("{POPPLER} produced no page for {bounds:?}"))?;
+
+        // The page can clip the request; report the rectangle the pixels cover.
+        let pixmap = resvg::tiny_skia::Pixmap::decode_png(&png).context("decoding page PNG")?;
+        let mm = |value: u32| value as f64 * 25.4 / dpi;
+        Ok(Raster {
+            bounds: RenderBounds::new(
+                mm(x),
+                mm(y),
+                mm(x + pixmap.width()),
+                mm(y + pixmap.height()),
+            ),
+            width_px: pixmap.width(),
+            height_px: pixmap.height(),
+            png,
+        })
     }
-    let Some((viewbox_start, viewbox_end, _)) = find_viewbox(svg) else {
-        return svg.to_owned();
-    };
-    let mut out = String::with_capacity(svg.len() + 64);
-    out.push_str(&svg[..viewbox_start]);
-    write!(
-        out,
-        "viewBox=\"{:.4} {:.4} {:.4} {:.4}\"",
-        bounds.min_x,
-        bounds.min_y,
-        bounds.width(),
-        bounds.height(),
-    )
-    .unwrap();
-    out.push_str(&svg[viewbox_end..]);
-    let Some(out) = replace_root_dimension(&out, "width", bounds.width()) else {
-        return svg.to_owned();
-    };
-    replace_root_dimension(&out, "height", bounds.height()).unwrap_or_else(|| svg.to_owned())
 }
 
-/// KiCad exports default schematic wires as 0.1524 mm green strokes. Resvg can
-/// drop those axis-aligned strokes when they land below one output pixel even
-/// though other schematic geometry remains visible. Match the 0.254 mm symbol
-/// stroke so wires survive rasterization and subsequent vision-image resizing.
-/// KiCad 10.0.4 also exports zero-width `type default` wires in a `stroke:none`
-/// group, while `type solid` wires use the 0.1524 mm green group stroke, so each
-/// path in either current form receives an explicit visible stroke.
-fn thicken_schematic_wires(svg: &str) -> String {
-    let thickened = svg.replace(
-        "stroke:#009600; stroke-width:0.1524;",
-        "stroke:#009600; stroke-width:0.2540;",
-    );
-    let marker = [
-        "<g style=\"fill:none; stroke:none;\">",
-        "<g style=\"fill:none; \nstroke:#009600; stroke-width:0.2540;",
-    ]
-    .into_iter()
-    .find_map(|marker| thickened.find(marker));
-    let Some(group_start) = marker else {
-        return thickened;
-    };
-    let Some(relative_end) = thickened[group_start..].find("</g>") else {
-        return thickened;
-    };
-    let group_end = group_start + relative_end;
-    let mut explicit = thickened[..group_start].to_owned();
-    explicit.push_str(&thickened[group_start..group_end].replace(
-        "<path d=",
-        "<path style=\"fill:none;stroke:#009600;stroke-width:0.2540\" d=",
-    ));
-    explicit.push_str(&thickened[group_end..]);
-    explicit
+/// Where a millimetre rectangle lands on a PDF page rasterized at `dpi`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Crop {
+    dpi: f64,
+    x: u32,
+    y: u32,
+    w: u32,
+    h: u32,
+}
+
+/// The page crop whose long edge is `long_edge_px` pixels, or `None` if
+/// `bounds` encloses nothing.
+fn crop(bounds: RenderBounds, long_edge_px: u32) -> Option<Crop> {
+    let long_mm = bounds.width().max(bounds.height());
+    if long_mm <= 0.0 {
+        return None;
+    }
+    let dpi = long_edge_px.max(1) as f64 / long_mm * 25.4;
+    let px = |mm: f64| (mm * dpi / 25.4).round().max(0.0) as u32;
+    let (x, y) = (px(bounds.min_x), px(bounds.min_y));
+    Some(Crop {
+        dpi,
+        x,
+        y,
+        w: px(bounds.max_x) - x,
+        h: px(bounds.max_y) - y,
+    })
+}
+
+/// Wrap `raster` as an SVG in its own physical coordinates, so the coordinate
+/// overlay draws over the rendered sheet instead of over KiCAD's SVG export.
+pub fn raster_svg(raster: &Raster) -> String {
+    use base64::Engine;
+    let b = raster.bounds;
+    format!(
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{w:.4}mm\" height=\"{h:.4}mm\" \
+         viewBox=\"{x:.4} {y:.4} {w:.4} {h:.4}\">\n\
+         <image x=\"{x:.4}\" y=\"{y:.4}\" width=\"{w:.4}\" height=\"{h:.4}\" \
+         href=\"data:image/png;base64,{data}\"/>\n</svg>\n",
+        x = b.min_x,
+        y = b.min_y,
+        w = b.width(),
+        h = b.height(),
+        data = base64::engine::general_purpose::STANDARD.encode(&raster.png),
+    )
 }
 
 /// Render `svg` to PNG bytes, scaling so the long edge is `max_px` pixels.
@@ -514,32 +569,6 @@ mod tests {
     }
 
     #[test]
-    fn thickens_kicad_default_wire_strokes_only() {
-        let svg = "stroke:#009600; stroke-width:0.1524; stroke:#840000; stroke-width:0.1524;";
-        let adjusted = thicken_schematic_wires(svg);
-        assert!(adjusted.contains("stroke:#009600; stroke-width:0.2540;"));
-        assert!(adjusted.contains("stroke:#840000; stroke-width:0.1524;"));
-    }
-
-    #[test]
-    fn gives_kicad_wire_paths_explicit_strokes_for_resvg() {
-        let svg = "before<g style=\"fill:none; \nstroke:#009600; stroke-width:0.1524; rest\"><path d=\"M0 0 L1 1\" /></g>after";
-        let adjusted = thicken_schematic_wires(svg);
-        assert!(adjusted.contains(
-            "<path style=\"fill:none;stroke:#009600;stroke-width:0.2540\" d=\"M0 0 L1 1\" />"
-        ));
-    }
-
-    #[test]
-    fn restores_current_kicad_invisible_wire_group() {
-        let svg = "before<g style=\"fill:none; stroke:none;\"><path d=\"M36.83 77.47 L49.53 77.47\" /></g>after";
-        let adjusted = thicken_schematic_wires(svg);
-        assert!(adjusted.contains(
-            "<path style=\"fill:none;stroke:#009600;stroke-width:0.2540\" d=\"M36.83 77.47 L49.53 77.47\" />"
-        ));
-    }
-
-    #[test]
     fn coordinate_overlay_places_ticks_at_expected_millimetres() {
         let svg = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 10">
 <rect x="0" y="0" width="20" height="10"/>
@@ -564,6 +593,28 @@ mod tests {
         assert!(overlaid.contains(">25</text>"));
         assert!(overlaid.contains(">X mm</text>"));
         assert!(overlaid.contains(">Y mm</text>"));
+    }
+
+    #[test]
+    fn a_crop_puts_the_requested_long_edge_on_the_page() {
+        let page = crop(RenderBounds::new(10.0, 20.0, 110.0, 70.0), 2000).expect("crop");
+        assert_eq!((page.w, page.h), (2000, 1000));
+        assert_eq!((page.x, page.y), (200, 400));
+        assert!((page.dpi - 2000.0 / 100.0 * 25.4).abs() < 1e-9);
+        assert_eq!(crop(RenderBounds::new(0.0, 0.0, 0.0, 0.0), 100), None);
+    }
+
+    #[test]
+    fn a_raster_carries_its_own_page_rectangle_into_the_overlay_svg() {
+        let raster = Raster {
+            png: vec![1, 2, 3],
+            bounds: RenderBounds::new(10.0, 20.0, 110.0, 70.0),
+            width_px: 2000,
+            height_px: 1000,
+        };
+        let svg = raster_svg(&raster);
+        assert!(svg.contains("viewBox=\"10.0000 20.0000 100.0000 50.0000\""));
+        assert!(svg.contains("href=\"data:image/png;base64,AQID\""));
     }
 
     #[test]

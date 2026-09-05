@@ -976,7 +976,7 @@ def render_reference_candidate(kind, source, count):
     digest = hashlib.sha256(str(source).encode()).hexdigest()[:10]
     stem = re.sub(r"[^A-Za-z0-9_.-]+", "-", source.stem).strip("-")
     REFERENCES.mkdir(parents=True, exist_ok=True)
-    png = REFERENCES / f"{kind}-{count}-{stem}-{digest}-clean-v2.png"
+    png = REFERENCES / f"{kind}-{count}-{stem}-{digest}-clean-v3.png"
     with REFERENCE_LOCK:
         if not png.is_file():
             clean_render(kind, source, png)
@@ -1297,25 +1297,26 @@ def frame_render(source, png, size=CLEAN_RENDER_SIZE):
         raise RuntimeError(f"page conversion produced no PNG: {png}")
 
 
-def rasterize_clean_svg(svg, png, size=CLEAN_RENDER_SIZE):
-    """Rasterize one transparent KiCad SVG with a tight, consistent frame."""
-    frame_render(svg, png, size)
-
-
 def rasterize_schematic_pdf(source, png, temporary, size=CLEAN_RENDER_SIZE):
-    """The rescue path for a sheet ImageMagick's own SVG renderer refuses.
+    """Export one schematic as PDF and rasterize it with poppler.
 
-    Dense sheets hit its `vector graphics nested too deeply` limit; KiCad's PDF
-    of the same sheet, rasterized by poppler, is the same drawing.
+    KiCad's PDF is the drawing rendered by the renderer it is written for.
+    ImageMagick's SVG reader is not an equivalent: it gives up on a dense sheet
+    with `vector graphics nested too deeply`, which silently dropped the largest
+    fixtures — exactly the ones a layout change moves most.
     """
     pdf = temporary / "schematic.pdf"
-    command(
+    result = command(
         [
             kicad_cli(), "sch", "export", "pdf", "--output", str(pdf),
             "--exclude-drawing-sheet", "--no-background-color", str(source),
         ],
         timeout=180,
+        check=False,
     )
+    if result.returncode or not pdf.is_file():
+        detail = (result.stderr or result.stdout).strip()
+        raise RuntimeError(f"KiCad schematic PDF export failed: {detail}")
     pages = temporary / "page"
     command(
         ["pdftoppm", "-r", CLEAN_RENDER_DENSITY, "-png", str(pdf), str(pages)],
@@ -1325,67 +1326,11 @@ def rasterize_schematic_pdf(source, png, temporary, size=CLEAN_RENDER_SIZE):
     if not rendered:
         raise RuntimeError(f"PDF rasterization produced no page: {source}")
     frame_render(rendered[0], png, size)
-
-
-def kicad10_schematic_render_source(source, temporary):
-    """Give old minimal projects KiCad 10's standard schematic line defaults.
-
-    Gordian's small version-3 project files predate the netclass drawing fields.
-    KiCad 10 otherwise exports their real wire paths with ``stroke:none``. Work
-    from a linked temporary project so the design under test is never changed.
-    """
-    project = source.with_suffix(".kicad_pro")
-    if not project.is_file():
-        return source
-    try:
-        config = json.loads(project.read_text(encoding="utf-8"))
-        classes = config["net_settings"]["classes"]
-    except (OSError, json.JSONDecodeError, KeyError, TypeError):
-        return source
-    if not isinstance(classes, list) or all(
-        isinstance(netclass, dict) and "wire_width" in netclass
-        for netclass in classes
-    ):
-        return source
-
-    staged = temporary / "project"
-    staged.mkdir()
-    for item in source.parent.iterdir():
-        if item in (source, project):
-            continue
-        (staged / item.name).symlink_to(item.resolve(), target_is_directory=item.is_dir())
-    staged_source = staged / source.name
-    shutil.copy2(source, staged_source)
-    for netclass in classes:
-        if not isinstance(netclass, dict):
-            continue
-        netclass.setdefault("bus_width", 12)
-        netclass.setdefault("diff_pair_via_gap", 0.25)
-        netclass.setdefault("line_style", 0)
-        netclass.setdefault("pcb_color", "rgba(0, 0, 0, 0.000)")
-        netclass.setdefault("schematic_color", "rgba(0, 0, 0, 0.000)")
-        netclass.setdefault("wire_width", 6)
-    net_settings = config["net_settings"]
-    net_settings.setdefault("net_colors", None)
-    net_settings.setdefault("netclass_assignments", None)
-    net_settings.setdefault("netclass_patterns", [])
-    meta = net_settings.get("meta")
-    if not isinstance(meta, dict):
-        meta = {}
-        net_settings["meta"] = meta
-    try:
-        version = int(meta.get("version", 0))
-    except (TypeError, ValueError):
-        version = 0
-    meta["version"] = max(4, version)
-    (staged / project.name).write_text(
-        json.dumps(config, indent=2) + "\n", encoding="utf-8"
-    )
-    return staged_source
+    return pdf
 
 
 def clean_render(kind, source, destination):
-    """Export an unannotated KiCad 10 SVG and convert it to a judge PNG.
+    """Export an unannotated KiCad 10 page and convert it to a judge PNG.
 
     Candidates and human-demo references both use this function so their crop,
     density, and maximum dimensions match. PCB renders show the front and a
@@ -1394,32 +1339,14 @@ def clean_render(kind, source, destination):
     """
     destination = Path(destination)
     destination.parent.mkdir(parents=True, exist_ok=True)
-    svg_stem = destination.with_suffix("")
+    stem = destination.with_suffix("")
     with tempfile.TemporaryDirectory(prefix="gordian-quality-clean-render-") as temporary:
         temporary = Path(temporary)
         if kind == "schematic":
-            export = temporary / "schematic"
-            export.mkdir()
-            render_source = kicad10_schematic_render_source(source, temporary)
-            result = command(
-                [
-                    kicad_cli(), "sch", "export", "svg", "--output", str(export),
-                    "--exclude-drawing-sheet", "--no-background-color", str(render_source),
-                ],
-                timeout=180,
-                check=False,
-            )
-            rendered = sorted(export.glob("*.svg"))
-            if result.returncode or not rendered:
-                detail = (result.stderr or result.stdout).strip()
-                raise RuntimeError(f"KiCad schematic SVG export failed: {detail}")
-            svg = svg_stem.with_suffix(".svg")
-            shutil.copy2(rendered[0], svg)
-            try:
-                rasterize_clean_svg(svg, destination)
-            except RuntimeError:
-                rasterize_schematic_pdf(render_source, destination, temporary)
-            return {"path": str(destination), "svg_paths": [str(svg)]}
+            pdf = rasterize_schematic_pdf(source, destination, temporary)
+            kept = stem.with_suffix(".pdf")
+            shutil.copy2(pdf, kept)
+            return {"path": str(destination), "pdf_path": str(kept)}
 
         if kind != "pcb":
             raise ValueError(f"unknown render kind: {kind}")
@@ -1439,10 +1366,10 @@ def clean_render(kind, source, destination):
             if result.returncode or not exported.is_file():
                 detail = (result.stderr or result.stdout).strip()
                 raise RuntimeError(f"KiCad PCB {side} SVG export failed: {detail}")
-            kept_svg = svg_stem.parent / f"{svg_stem.name}-{side}.svg"
+            kept_svg = stem.parent / f"{stem.name}-{side}.svg"
             shutil.copy2(exported, kept_svg)
             side_png = temporary / f"{side}.png"
-            rasterize_clean_svg(kept_svg, side_png, "776x900")
+            frame_render(kept_svg, side_png, "776x900")
             side_pngs.append(side_png)
             svg_paths.append(str(kept_svg))
         command(

@@ -127,36 +127,96 @@ pub fn count_parallel_body_crossings(
     bodies: &[([f64; 2], [f64; 2])],
     wires: &[DrawnSegment],
 ) -> usize {
-    const PLATE_HALF: f64 = 1.4; // half the drawn 2-pin body width (catches a 1.27 mm offset)
-    const PIN_STUB: f64 = 2.54; // exclude the pin stubs at each end
     let mut n = 0;
     for (a, b) in bodies {
-        if (a[0] - b[0]).abs() < EPS && (a[1] - b[1]).abs() < EPS {
+        let Some(plate) = two_pin_plate(*a, *b) else {
             continue;
-        }
-        let bh = (a[1] - b[1]).abs() < EPS; // horizontal part?
-        let (axis, perp) = if bh { (0, 1) } else { (1, 0) };
-        let (plo, phi) = (a[axis].min(b[axis]), a[axis].max(b[axis]));
-        let (blo, bhi) = (plo + PIN_STUB, phi - PIN_STUB); // central body, past the stubs
-        if bhi <= blo + EPS {
-            continue;
-        }
+        };
         for wire in wires {
-            let seg = wire.segment;
-            let wh = (seg.a.y - seg.b.y).abs() < EPS;
-            if bh != wh {
-                continue; // need a PARALLEL wire (perpendicular is count_body_crossings)
-            }
-            if (seg.a[perp] - a[perp]).abs() > PLATE_HALF - EPS {
-                continue; // outside the drawn body width
-            }
-            let (wlo, whi) = (seg.a[axis].min(seg.b[axis]), seg.a[axis].max(seg.b[axis]));
-            if wlo < bhi - EPS && whi > blo + EPS {
+            if plate.contains_axis_run(wire.segment) {
                 n += 1;
             }
         }
     }
     n
+}
+
+/// Half the drawn width of a 2-pin symbol body — wide enough that a wire one 1.27 mm
+/// grid step off the part's axis still counts as slicing the drawn plate.
+const PLATE_HALF: f64 = 1.4;
+/// The pin stub at each end of a 2-pin part, excluded from its drawn plate: the part's
+/// own leads legitimately attach there.
+const PIN_STUB: f64 = 2.54;
+
+/// The drawn PLATE of a 2-pin part whose pins sit at `a` and `b`: the central span
+/// between the pins, past both stubs, [`PLATE_HALF`] wide about the pin axis.
+///
+/// This is the shape a wire drawn *along* a series part slices through, which neither
+/// the symbol's own graphics box nor the pin-tip bbox states: a switch's or a crystal's
+/// graphics sit off the pin axis, so a wire running down the axis clears every box the
+/// library draws and still reads as a wire through the part. It is stated once here and
+/// used twice — to COUNT the defect, and (via [`sch_model::route::SymbolInk`]) to stop
+/// the router drawing it.
+pub fn two_pin_plate(a: [f64; 2], b: [f64; 2]) -> Option<Plate> {
+    let horizontal = (a[1] - b[1]).abs() < EPS;
+    if (a[0] - b[0]).abs() >= EPS && !horizontal {
+        return None; // a diagonal pair is no axis to run along
+    }
+    let (axis, perp) = if horizontal { (0, 1) } else { (1, 0) };
+    let (plo, phi) = (a[axis].min(b[axis]), a[axis].max(b[axis]));
+    let (lo, hi) = (plo + PIN_STUB, phi - PIN_STUB);
+    (hi > lo + EPS).then_some(Plate {
+        horizontal,
+        axis_at: a[perp],
+        lo,
+        hi,
+    })
+}
+
+/// The central plate of a 2-pin part — see [`two_pin_plate`].
+#[derive(Debug, Clone, Copy)]
+pub struct Plate {
+    /// Whether the part's pin axis runs in x.
+    pub horizontal: bool,
+    /// The plate's coordinate on the axis PERPENDICULAR to the pin axis.
+    pub axis_at: f64,
+    /// The plate's span along the pin axis, past both pin stubs.
+    pub lo: f64,
+    pub hi: f64,
+}
+
+impl Plate {
+    /// Whether `seg` runs along this plate — parallel to the pin axis, within the drawn
+    /// plate's width, overlapping its span.
+    pub fn contains_axis_run(&self, seg: ::geom::Segment) -> bool {
+        let (axis, perp) = if self.horizontal { (0, 1) } else { (1, 0) };
+        if ((seg.a.y - seg.b.y).abs() < EPS) != self.horizontal {
+            return false;
+        }
+        if (seg.a[perp] - self.axis_at).abs() > PLATE_HALF - EPS {
+            return false;
+        }
+        let (wlo, whi) = (seg.a[axis].min(seg.b[axis]), seg.a[axis].max(seg.b[axis]));
+        wlo < self.hi - EPS && whi > self.lo + EPS
+    }
+
+    /// The plate as a rectangle, for an obstacle model that speaks in boxes.
+    pub fn rect(&self) -> ::geom::Rect {
+        match self.horizontal {
+            true => ::geom::Rect::new(
+                self.lo,
+                self.axis_at - PLATE_HALF,
+                self.hi,
+                self.axis_at + PLATE_HALF,
+            ),
+            false => ::geom::Rect::new(
+                self.axis_at - PLATE_HALF,
+                self.lo,
+                self.axis_at + PLATE_HALF,
+                self.hi,
+            ),
+        }
+    }
 }
 
 /// Foreign taps = the post-split short class: a wire endpoint of one net lying

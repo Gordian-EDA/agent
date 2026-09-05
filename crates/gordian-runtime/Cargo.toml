@@ -18,6 +18,7 @@ tracing-appender.workspace = true
 tracing-subscriber.workspace = true
 fuzzy-matcher.workspace = true
 resvg = { workspace = true }
+base64.workspace = true
 sch-check = { path = "../sch-check" }
 sch-model = { path = "../sch-model" }
 gordian-llm = { path = "../gordian-llm" }
