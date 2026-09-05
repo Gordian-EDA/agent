@@ -174,8 +174,7 @@ fn connect_one(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         })
     };
     let across = matches!((section(&from), section(&to)), (Some(x), Some(y)) if x != y);
-    let by_name =
-        across || a.manhattan(b) > sch_floorplan::floorplan::place::LONG_SIMPLE_LEN_MM;
+    let by_name = across || a.manhattan(b) > sch_floorplan::floorplan::place::LONG_SIMPLE_LEN_MM;
     let drawn = (!by_name)
         .then(|| sch_drag::redraw_wire(&mut edit.doc, a, out_a, b, ROUTING_NET, &own))
         .flatten()
@@ -222,10 +221,6 @@ fn connect_one(input: Value, ctx: &AgentRuntime) -> Result<Value> {
                 }));
             }
             let net = net.unwrap_or_else(|| fallback_name(&from, &to));
-            let scope = sheet_scope(&edit.doc, &net).unwrap_or(LabelKind::Local);
-            for target in [&from, &to] {
-                edit.doc.add_label(scope, &net, pose(target.at()));
-            }
             let reason = if across {
                 "the ends sit in different sections"
             } else if by_name {
@@ -233,6 +228,47 @@ fn connect_one(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             } else {
                 "no clear wire path"
             };
+            // Joining by name only connects when the name is new to an end. When
+            // BOTH ends already read it — two rail glyphs on one rail, always —
+            // the pair is a duplicate of a name that is already there, `commit`
+            // drops it as power-shadowed, and the file comes back byte-identical.
+            // Reported as a connection, that is what leaves a caller applying the
+            // same repair to the same unchanged finding until it starts deleting
+            // parts instead. Clearing a marker is a real change, so it still runs.
+            if from_net.as_deref() == Some(net.as_str()) && to_net.as_deref() == Some(net.as_str())
+            {
+                // Taking a marker off un-severs its point, which IS a repair. Keep
+                // it, and say plainly that no label was needed.
+                if !cleared.is_empty() {
+                    return edit.commit(
+                        with_cleared(
+                            format!(
+                                "{} and {} already read `{net}`; no label was needed",
+                                from.describe(),
+                                to.describe()
+                            ),
+                            cleared,
+                        ),
+                        allow,
+                    );
+                }
+                return Ok(json!({
+                    "error": format!(
+                        "refused: {} and {} already read `{net}` and {reason}, so a label at \
+                         each end joins nothing and nothing was written. `pin_not_connected` on \
+                         a rail symbol means no wire touches its pin, which no name can fix — \
+                         remove_symbols the leftover rail symbol, connect it to the part pin it \
+                         should sit on, or call add_power with the pin that actually needs \
+                         `{net}`.",
+                        from.describe(),
+                        to.describe(),
+                    ),
+                }));
+            }
+            let scope = sheet_scope(&edit.doc, &net).unwrap_or(LabelKind::Local);
+            for target in [&from, &to] {
+                edit.doc.add_label(scope, &net, pose(target.at()));
+            }
             edit.warn(format!(
                 "{reason}; {} and {} were joined by a `{net}` label at each end",
                 from.describe(),

@@ -305,6 +305,8 @@ struct FixPin {
 }
 
 struct FixPlanner {
+    /// Rail glyphs KiCAD reported as bare, gathered before any fix is planned.
+    bare_rails: BTreeSet<String>,
     pins: Vec<FixPin>,
     parts: BTreeMap<String, String>,
     rotations: BTreeMap<String, f64>,
@@ -349,11 +351,40 @@ impl FixPlanner {
             .map(|symbol| (symbol.refdes().to_string(), symbol.at.rot))
             .collect();
         Self {
+            bare_rails: BTreeSet::new(),
             pins,
             parts,
             rotations,
             default_footprints,
         }
+    }
+
+    /// Every rail glyph ERC reported as bare, learned before any of them is
+    /// planned for. KiCAD mints a fresh reference per glyph and the thrash guard
+    /// budgets rail removals by the CALL, so offering them one at a time would
+    /// spend that budget on the repair this planner just recommended. One call
+    /// takes all of them.
+    fn note_bare_rails(&mut self, findings: &[Finding]) {
+        self.bare_rails = findings
+            .iter()
+            .filter(|finding| is_bare_pin_rule(&finding.code))
+            .filter_map(|finding| self.affected_pin(finding))
+            .filter(|pin| self.is_lone_rail_pin(pin))
+            .map(|pin| pin.refdes.clone())
+            .collect();
+    }
+
+    /// A `power:` symbol contributes exactly one pin; anything else is a part.
+    fn is_lone_rail_pin(&self, pin: &FixPin) -> bool {
+        self.parts
+            .get(&pin.refdes)
+            .is_some_and(|lib_id| lib_id.starts_with("power:"))
+            && self
+                .pins
+                .iter()
+                .filter(|other| other.refdes == pin.refdes)
+                .count()
+                == 1
     }
 
     fn plan(&self, finding: &mut Finding, ctx: &AgentRuntime) {
@@ -496,6 +527,9 @@ impl FixPlanner {
 
     fn connection(&self, finding: &Finding) -> Option<(ToolFix, String)> {
         let from = self.affected_pin(finding)?;
+        if let Some(fix) = self.orphan_rail(finding, from) {
+            return Some(fix);
+        }
         if is_library_no_connect(&from.etype) || is_unused_output(from, finding) {
             return Some((
                 ToolFix {
@@ -542,6 +576,50 @@ impl FixPlanner {
                     to.id, from.id
                 ),
             },
+        ))
+    }
+
+    /// A rail glyph connects by NAME, but only where its one pin TOUCHES the wire
+    /// or the pin it names. When an electrical rule reports that pin as
+    /// unconnected the glyph is reaching nothing at all, and the same-net search
+    /// below answers with the wrong repair: the nearest thing already on that net
+    /// is another glyph on the same rail, and joining two of those changes
+    /// nothing. Both ends already read the name, so `connect` degrades to a label
+    /// pair, the commit drops it as a duplicate of the name the glyphs print
+    /// themselves, and the identical finding comes back — until the caller gives
+    /// up and starts deleting the parts the rails were feeding.
+    ///
+    /// A pin that touches nothing cannot be holding anything up, so taking the
+    /// glyph away is both the one call that provably clears the rule and one that
+    /// provably loosens no other pin.
+    fn orphan_rail(&self, finding: &Finding, from: &FixPin) -> Option<(ToolFix, String)> {
+        // The extractor reads a rail glyph as sitting on the net it prints whether
+        // or not its pin touches anything, so `unconnected` never flags one. The
+        // rule that fired IS the measurement: only KiCAD knows the pin has nothing
+        // under it, and only that reading may license taking the symbol away.
+        if !is_bare_pin_rule(&finding.code) || !self.is_lone_rail_pin(from) {
+            return None;
+        }
+        let refs: Vec<&String> = match self.bare_rails.is_empty() {
+            true => vec![&from.refdes],
+            false => self.bare_rails.iter().collect(),
+        };
+        let net = from.net.clone().unwrap_or_else(|| from.name.clone());
+        Some((
+            ToolFix {
+                tool: "remove_symbols",
+                args: json!({"refs": refs}),
+            },
+            format!(
+                "{}'s only pin touches nothing, so it carries no connection and removing it \
+                 changes the netlist by zero pins. That test is what makes this one safe, and \
+                 it holds only for a rail symbol ERC reports as bare — a rail whose pin does \
+                 touch a wire or a part pin is carrying `{net}`, and deleting that one opens \
+                 the net. If a pin still needs `{net}`, seat a fresh rail on that pin with \
+                 add_power; do not wire this glyph to another `{net}` glyph, which joins \
+                 nothing because both ends already read the name.",
+                from.refdes
+            ),
         ))
     }
 
@@ -696,6 +774,13 @@ fn is_power_finding(code: &str, message: &str) -> bool {
         || code == "power-pin-unconnected"
         || code == "unsourced-power-net"
         || message.contains("power input") && message.contains("not driven")
+}
+
+/// A rule that says, in KiCAD's own reading of the drawing, that a pin has
+/// nothing under it.
+fn is_bare_pin_rule(code: &str) -> bool {
+    let code = code.replace('_', "-");
+    code.contains("pin-not-connected") || code == "single-pin-net"
 }
 
 fn is_connection_finding(code: &str, message: &str) -> bool {
@@ -1370,7 +1455,8 @@ fn inspect_schematic(path: &Path, ctx: &AgentRuntime) -> Result<Inspection> {
 pub fn check_schematic(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let detail = input.get("detail").and_then(Value::as_bool) == Some(true);
     let mut inspection = inspect_schematic(ctx.sch_path(), ctx)?;
-    let planner = FixPlanner::new(&inspection.doc, &inspection.netlist, ctx);
+    let mut planner = FixPlanner::new(&inspection.doc, &inspection.netlist, ctx);
+    planner.note_bare_rails(&inspection.findings);
     for finding in &mut inspection.findings {
         planner.plan(finding, ctx);
     }
@@ -1488,6 +1574,7 @@ mod tests {
 
     fn planner(pins: Vec<FixPin>) -> FixPlanner {
         FixPlanner {
+            bare_rails: BTreeSet::new(),
             pins,
             parts: BTreeMap::new(),
             rotations: BTreeMap::new(),
