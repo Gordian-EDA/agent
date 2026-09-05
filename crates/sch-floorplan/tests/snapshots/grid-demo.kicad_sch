@@ -1541,23 +1541,13 @@
 	)
 	(wire
 		(pts
-			(xy 105.41 105.41) (xy 105.41 109.22)
+			(xy 105.41 105.41) (xy 105.41 123.19)
 		)
 		(stroke
 			(width 0)
 			(type default)
 		)
-		(uuid "385ea08d-0079-55f2-a866-781f51ce4981")
-	)
-	(wire
-		(pts
-			(xy 105.41 109.22) (xy 105.41 123.19)
-		)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "98f87486-44c3-5258-9212-4610e43627d1")
+		(uuid "9260fd49-de93-5eec-bba1-dfc2064ec931")
 	)
 	(wire
 		(pts

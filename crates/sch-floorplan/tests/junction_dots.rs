@@ -1,4 +1,5 @@
-//! Junction dots sit exactly where conductors meet, on every corpus sheet.
+//! Junction dots sit exactly where conductors meet, and a straight run is one wire —
+//! on every corpus sheet.
 //!
 //! KiCAD's rule ([`sch_doc::Meet`]): a dot belongs where three conductors meet and
 //! nowhere else. A dot at a plain bend reads as a branch that is not on the sheet;
@@ -6,6 +7,9 @@
 //! which is a different netlist. Both were endemic — 167 of 314 corpus dots sat at
 //! bends — because the router decided dots while it routed, before its own tap
 //! splits and the label stubs existed.
+//!
+//! The second gate is the same geometry read the other way: a seam splitting a straight
+//! run that nothing meets is ink with nothing to say.
 
 use std::path::{Path, PathBuf};
 
@@ -18,15 +22,15 @@ fn corpus() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/validation")
 }
 
-#[test]
-fn every_corpus_dot_sits_where_three_conductors_meet() {
+/// Every validation fixture, emitted the way the production path emits it.
+fn corpus_docs() -> Vec<(String, SchDoc)> {
     if !corpus().is_dir() {
         eprintln!("SKIP: validation corpus not present");
-        return;
+        return Vec::new();
     }
     let Some(env) = KicadInstallation::detect() else {
         eprintln!("SKIP: no KiCAD environment detected");
-        return;
+        return Vec::new();
     };
     let provider = SymbolTable::from_symbol_dir(env.symbol_dir().to_path_buf());
     let mut names: Vec<String> = std::fs::read_dir(corpus())
@@ -40,7 +44,7 @@ fn every_corpus_dot_sits_where_three_conductors_meet() {
         })
         .collect();
     names.sort();
-    let mut problems: Vec<String> = Vec::new();
+    let mut out = Vec::new();
     for name in names {
         let src =
             std::fs::read_to_string(corpus().join(format!("{name}.place-parts.json"))).unwrap();
@@ -56,7 +60,15 @@ fn every_corpus_dot_sits_where_three_conductors_meet() {
         let Ok(result) = floorplan::emit_strategy(&env, &design, Some(ir)) else {
             continue;
         };
-        let doc = SchDoc::parse(&result.sch).unwrap();
+        out.push((name, SchDoc::parse(&result.sch).unwrap()));
+    }
+    out
+}
+
+#[test]
+fn every_corpus_dot_sits_where_three_conductors_meet() {
+    let mut problems: Vec<String> = Vec::new();
+    for (name, doc) in corpus_docs() {
         let meets = sch_doc::meets(&doc);
         let dots = sch_doc::drawn_dots(&doc);
         for (k, at) in &dots {
@@ -75,6 +87,45 @@ fn every_corpus_dot_sits_where_three_conductors_meet() {
                     "{name}: wire ends inside another wire at ({:.2},{:.2}) with no dot",
                     k.0 as f64 / 1000.0,
                     k.1 as f64 / 1000.0
+                ));
+            }
+        }
+    }
+    assert!(problems.is_empty(), "{}", problems.join("\n"));
+}
+
+/// A straight run drawn in two pieces is a seam a reader has to rule out as a branch.
+///
+/// The writer draws a run in pieces — a lead-out, a riser, a tap split — and closes the
+/// seam again wherever nothing else lands on it. What is left is the seam something DOES
+/// land on: a pin, or a dot. Anything else is redundant ink.
+#[test]
+fn no_corpus_seam_splits_a_run_nothing_meets() {
+    let mut problems: Vec<String> = Vec::new();
+    for (name, doc) in corpus_docs() {
+        let meets = sch_doc::meets(&doc);
+        let dots = sch_doc::drawn_dots(&doc);
+        for (k, m) in &meets {
+            if m.ends != 2 || m.passes > 0 || m.pins > 0 || dots.contains_key(k) {
+                continue;
+            }
+            let at = geom::Point2::new(k.0 as f64 / 1000.0, k.1 as f64 / 1000.0);
+            let mut arms = doc
+                .wires()
+                .flat_map(|w| w.points.windows(2).map(|p| (p[0], p[1])).collect::<Vec<_>>())
+                .filter_map(|(a, b)| match () {
+                    _ if a.near_eq(at, 1e-6) => Some(b),
+                    _ if b.near_eq(at, 1e-6) => Some(a),
+                    _ => None,
+                });
+            let (Some(p), Some(q)) = (arms.next(), arms.next()) else {
+                continue;
+            };
+            let (u, v) = ((p.x - at.x, p.y - at.y), (q.x - at.x, q.y - at.y));
+            if (u.0 * v.1 - u.1 * v.0).abs() < 1e-6 && u.0 * v.0 + u.1 * v.1 < 0.0 {
+                problems.push(format!(
+                    "{name}: straight run split at ({:.2},{:.2}) with nothing there",
+                    at.x, at.y
                 ));
             }
         }
