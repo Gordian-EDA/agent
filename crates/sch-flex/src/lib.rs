@@ -305,7 +305,7 @@ fn in_pin_order(serving: &BTreeMap<usize, serve::Serves>) -> Vec<(usize, &serve:
 fn seat_in(flanks: &mut Flanks, seat: Seat, part: (String, u8)) {
     let len = |dir| flanks.get(&Seat::Beside(dir)).map_or(0, Vec::len);
     let seat = match seat {
-        Seat::Beside(Dir::West | Dir::East) | Seat::Next | Seat::Bank => seat,
+        Seat::Beside(Dir::West | Dir::East) | Seat::Bank => seat,
         _ if len(Dir::West) < len(Dir::East) => Seat::Beside(Dir::West),
         _ => Seat::Beside(Dir::East),
     };
@@ -330,11 +330,11 @@ fn bare_row(items: &[Item], members: &[usize]) -> Tree {
         .iter()
         .copied()
         .filter(|i| !serving.contains_key(i))
-        .map(|i| {
+        .flat_map(|i| {
             let leaf = Tree::leaf(items[i].refdes.clone(), items[i].unit);
             match flanks.get(&i) {
                 Some(flanks) => flanked(leaf, flanks),
-                None => leaf,
+                None => vec![leaf],
             }
         })
         .collect();
@@ -351,54 +351,40 @@ fn bare_row(items: &[Item], members: &[usize]) -> Tree {
 /// sits — the caps a human stacks against the edge of the device they serve, each on the
 /// line of its own pin.
 ///
-/// The leaf keeps its place and its order: it is only wrapped in a row with them,
-/// so a tree that already reads as a signal path still does. A row spliced in as a SIBLING
-/// instead — what this did while it only ever seated `decouple` caps — pushes whatever the
-/// author composed on that side a hand's width away from the pins it was composed for.
+/// The leaf keeps its place and its order: the columns go in beside it, in its own
+/// container, so a tree that already reads as a signal path still does.
 fn seat_beside(tree: &Tree, device: &str, flanks: &Flanks) -> Tree {
-    if matches!(tree, Tree::Leaf(l) if l.part == device) {
-        return flanked(tree.clone(), flanks);
-    }
     let Tree::Container(c) = tree else {
         return tree.clone();
     };
-    let mut children: Vec<Tree> = c
+    let children: Vec<Tree> = c
         .children
         .iter()
-        .map(|child| seat_beside(child, device, flanks))
+        .flat_map(|child| match child {
+            Tree::Leaf(l) if l.part == device => flanked(child.clone(), flanks),
+            _ => vec![seat_beside(child, device, flanks)],
+        })
         .collect();
-    // A bank `flanked` handed back untouched goes in beside the device as its own sibling.
-    if let (Some(parts), Some(at)) = (
-        flanks.get(&Seat::Bank).filter(|_| flanks.len() == 1),
-        children
-            .iter()
-            .position(|k| matches!(k, Tree::Leaf(l) if l.part == device)),
-    ) {
-        children.insert(at + 1, Tree::row_of(parts.clone()));
-    }
     Tree::Container(Container {
         children,
         ..c.clone()
     })
 }
 
-/// A device and the parts serving it, as ONE drawing: a group the typesetter seats on the
-/// device's pin lines, and the packer folds as a unit rather than through. A support with
-/// a pin line of its own goes in the column against that side; a leg off a two-pin node
-/// takes the next seat; a rail-only bank stays one row.
+/// A device and the parts serving it: the columns against its sides, which the typesetter
+/// seats on its pin lines, then the device, then its rail-only bank.
+///
+/// A support with a pin line of its own goes in the column against that side. A rail-only
+/// bank has no pin line to sit on, so it stays one row and goes in as a plain sibling: a
+/// column of it would buy a column's width for nothing, and wrapping it INTO the device's
+/// group shifts the alignment line off the device's own, which makes the column the author
+/// composed beside it reach its pins through a bend.
 ///
 /// Neither column ever folds. A column's length is set by the pins it reaches — each child
 /// is seated on the line of its own pin, inside the device's own height — and a fold turns
 /// it into side-by-side bands the seating no longer recognises, which strands every part
 /// in it a page from the pin it serves.
-fn flanked(device: Tree, flanks: &Flanks) -> Tree {
-    // A bank alone is not a group: wrapping the device in one shifts its alignment line
-    // onto the group's, and the column the AUTHOR composed beside it then wires to its
-    // pins through a bend. The bank is a plain sibling, exactly as it was drawn before
-    // any of this.
-    if flanks.keys().eq([Seat::Bank].iter()) {
-        return device;
-    }
+fn flanked(device: Tree, flanks: &Flanks) -> Vec<Tree> {
     let column = |side| {
         flanks
             .get(&Seat::Beside(side))
@@ -416,28 +402,15 @@ fn flanked(device: Tree, flanks: &Flanks) -> Tree {
                 })
             })
     };
-    let next = flanks
-        .get(&Seat::Next)
-        .into_iter()
-        .flatten()
-        .cloned()
-        .map(|(part, unit)| Tree::leaf(part, unit));
+    let (west, east) = (column(Dir::West), column(Dir::East));
     let bank = flanks
         .get(&Seat::Bank)
         .map(|parts| Tree::row_of(parts.clone()));
-    Tree::Container(Container {
-        axis: Axis::Row,
-        children: column(Dir::West)
-            .into_iter()
-            .chain([device])
-            .chain(next)
-            .chain(bank)
-            .chain(column(Dir::East))
-            .collect(),
-        gap: None,
-        align: Align::Center,
-        wrap: Some(f64::INFINITY),
-    })
+    west.into_iter()
+        .chain([device])
+        .chain(bank)
+        .chain(east)
+        .collect()
 }
 
 /// Where a block's own frame lands on the sheet: ONE snapped delta for every part in it.

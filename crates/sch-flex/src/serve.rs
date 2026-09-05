@@ -36,10 +36,6 @@ pub(crate) enum Seat {
     /// it takes the shape that costs the drawing least — a row beside the device it
     /// supports, which is where a human writes it.
     Bank,
-    /// In the next seat of the row, hanging off the node — how a leg off a chain of
-    /// two-pin parts is drawn. A column there would buy a whole column's width for one
-    /// part that only ever needed the seat next door.
-    Next,
 }
 
 /// Each member of the block that plainly serves one pin of another member, and which pin.
@@ -90,15 +86,18 @@ pub(crate) fn serving(items: &[Item], members: &[usize]) -> BTreeMap<usize, Serv
         let Some(geom) = items[served].geom.pins.iter().find(|p| p.number == pin) else {
             continue;
         };
-        let seat = match links_a_chain(&items[served]) {
-            true => Seat::Next,
-            false => Seat::Beside(quantize_dir(geom.angle, 0.0, false)),
-        };
+        // A leg off a two-pin node is left exactly where its author put it. Moving one
+        // reorders the row it stands in — the divider reads backwards, the timing cap ends
+        // up past the resistor it times — and a chain already drawn as wire comes apart
+        // into two halves bridged by a label. Only a DEVICE has a pin worth moving to.
+        if links_a_chain(&items[served]) {
+            continue;
+        }
         out.insert(
             i,
             Serves {
                 served,
-                seat,
+                seat: Seat::Beside(quantize_dir(geom.angle, 0.0, false)),
                 line: -geom.at.y,
             },
         );
