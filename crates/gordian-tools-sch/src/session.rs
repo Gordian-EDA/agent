@@ -300,6 +300,11 @@ impl Edit {
     /// report what it would have done.
     pub fn commit(mut self, changed: Value, allow: Allow) -> Result<Value> {
         let allow = allow.joining_nets(self.joined_nets.iter().cloned());
+        // A rail glyph names its own node, so a label printed on that very point prints
+        // one name twice at one node. Dropping it here catches the pair whichever tool
+        // drew it, and the net delta below is what proves the drop changed nothing.
+        let shadowed = sch_doc::power_shadowed_labels(&self.doc);
+        self.doc.remove_drawing(&shadowed);
         let wire_faults = self.doc.wire_faults();
         if !wire_faults.is_empty() {
             self.doc.restore(self.rollback)?;

@@ -1307,3 +1307,55 @@ fn a_sheet_local_symbol_copy_keeps_its_pins_through_a_write() {
         "the definition the instance draws from survived the write"
     );
 }
+
+/// A rail glyph names its node; a label printed on the same point says it twice.
+///
+/// Both prints go, and KiCAD reads the same nets off the sheet either way — the
+/// second half of the fixture is the exception that keeps one of them: a local
+/// label named elsewhere on the sheet only reaches the global rail through a
+/// coincident local label of its own.
+#[test]
+fn a_label_a_rail_already_says_is_redundant_unless_it_bridges() {
+    let redundant = sheet(
+        &[RESISTOR, GROUND],
+        &format!(
+            "{}\n{}\n(label \"GND\" (at 0 0 0) (uuid \"l1\"))",
+            place("Device:R", "R1", "1k", 0.0, 3.81, 0.0, "(unit 1)"),
+            place("power:GND", "#PWR01", "GND", 0.0, 0.0, 0.0, "(unit 1)"),
+        ),
+    );
+    assert_eq!(sch_doc::power_shadowed_labels(&redundant), ["l1"]);
+
+    // The same label, with the name also drawn on a node no rail touches.
+    let bridging = sheet(
+        &[RESISTOR, GROUND],
+        &format!(
+            "{}\n{}\n{}\n(label \"GND\" (at 0 0 0) (uuid \"l1\"))\n\
+             (label \"GND\" (at 50 7.62 0) (uuid \"l2\"))",
+            place("Device:R", "R1", "1k", 0.0, 3.81, 0.0, "(unit 1)"),
+            place("Device:R", "R2", "1k", 50.0, 3.81, 0.0, "(unit 1)"),
+            place("power:GND", "#PWR01", "GND", 0.0, 0.0, 0.0, "(unit 1)"),
+        ),
+    );
+    assert!(sch_doc::power_shadowed_labels(&bridging).is_empty());
+}
+
+/// Dropping a shadowed label leaves the netlist KiCAD reads untouched.
+#[test]
+fn dropping_a_shadowed_label_changes_no_net() {
+    let items = format!(
+        "{}\n{}\n{}\n{}\n(label \"GND\" (at 0 0 0) (uuid \"l1\"))\n\
+         (label \"GND\" (at 50 0 0) (uuid \"l2\"))",
+        place("Device:R", "R1", "1k", 0.0, 3.81, 0.0, "(unit 1)"),
+        place("Device:R", "R2", "1k", 50.0, 3.81, 0.0, "(unit 1)"),
+        place("power:GND", "#PWR01", "GND", 0.0, 0.0, 0.0, "(unit 1)"),
+        place("power:GND", "#PWR02", "GND", 50.0, 0.0, 0.0, "(unit 1)"),
+    );
+    let mut before = sheet(&[RESISTOR, GROUND], &items);
+    let shadowed = sch_doc::power_shadowed_labels(&before);
+    assert_eq!(shadowed, ["l1", "l2"]);
+    let partition = nets(&before);
+    before.remove_drawing(&shadowed);
+    agrees_with_kicad(&before);
+    assert_eq!(nets(&before), partition);
+}

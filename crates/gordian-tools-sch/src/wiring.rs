@@ -988,11 +988,18 @@ fn stand_off(
     ) {
         return report;
     }
+    // A global name reaches the rail on its own, so only the pin needs one; a local
+    // name does not merge with the rail's global net, so both ends carry it.
     let kind = sheet_scope(doc, net).unwrap_or(LabelKind::Global);
     doc.add_label(kind, net, pose(pin.at));
-    doc.add_label(kind, net, pose(rail.at));
+    let labels_added = if kind == LabelKind::Local {
+        doc.add_label(kind, net, pose(rail.at));
+        2
+    } else {
+        1
+    };
     sch_drag::DragReport {
-        labels_added: 2,
+        labels_added,
         ..sch_drag::DragReport::default()
     }
 }
