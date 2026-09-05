@@ -63,6 +63,7 @@ mod error;
 mod libsyms;
 mod meets;
 mod model;
+pub mod netname;
 mod page;
 mod pins;
 mod sexpr;

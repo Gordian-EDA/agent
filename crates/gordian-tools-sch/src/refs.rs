@@ -3,7 +3,9 @@
 
 use geom::Point2;
 use kicad_symbol::SymbolTable;
+use sch_doc::netname::{Anchor, Namer};
 use sch_doc::{Netlist, PinRef, PlacedPin, SchDoc, placed_pins};
+use std::collections::HashMap;
 use serde_json::Value;
 
 /// One end of a connection the model asked for.
@@ -281,15 +283,56 @@ fn derived_unit_letter(pin: &PlacedPin) -> String {
 /// "whatever net P3 pin 1 is on".
 pub(crate) const NET_OF_PIN: char = '@';
 
-/// A stable label for the net at `refdes.number`, minted when KiCAD's own name
-/// for it is generated and therefore unusable as an identity.
-fn minted_net_name(refdes: &str, number: &str) -> String {
-    let sanitize = |s: &str| {
-        s.chars()
-            .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
-            .collect::<String>()
-    };
-    format!("N_{}_{}", sanitize(refdes), sanitize(number))
+/// A readable label for the net at `pin`, minted when KiCAD's own name for it is
+/// generated and therefore unusable as an identity.
+///
+/// Named after the most specific pin the net touches, so the sheet ends up saying
+/// `SCL` where it used to say `N_U3_9`.
+fn minted_net_name(doc: &SchDoc, netlist: &Netlist, pin: &PlacedPin) -> String {
+    let mut symbol_pins: HashMap<&str, usize> = HashMap::new();
+    let mut named: HashMap<(&str, &str), &str> = HashMap::new();
+    let all = placed_pins(doc);
+    for placed in &all {
+        *symbol_pins.entry(placed.refdes.as_str()).or_default() += 1;
+        named.insert(
+            (placed.refdes.as_str(), placed.number.as_str()),
+            placed.name.as_str(),
+        );
+    }
+    let on_net = netlist
+        .nets
+        .iter()
+        .find(|net| {
+            net.pins
+                .iter()
+                .any(|p| p.refdes == pin.refdes && p.pin == pin.number)
+        })
+        .map(|net| net.pins.as_slice())
+        .unwrap_or_default();
+    let mut anchors: Vec<Anchor<'_>> = on_net
+        .iter()
+        .filter(|p| !p.refdes.starts_with('#'))
+        .map(|p| Anchor {
+            refdes: &p.refdes,
+            number: &p.pin,
+            pin_name: named
+                .get(&(p.refdes.as_str(), p.pin.as_str()))
+                .copied()
+                .unwrap_or(""),
+            symbol_pins: symbol_pins.get(p.refdes.as_str()).copied().unwrap_or(1),
+        })
+        .collect();
+    if anchors.is_empty() {
+        anchors.push(Anchor {
+            refdes: &pin.refdes,
+            number: &pin.number,
+            pin_name: &pin.name,
+            symbol_pins: symbol_pins.get(pin.refdes.as_str()).copied().unwrap_or(1),
+        });
+    }
+    let mut namer = Namer::new();
+    namer.hold_all(netlist.nets.iter().map(|net| net.name.as_str()));
+    namer.mint(&anchors)
 }
 
 /// What `"@R1.2"` resolves to: the net that pin already carries, or a name to give it.
@@ -333,7 +376,7 @@ pub(crate) fn net_of_pin(doc: &SchDoc, netlist: &Netlist, spec: &str) -> Result<
     Ok(match usable {
         Some(net) => PinNet::Named(net.name.clone()),
         None => PinNet::Mint {
-            net: minted_net_name(&pin.refdes, &pin.number),
+            net: minted_net_name(doc, netlist, &pin),
             refdes: pin.refdes,
             number: pin.number,
         },

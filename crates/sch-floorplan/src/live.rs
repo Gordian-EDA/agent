@@ -40,6 +40,7 @@ use kicad_symbol::SymbolTable;
 use kicad_symbol::geometry::SymbolGeometry;
 use sch_check::model::{Block, Component, Design, PinTarget};
 use sch_check::{ExistingSheet, PayloadAudit, PlacePartsInput};
+use sch_doc::netname::{Anchor, Namer};
 use sch_doc::{LabelKind, NetSource, Netlist, Pose, SchDoc, connect};
 use sch_model::item::{Incidence, Item};
 use serde::{Deserialize, Serialize};
@@ -276,6 +277,22 @@ fn place_parts_inner(
     let mut before = live_phase("lower", input.parts.len(), 0, || {
         connect::extract(doc)
     });
+    // A machine-made net name is not a name anyone wrote, and drawn as a label it is
+    // what makes a sheet read as tool spill. Renamed HERE, before the payload is
+    // lowered or its seams matched, every later step — the join by name, the audit,
+    // the drawing and the record kept for the next block — sees the one readable name.
+    let readable = readable_renames(input, doc, &before, &provider);
+    if !readable.is_empty() {
+        tracing::info!(?readable, "renamed machine-made nets after the pins they touch");
+    }
+    let renamed;
+    let input = match readable.is_empty() {
+        true => input,
+        false => {
+            renamed = with_readable_nets(input, &readable);
+            &renamed
+        }
+    };
     // Every edit from here on is undone by this snapshot, the join included: a payload
     // the audit refuses must not leave a label behind for a net it never draws.
     let snapshot = doc.snapshot();
@@ -650,7 +667,9 @@ fn rearrange_inner(
         // A net with a pin on both sides of the selection has to be reached by NAME:
         // the redraw draws the selection's own terminals only, so a wire run to where
         // a held pin's wire used to be reaches nothing.
-        let boundary = boundary_nets(doc, &before, &chosen);
+        let facts = pin_facts(doc);
+        let mut namer = net_namer(&before);
+        let boundary = boundary_nets(doc, &before, &chosen, &facts, &mut namer);
         for net in &boundary {
             if let Some(minted) = &net.mint {
                 rename_net(&mut design, &net.name, minted);
@@ -661,7 +680,7 @@ fn rearrange_inner(
         // and the redraw is then free to write that down as a label — a name recomputed
         // from the net's own pins, so the sheet forks it the moment one moves. It gets
         // the same stable mint a boundary net gets.
-        let interior = interior_mints(&before, &chosen);
+        let interior = interior_mints(&before, &chosen, &facts, &mut namer);
         for (from, to) in &interior {
             rename_net(&mut design, from, to);
         }
@@ -1222,7 +1241,13 @@ impl BoundaryNet {
 }
 
 /// Every net straddling `chosen`, with the name each will be drawn under.
-fn boundary_nets(doc: &SchDoc, before: &Netlist, chosen: &BTreeSet<String>) -> Vec<BoundaryNet> {
+fn boundary_nets(
+    doc: &SchDoc,
+    before: &Netlist,
+    chosen: &BTreeSet<String>,
+    facts: &PinFacts,
+    namer: &mut Namer,
+) -> Vec<BoundaryNet> {
     let at: HashMap<(String, String), Point2> = sch_doc::placed_pins(doc)
         .into_iter()
         .map(|pin| ((pin.refdes, pin.number), pin.at))
@@ -1244,14 +1269,9 @@ fn boundary_nets(doc: &SchDoc, before: &Netlist, chosen: &BTreeSet<String>) -> V
             if held.is_empty() || !net.pins.iter().any(|pin| chosen.contains(&pin.refdes)) {
                 return None;
             }
-            let lead = net
-                .pins
-                .iter()
-                .find(|pin| !pin.refdes.starts_with('#'))
-                .unwrap_or(&net.pins[0]);
             Some(BoundaryNet {
                 mint: (net.source == sch_doc::NetSource::Auto)
-                    .then(|| minted_net_name(&lead.refdes, &lead.pin)),
+                    .then(|| namer.mint(&name_anchors(net, facts))),
                 name: net.name.clone(),
                 held,
             })
@@ -1301,19 +1321,196 @@ fn name_held_halves(doc: &mut SchDoc, boundary: &[BoundaryNet]) {
 /// mint a boundary net gets. Only the wholly-inside ones: a net with a pin left
 /// standing outside the selection is a boundary net, whose held side has to be kept
 /// in step and is named by [`name_held_halves`].
-fn interior_mints(before: &Netlist, chosen: &BTreeSet<String>) -> BTreeMap<String, String> {
-    before
-        .nets
+fn interior_mints(
+    before: &Netlist,
+    chosen: &BTreeSet<String>,
+    facts: &PinFacts,
+    namer: &mut Namer,
+) -> BTreeMap<String, String> {
+    let mut out = BTreeMap::new();
+    for net in before.nets.iter().filter(|net| net.source == NetSource::Auto) {
+        let mut real = net.pins.iter().filter(|pin| !pin.refdes.starts_with('#'));
+        let Some(lead) = real.next() else { continue };
+        if !chosen.contains(&lead.refdes) || !real.all(|pin| chosen.contains(&pin.refdes)) {
+            continue;
+        }
+        out.insert(net.name.clone(), namer.mint(&name_anchors(net, facts)));
+    }
+    out
+}
+
+/// What each pin on the sheet is called, and how many pins its symbol has — what
+/// [`Namer`] needs to name a net after the most specific pin it touches.
+#[derive(Debug, Default)]
+struct PinFacts {
+    name: HashMap<(String, String), String>,
+    symbol_pins: HashMap<String, usize>,
+}
+
+impl PinFacts {
+    /// The `(number, name)` of the pin `refdes` calls `id`, which may be either.
+    fn pin_of(&self, refdes: &str, id: &str) -> Option<(String, String)> {
+        self.name
+            .get(&(refdes.to_string(), id.to_string()))
+            .map(|name| (id.to_string(), name.clone()))
+            .or_else(|| {
+                self.name
+                    .iter()
+                    .find(|((r, _), name)| r == refdes && name.eq_ignore_ascii_case(id))
+                    .map(|((_, number), name)| (number.clone(), name.clone()))
+            })
+    }
+}
+
+fn pin_facts(doc: &SchDoc) -> PinFacts {
+    let mut facts = PinFacts::default();
+    for pin in sch_doc::placed_pins(doc) {
+        *facts.symbol_pins.entry(pin.refdes.clone()).or_default() += 1;
+        facts.name.insert((pin.refdes, pin.number), pin.name);
+    }
+    facts
+}
+
+/// The real pins of `net`, as candidates to name it after. Rail terminals and
+/// flags carry a `#` reference and name nothing.
+fn name_anchors<'a>(net: &'a sch_doc::Net, facts: &'a PinFacts) -> Vec<Anchor<'a>> {
+    net.pins
         .iter()
-        .filter(|net| net.source == NetSource::Auto)
-        .filter_map(|net| {
-            let mut real = net.pins.iter().filter(|pin| !pin.refdes.starts_with('#'));
-            let lead = real.next()?;
-            let inside = chosen.contains(&lead.refdes)
-                && real.all(|pin| chosen.contains(&pin.refdes));
-            inside.then(|| (net.name.clone(), minted_net_name(&lead.refdes, &lead.pin)))
+        .filter(|pin| !pin.refdes.starts_with('#'))
+        .map(|pin| Anchor {
+            refdes: &pin.refdes,
+            number: &pin.pin,
+            pin_name: facts
+                .name
+                .get(&(pin.refdes.clone(), pin.pin.clone()))
+                .map_or("", String::as_str),
+            symbol_pins: facts.symbol_pins.get(&pin.refdes).copied().unwrap_or(1),
         })
         .collect()
+}
+
+/// Readable names for the machine-made net names `input` arrived with.
+///
+/// `Net-(U1-NRST)` is KiCAD's own derivation and `N_C13_PAD2` is a tool mint
+/// imitating one; neither is a name a reader wrote, and both spell out the pin
+/// they were computed from. The rename reads that pin back out and names the net
+/// after it — `NRST` — so the label the sheet ends up drawing says something.
+///
+/// Seeding the namer with the sheet's own nets and the pins each holds is what
+/// keeps the mint stable: a net an earlier block already drew under the minted
+/// name is recognised and keeps it, so a later block joins rather than forks.
+fn readable_renames(
+    input: &PlacePartsInput,
+    doc: &SchDoc,
+    before: &Netlist,
+    provider: &SymbolTable,
+) -> BTreeMap<String, String> {
+    /// One pin of one part, as a candidate to name its net after.
+    struct Pin {
+        refdes: String,
+        number: String,
+        pin_name: String,
+        symbol_pins: usize,
+    }
+    let mut on_net: BTreeMap<&str, Vec<Pin>> = BTreeMap::new();
+    for part in &input.parts {
+        let Some(refdes) = part.refdes.as_deref() else {
+            continue;
+        };
+        let meta = provider.symbol(&part.part);
+        let lib_pins = meta.as_ref().map_or(&[][..], |meta| meta.pins.as_slice());
+        for (key, net) in &part.pins {
+            let pin = kicad_symbol::find_pin(lib_pins, key);
+            on_net.entry(net.as_str()).or_default().push(Pin {
+                refdes: refdes.to_string(),
+                number: pin.map_or(key.clone(), |pin| pin.number.clone()),
+                pin_name: pin.map_or(String::new(), |pin| pin.name.clone()),
+                symbol_pins: lib_pins.len().max(part.pins.len()),
+            });
+        }
+    }
+    let mut namer = Namer::new();
+    for net in &before.nets {
+        namer.hold(
+            &net.name,
+            net.pins
+                .iter()
+                .map(|pin| (pin.refdes.clone(), pin.pin.clone())),
+        );
+    }
+    namer.hold_all(on_net.keys().copied());
+    // The pin a machine name spells out may belong to a part an EARLIER call
+    // placed — a header joining an MCU's `Net-(U1-PB6)` mentions only the header.
+    // Reading that pin off the sheet is what makes the two calls agree on `PB6`.
+    let facts = pin_facts(doc);
+    let mut out = BTreeMap::new();
+    for (net, pins) in &on_net {
+        let Some((spelled_ref, spelled_pin)) = sch_doc::netname::machine_parts(net) else {
+            continue;
+        };
+        let seated = (!pins.iter().any(|pin| pin.refdes == spelled_ref))
+            .then(|| facts.pin_of(spelled_ref, spelled_pin))
+            .flatten();
+        let anchors: Vec<Anchor<'_>> = seated
+            .iter()
+            .map(|(number, name)| Anchor {
+                refdes: spelled_ref,
+                number,
+                pin_name: name,
+                symbol_pins: facts.symbol_pins.get(spelled_ref).copied().unwrap_or(1),
+            })
+            .chain(pins.iter()
+            .map(|pin| Anchor {
+                refdes: &pin.refdes,
+                number: &pin.number,
+                // The library is the truth about a pin's name; what the machine
+                // name spells out is the fallback for an unresolvable symbol.
+                pin_name: match (pin.pin_name.is_empty(), pin.refdes == spelled_ref) {
+                    (true, true) => spelled_pin,
+                    (true, false) => "",
+                    (false, _) => pin.pin_name.as_str(),
+                },
+                symbol_pins: pin.symbol_pins,
+            }))
+            .collect();
+        let minted = namer.mint(&anchors);
+        if minted != *net {
+            out.insert((*net).to_string(), minted);
+        }
+    }
+    out
+}
+
+/// `input` with every machine-made net name replaced by its readable one.
+fn with_readable_nets(
+    input: &PlacePartsInput,
+    readable: &BTreeMap<String, String>,
+) -> PlacePartsInput {
+    let rename = |net: &String| readable.get(net).cloned().unwrap_or_else(|| net.clone());
+    let mut out = input.clone();
+    for part in &mut out.parts {
+        for net in part.pins.values_mut() {
+            *net = rename(net);
+        }
+    }
+    if let Some(intent) = &mut out.intent {
+        intent.rails = std::mem::take(&mut intent.rails)
+            .into_iter()
+            .map(|(net, band)| (rename(&net), band))
+            .collect();
+        intent.ports = std::mem::take(&mut intent.ports)
+            .into_iter()
+            .map(|(net, side)| (rename(&net), side))
+            .collect();
+    }
+    out
+}
+
+/// A namer that will not mint over any name the sheet already carries.
+fn net_namer(before: &Netlist) -> Namer {
+    let mut namer = Namer::new();
+    namer.hold_all(before.nets.iter().map(|net| net.name.as_str()));
+    namer
 }
 
 /// Nets touching `chosen` that the sheet names with a label of its own.
@@ -1326,19 +1523,6 @@ fn named_nets(before: &Netlist, chosen: &BTreeSet<String>) -> Vec<String> {
         .filter(|net| net.pins.iter().any(|pin| chosen.contains(&pin.refdes)))
         .map(|net| net.name.clone())
         .collect()
-}
-
-/// The stable name given to a net that only had KiCAD's derived one.
-///
-/// Sanitised so it is a legal label: a name with a `(` or a `-` in it reads as
-/// KiCAD's own generated form and cannot be joined by a caller.
-fn minted_net_name(refdes: &str, number: &str) -> String {
-    let sanitize = |text: &str| -> String {
-        text.chars()
-            .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '_' })
-            .collect()
-    };
-    format!("N_{}_{}", sanitize(refdes), sanitize(number))
 }
 
 /// Rewrite every reference to `from` in the lifted design to `to`.

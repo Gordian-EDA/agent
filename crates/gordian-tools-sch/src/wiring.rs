@@ -5,7 +5,8 @@
 use anyhow::Result;
 use geom::{EPS, Point2, Rect, Segment};
 use gordian_runtime::AgentRuntime;
-use sch_doc::{LabelKind, SchDoc, connect};
+use sch_doc::netname::{Anchor, Namer};
+use sch_doc::{LabelKind, SchDoc, connect, placed_pins};
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
 
@@ -220,7 +221,7 @@ fn connect_one(input: Value, ctx: &AgentRuntime) -> Result<Value> {
                     ),
                 }));
             }
-            let net = net.unwrap_or_else(|| fallback_name(&from, &to));
+            let net = net.unwrap_or_else(|| fallback_name(&edit.doc, &from, &to));
             let reason = if across {
                 "the ends sit in different sections"
             } else if by_name {
@@ -464,17 +465,31 @@ fn joined(doc: &SchDoc, a: Point2, b: Point2) -> bool {
     }
 }
 
-/// A net name for a labelled connection the caller did not name, built from
-/// the two ends so it reads as what it is: `N_R5_1_U1_VDD`.
-fn fallback_name(from: &Target, to: &Target) -> String {
-    let part = |target: &Target| {
-        target
-            .describe()
-            .chars()
-            .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
-            .collect::<String>()
-    };
-    format!("N_{}_{}", part(from), part(to)).to_uppercase()
+/// A net name for a labelled connection the caller did not name.
+///
+/// Named after the more specific of the two pins it joins — `PB6` rather than
+/// `N_J4_11_U2_27`, which is what a person would have written.
+fn fallback_name(doc: &SchDoc, from: &Target, to: &Target) -> String {
+    let mut symbol_pins: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+    for pin in placed_pins(doc) {
+        *symbol_pins.entry(pin.refdes).or_default() += 1;
+    }
+    let anchors: Vec<Anchor<'_>> = [from, to]
+        .into_iter()
+        .filter_map(|target| match target {
+            Target::Pin(pin) => Some(Anchor {
+                refdes: &pin.refdes,
+                number: &pin.number,
+                pin_name: &pin.name,
+                symbol_pins: symbol_pins.get(&pin.refdes).copied().unwrap_or(1),
+            }),
+            Target::Point(_) => None,
+        })
+        .collect();
+    let mut namer = Namer::new();
+    namer.hold_all(connect::extract(doc).nets.iter().map(|net| net.name.clone()));
+    namer.mint(&anchors)
 }
 
 pub(crate) fn pose(at: Point2) -> sch_doc::Pose {

@@ -21,6 +21,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use geom::{Point2, Rect};
+use sch_doc::netname::{self, Anchor, Namer};
 use sch_doc::{LabelKind, Pose, SchDoc, SymbolSource};
 use sch_model::result::{AP_BENCH, AP_BLOCK};
 use serde::{Deserialize, Serialize};
@@ -157,45 +158,38 @@ fn name_pins(
     }
 }
 
-/// Mint stable authored labels for the KiCAD-derived names in `parts`.
+/// Mint stable, readable labels for the KiCAD-derived names in `parts`.
+///
+/// A derived name spells out the pin it was computed from — `Net-(U1-NRST)` — so
+/// the mint reads that pin back out and names the net after it.
 pub fn minted_net_names(doc: &SchDoc, parts: &[&BenchPart]) -> BTreeMap<String, String> {
-    let mut first_pin = BTreeMap::new();
+    let mut on_net: BTreeMap<&str, Vec<(&BenchPart, &str)>> = BTreeMap::new();
     for part in parts {
         for (pin, net) in &part.pins {
-            first_pin
-                .entry(net.as_str())
-                .or_insert((part.refdes.as_str(), pin.as_str()));
+            on_net.entry(net.as_str()).or_default().push((part, pin.as_str()));
         }
     }
-    let mut occupied: BTreeSet<String> = doc
-        .labels()
-        .map(|label| sch_doc::unescape(&label.text))
-        .chain(first_pin.keys().map(|net| (*net).to_string()))
-        .collect();
+    let mut namer = Namer::new();
+    namer.hold_all(doc.labels().map(|label| sch_doc::unescape(&label.text)));
+    namer.hold_all(on_net.keys().copied());
     let mut out = BTreeMap::new();
-    for (net, (refdes, pin)) in first_pin.iter().filter(|(net, _)| is_derived_name(net)) {
-        let base = format!("N_{}_{}", identifier(refdes), identifier(pin));
-        let authored = unique_name(&base, &occupied);
-        occupied.insert(authored.clone());
-        out.insert((*net).to_string(), authored);
+    for (net, pins) in on_net.iter().filter(|(net, _)| is_derived_name(net)) {
+        let named = netname::derived_parts(net);
+        let anchors: Vec<Anchor<'_>> = pins
+            .iter()
+            .map(|(part, number)| Anchor {
+                refdes: part.refdes.as_str(),
+                number,
+                pin_name: match named {
+                    Some((refdes, name)) if refdes == part.refdes => name,
+                    _ => "",
+                },
+                symbol_pins: part.pins.len(),
+            })
+            .collect();
+        out.insert((*net).to_string(), namer.mint(&anchors));
     }
     out
-}
-
-fn identifier(text: &str) -> String {
-    text.chars()
-        .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '_' })
-        .collect()
-}
-
-fn unique_name(base: &str, occupied: &BTreeSet<String>) -> String {
-    if !occupied.contains(base) {
-        return base.to_string();
-    }
-    (2..)
-        .map(|suffix| format!("{base}_{suffix}"))
-        .find(|candidate| !occupied.contains(candidate))
-        .expect("the authored net-name suffix space is unbounded")
 }
 
 /// A name KiCAD generates from a net's own pins, which is therefore not a name at
