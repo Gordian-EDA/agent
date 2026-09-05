@@ -2,6 +2,7 @@
 //! and free graphics, plus the pin-endpoint geometry the connectivity helpers
 //! resolve against and the truthfulness-count accessors over the placed scene.
 
+use std::collections::BTreeSet;
 use std::io;
 
 use geom::{GRID_50_MIL, Point2, Rect, Segment};
@@ -15,6 +16,9 @@ use super::{
     Anchor, Dir, Instance, Junction, NoConnect, PinLabel, SchematicWriter, SheetRect, SheetText,
     Wire,
 };
+
+/// Where a pin connects and which way a wire or label leaves it.
+pub type PinSeat = ([f64; 2], Dir);
 
 /// A sheet point as an exact, comparable key (µm), so two endpoints that coincide
 /// compare equal without a float epsilon.
@@ -153,49 +157,6 @@ impl SchematicWriter {
         }
     }
 
-    /// Place a net-name label at the connection endpoint of one pin.
-    ///
-    /// This is the connectivity mechanism: a label whose position coincides with
-    /// a pin's sheet-space connection point binds that pin to the named net, and
-    /// two pins carrying labels with the *same* net name are joined by KiCAD with
-    /// no wires. Power
-    /// nets get plain labels too — they suffice for ERC connectivity; power
-    /// symbols are an optional later enhancement.
-    ///
-    /// `pin` is resolved against the symbol geometry **by number first, then by
-    /// name** (matching `sch_check::pins`). A pin *name* may match
-    /// several physical pins; in that case a label is emitted at **every**
-    /// matching pin so they all join the net.
-    ///
-    /// The endpoint is computed from the placed instance's recorded position and
-    /// orientation (and mirror, when present): the pin's local connection point
-    /// is rotated/flipped into sheet space and snapped to the grid. See
-    /// [`pin_endpoint`] for the exact transform.
-    ///
-    /// Returns an error if `refdes` was never placed, if its geometry cannot be
-    /// loaded, or if no pin matches `pin` by number or name.
-    pub fn add_pin_label(
-        &mut self,
-        env: &KicadInstallation,
-        refdes: &str,
-        pin: &str,
-        net: &str,
-    ) -> io::Result<()> {
-        let endpoints = self.pin_endpoints(env, refdes, pin)?;
-        for (idx, at) in endpoints.into_iter().enumerate() {
-            self.labels.push(PinLabel {
-                net: net.to_string(),
-                at,
-                uuid_key: format!("{refdes}:{pin}:{net}:{idx}"),
-                // Direct/no-stub path: East -> angle 0, justify left bottom,
-                // byte-identical to pre-stub label output.
-                dir: Dir::East,
-                anchor: Anchor::Fixed,
-            });
-        }
-        Ok(())
-    }
-
     /// Signal-net connectivity with breathing room: a stub wire out of the pin
     /// and the net label at the stub's far end, oriented along the stub so the
     /// text reads away from the symbol body.
@@ -241,7 +202,11 @@ impl SchematicWriter {
         net: &str,
         stub_mm: f64,
     ) -> io::Result<()> {
-        for (idx, (ep, dir)) in self.pin_dirs(env, refdes, pin)?.into_iter().enumerate() {
+        for (idx, (ep, dir)) in self
+            .pin_dirs_noting(env, refdes, pin)?
+            .into_iter()
+            .enumerate()
+        {
             let ep = GRID_50_MIL.snap_point(ep);
             let v = dir.vec();
             let end =
@@ -424,21 +389,40 @@ impl SchematicWriter {
         });
     }
 
-    /// Resolve a pin to its endpoint(s) AND outward direction(s) on the sheet.
+    /// Every `(refdes, unit)` a pin was asked for but no instance draws.
+    ///
+    /// Reported beside the layout warnings so a design whose payload connects a
+    /// unit the typesetter never seated says so, instead of silently losing the
+    /// pin from the drawing.
+    pub fn unplaced_unit_warnings(&self) -> Vec<String> {
+        self.unplaced_units
+            .iter()
+            .map(|(refdes, unit)| {
+                format!("{refdes}: pins on unit {unit} are connected but no unit-{unit} symbol is placed, so they are joined by name only")
+            })
+            .collect()
+    }
+
+    /// Resolve a pin to its endpoint(s) and outward direction(s), and report any
+    /// unit the pin needed that no placed instance draws.
+    ///
+    /// A multi-unit part places one instance per unit it uses, all sharing a refdes,
+    /// and pin geometry is unit-local: a unit-2 pin resolved against unit 1's
+    /// placement lands inside unit 1's body pointing into it — the netlist stays
+    /// truthful, the drawing does not. So a pin whose unit nothing draws is left
+    /// UNDRAWN (its net is joined by name at the units that are placed) and its unit
+    /// comes back as missing.
     ///
     /// A pin's local `angle` points from the connection point INTO the body, so
     /// outward is `angle + 180°`, transformed exactly like the endpoint itself
     /// (mirror -> instance rotation -> sheet Y-flip) and quantized to an axis.
-    pub fn pin_dirs(
+    fn resolve_pin(
         &self,
         env: &KicadInstallation,
         refdes: &str,
         pin: &str,
-    ) -> io::Result<Vec<([f64; 2], Dir)>> {
-        // A refdes may have SEVERAL instances — one per unit of a multi-unit part,
-        // each at its own position. Pick the first as the lib_id/geometry source
-        // (units share a lib_id), then resolve each matched pin against the
-        // instance that draws ITS unit, so a unit-B pin lands at unit B's body.
+    ) -> io::Result<(Vec<PinSeat>, BTreeSet<u8>)> {
+        // Units share a lib_id, so any instance of this refdes is the geometry source.
         let any = self
             .instances
             .iter()
@@ -449,47 +433,77 @@ impl SchematicWriter {
                     format!("no placed symbol with refdes {refdes:?}"),
                 )
             })?;
-        let lib_id = any.lib_id.clone();
         // Pins are cached per lib_id when the symbol is first added, so this hot
         // path (called once per net-pin during routing) never re-reads the
         // `.kicad_sym` from disk. Fall back to a load only if somehow uncached.
-        let pins: Vec<PinGeom> = match self.sym_pins.get(&lib_id).cloned() {
-            Some(p) => p,
-            None => SymbolGeometry::load(env.symbol_dir(), &lib_id)?.pins,
+        let pins: Vec<PinGeom> = match self.sym_pins.get(&any.lib_id) {
+            Some(p) => p.clone(),
+            None => SymbolGeometry::load(env.symbol_dir(), &any.lib_id)?.pins,
         };
 
+        // Number first, then name. A NAME may match several physical pins (an MCU's
+        // four VSS), and each gets its own endpoint.
         let matches: Vec<&PinGeom> = {
             let by_number: Vec<&PinGeom> = pins.iter().filter(|p| p.number == pin).collect();
-            if !by_number.is_empty() {
-                by_number
-            } else {
-                pins.iter().filter(|p| p.name == pin).collect()
+            match by_number.is_empty() {
+                false => by_number,
+                true => pins.iter().filter(|p| p.name == pin).collect(),
             }
         };
         if matches.is_empty() {
             return Err(io::Error::new(
                 io::ErrorKind::NotFound,
-                format!("no pin {pin:?} on {lib_id}"),
+                format!("no pin {pin:?} (by number or name) on {}", any.lib_id),
             ));
         }
-        // The instance that draws unit `u` (its pins live at its placement); fall
-        // back to `any` when a unit has no dedicated instance (single-unit parts,
-        // or an unplaced unit).
-        let inst_for = |u: u8| -> &Instance {
-            self.instances
+
+        let mut drawn = Vec::new();
+        let mut missing = BTreeSet::new();
+        for pg in matches {
+            let unit = pg.unit.max(1);
+            match self
+                .instances
                 .iter()
-                .find(|i| i.refdes == refdes && i.unit == u)
-                .unwrap_or(any)
-        };
-        Ok(matches
-            .into_iter()
-            .map(|pg| {
-                let inst = inst_for(pg.unit.max(1));
-                let ep = pin_endpoint(pg, inst.at, inst.angle, inst.mirror);
-                let dir = quantize_dir(pg.angle, inst.angle, inst.mirror);
-                (ep, dir)
-            })
-            .collect())
+                .find(|i| i.refdes == refdes && i.unit == unit)
+            {
+                Some(inst) => drawn.push((
+                    pin_endpoint(pg, inst.at, inst.angle, inst.mirror),
+                    quantize_dir(pg.angle, inst.angle, inst.mirror),
+                )),
+                None => {
+                    missing.insert(unit);
+                }
+            }
+        }
+        Ok((drawn, missing))
+    }
+
+    /// [`Self::resolve_pin`]'s endpoints and outward directions.
+    pub fn pin_dirs(
+        &self,
+        env: &KicadInstallation,
+        refdes: &str,
+        pin: &str,
+    ) -> io::Result<Vec<PinSeat>> {
+        Ok(self.resolve_pin(env, refdes, pin)?.0)
+    }
+
+    /// [`Self::pin_dirs`], recording every unit the pin needed that nothing draws.
+    ///
+    /// Each emitter that puts ink on a pin goes through this, so a connected pin
+    /// dropped for want of its unit always reaches
+    /// [`Self::unplaced_unit_warnings`].
+    fn pin_dirs_noting(
+        &mut self,
+        env: &KicadInstallation,
+        refdes: &str,
+        pin: &str,
+    ) -> io::Result<Vec<PinSeat>> {
+        let (drawn, missing) = self.resolve_pin(env, refdes, pin)?;
+        for unit in missing {
+            self.unplaced_units.insert((refdes.to_string(), unit));
+        }
+        Ok(drawn)
     }
 
     /// Reserve the endpoints of every `(refdes, pin)` the design put on a NET, so no
@@ -509,8 +523,8 @@ impl SchematicWriter {
         pins: impl IntoIterator<Item = (&'a str, &'a str)>,
     ) -> io::Result<()> {
         for (refdes, pin) in pins {
-            for at in self.pin_endpoints(env, refdes, pin)? {
-                self.connected.insert(point_key(at));
+            for (at, _) in self.pin_dirs_noting(env, refdes, pin)? {
+                self.connected.insert(point_key(Point2::from(at)));
             }
         }
         Ok(())
@@ -541,8 +555,9 @@ impl SchematicWriter {
         refdes: &str,
         pin: &str,
     ) -> io::Result<()> {
-        let endpoints = self.pin_endpoints(env, refdes, pin)?;
-        for (idx, at) in endpoints.into_iter().enumerate() {
+        let endpoints = self.pin_dirs_noting(env, refdes, pin)?;
+        for (idx, (at, _)) in endpoints.into_iter().enumerate() {
+            let at = Point2::from(at);
             if self.connected.contains(&point_key(at)) {
                 continue;
             }
@@ -594,71 +609,19 @@ impl SchematicWriter {
 
     /// Resolve a pin reference to its sheet-space connection endpoint(s).
     ///
-    /// Looks up the placed instance for `refdes`, loads its symbol geometry, and
-    /// matches `pin` by number first then name (a name may match several physical
-    /// pins). Each match is transformed through the instance's
-    /// position/orientation/mirror into a grid-snapped sheet point. Shared by
-    /// label, no-connect, and power-flag emission so they always agree on where a
-    /// pin's connection point lands.
+    /// [`Self::resolve_pin`] without the directions — shared by label, no-connect
+    /// and power-flag emission so they always agree on where a pin's connection
+    /// point lands.
     pub fn pin_endpoints(
         &self,
         env: &KicadInstallation,
         refdes: &str,
         pin: &str,
     ) -> io::Result<Vec<Point2>> {
-        let any = self
-            .instances
-            .iter()
-            .find(|i| i.refdes == refdes)
-            .ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::NotFound,
-                    format!("no placed symbol with refdes {refdes:?}"),
-                )
-            })?;
-
-        // Registered when the symbol was placed; a load is the fallback for a writer
-        // that was handed a position without its geometry.
-        let pins: Vec<PinGeom> = match self.sym_pins.get(&any.lib_id).cloned() {
-            Some(pins) => pins,
-            None => SymbolGeometry::load(env.symbol_dir(), &any.lib_id)?.pins,
-        };
-
-        // Resolve the pin: number first, then name. A name may match several
-        // physical pins (e.g. multiple GND pins), so collect all matches.
-        let matches: Vec<&PinGeom> = {
-            let by_number: Vec<&PinGeom> = pins.iter().filter(|p| p.number == pin).collect();
-            if !by_number.is_empty() {
-                by_number
-            } else {
-                pins.iter().filter(|p| p.name == pin).collect()
-            }
-        };
-        if matches.is_empty() {
-            return Err(io::Error::new(
-                io::ErrorKind::NotFound,
-                format!("no pin {pin:?} (by number or name) on {}", any.lib_id),
-            ));
-        }
-
-        // Each matched pin lives at the instance that draws ITS unit — a multi-unit
-        // part places one instance per unit, all sharing `refdes`. Resolving every pin
-        // through `any` (unit 1) drops a unit-2 pin's label/no-connect onto unit 1's
-        // body at the same geom offset (an LM358 unit-2 OUT lands on unit-1 OUT — the
-        // misplaced no_connect over a connected feedback pin). Fall back to `any` for an
-        // unplaced unit / single-unit part (byte-identical there). Mirrors `pin_dirs`.
-        let inst_for = |u: u8| -> &Instance {
-            self.instances
-                .iter()
-                .find(|i| i.refdes == refdes && i.unit == u)
-                .unwrap_or(any)
-        };
-        Ok(matches
+        Ok(self
+            .pin_dirs(env, refdes, pin)?
             .into_iter()
-            .map(|pg| {
-                let inst = inst_for(pg.unit.max(1));
-                Point2::from(pin_endpoint(pg, inst.at, inst.angle, inst.mirror))
-            })
+            .map(|(at, _)| Point2::from(at))
             .collect())
     }
 
@@ -1325,5 +1288,73 @@ mod tests {
         let d2 = w.pin_dirs(&env, "R2", "1").unwrap();
         // At instance angle 90 the same pin rotates to point West.
         assert_eq!(d2[0].1, Dir::West, "R2 pin 1 stub should point West");
+    }
+
+    /// A pin belongs to the unit that draws it: with unit 2 of an LM324 seated
+    /// well away from unit 1, unit 2's inverting input resolves at unit 2 — never
+    /// at unit 1's placement with unit 2's own local offset.
+    #[test]
+    fn a_pin_resolves_at_the_instance_that_draws_its_unit() {
+        let Some(env) = detect_env() else { return };
+        let mut w = SchematicWriter::new();
+        w.add_symbol(
+            &env,
+            "Amplifier_Operational:LM324",
+            "U1",
+            "LM324",
+            [50.8, 50.8],
+            0.0,
+        )
+        .unwrap();
+        w.add_symbol(
+            &env,
+            "Amplifier_Operational:LM324",
+            "U1",
+            "LM324",
+            [127.0, 101.6],
+            0.0,
+        )
+        .unwrap();
+        w.set_unit_last(2);
+
+        let unit1 = w.pin_dirs(&env, "U1", "1").unwrap();
+        let unit2 = w.pin_dirs(&env, "U1", "6").unwrap();
+        assert_eq!(unit1.len(), 1);
+        assert_eq!(unit2.len(), 1);
+        assert!(
+            (unit1[0].0[0] - 50.8).abs() < 12.7 && (unit2[0].0[0] - 127.0).abs() < 12.7,
+            "each pin must sit beside its own unit: {unit1:?} {unit2:?}"
+        );
+        assert!(w.unplaced_unit_warnings().is_empty());
+    }
+
+    /// The other half of the same rule: a pin whose unit nothing draws is not
+    /// drawn at a foreign unit's origin — it is not drawn at all, and the writer
+    /// says which unit went missing.
+    #[test]
+    fn a_pin_on_an_unplaced_unit_is_not_drawn_at_another_unit() {
+        let Some(env) = detect_env() else { return };
+        let mut w = SchematicWriter::new();
+        w.add_symbol(
+            &env,
+            "Amplifier_Operational:LM324",
+            "U1",
+            "LM324",
+            [50.8, 50.8],
+            0.0,
+        )
+        .unwrap();
+        assert!(w.pin_dirs(&env, "U1", "6").unwrap().is_empty());
+        w.add_signal_label(&env, "U1", "6", "FEEDBACK").unwrap();
+        assert!(
+            w.labels.iter().all(|l| l.net != "FEEDBACK"),
+            "a label for an unplaced unit's pin must not be drawn"
+        );
+        let warnings = w.unplaced_unit_warnings();
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(
+            warnings[0].contains("U1") && warnings[0].contains("unit 2"),
+            "{warnings:?}"
+        );
     }
 }

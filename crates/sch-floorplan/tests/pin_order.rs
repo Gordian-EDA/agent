@@ -70,8 +70,8 @@ fn a_two_pin_part_keeps_its_pin_order_in_every_pose() {
             if mirror {
                 w.set_mirror_last();
             }
-            w.add_pin_label(&env, "R1", "1", "NET_ONE").unwrap();
-            w.add_pin_label(&env, "R1", "2", "NET_TWO").unwrap();
+            w.add_signal_label(&env, "R1", "1", "NET_ONE").unwrap();
+            w.add_signal_label(&env, "R1", "2", "NET_TWO").unwrap();
             let path = dir.path().join(format!("pose-{angle}-{mirror}.kicad_sch"));
             std::fs::write(&path, w.finish()).unwrap();
             let got = cli_pin_nets(&env, &path);

@@ -138,12 +138,12 @@ fn name_pins(
     global: &BTreeSet<String>,
     minted_for_derived: &BTreeMap<String, String>,
 ) {
-    let placed: Vec<(String, Point2)> = sch_doc::placed_pins(doc)
+    let placed: Vec<(String, Point2, Pose)> = sch_doc::placed_pins(doc)
         .into_iter()
         .filter(|pin| pin.refdes == part.refdes)
-        .map(|pin| (pin.number, pin.at))
+        .map(|pin| (pin.number.clone(), pin.at, pin.label_pose()))
         .collect();
-    for (number, at) in placed {
+    for (number, at, pose) in placed {
         let Some(net) = part.pins.get(&number) else {
             doc.add_no_connect(at);
             continue;
@@ -153,7 +153,7 @@ fn name_pins(
             true => LabelKind::Global,
             false => LabelKind::Local,
         };
-        doc.add_label(kind, net, Pose::new(at.x, at.y, 0.0));
+        doc.add_label(kind, net, pose);
     }
 }
 
