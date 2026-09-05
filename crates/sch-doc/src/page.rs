@@ -466,7 +466,17 @@ impl SchDoc {
     /// behind — and doing this check on one write path let every other path keep making
     /// them. It belongs here, where every path that finishes a sheet passes through.
     fn drop_empty_frames(&mut self) {
-        let symbols: Vec<Point2> = self.symbols().map(|s| s.at.point()).collect();
+        // Only PARTS count as contents. A rail flag or a PWR_FLAG is furniture the
+        // realiser generates around whatever it draws, so a block whose parts never
+        // arrived — an IC the model deleted and failed to put back — still has its
+        // `+5V` and `GND` symbols inside the frame, and on an Arduino sheet two such
+        // boxes, each holding three power flags and nothing else, took a fifth of the
+        // page under the heading "USB-Serial Bridge".
+        let symbols: Vec<Point2> = self
+            .symbols()
+            .filter(|s| !s.refdes().starts_with('#'))
+            .map(|s| s.at.point())
+            .collect();
         let stale: Vec<Rect> = self
             .items()
             .iter()
@@ -519,6 +529,20 @@ impl SchDoc {
 
 #[cfg(test)]
 mod tests {
+    /// A frame holding only generated power symbols is a frame with nothing in it.
+    #[test]
+    fn a_frame_around_power_flags_alone_is_dropped() {
+        let sheet = "(kicad_sch\n\t(version 20250114)\n\t(generator \"test\")\n\t(uuid \"4a1c0f2e-0000-4000-8000-0000000000dd\")\n\t(paper \"A4\")\n\t(lib_symbols)\n\t(rectangle\n\t\t(start 50 50)\n\t\t(end 100 100)\n\t\t(stroke (width 0) (type dash))\n\t\t(fill (type none))\n\t\t(uuid \"4a1c0f2e-0000-4000-8000-0000000000e1\")\n\t)\n\t(symbol\n\t\t(lib_id \"power:+5V\")\n\t\t(at 75 75 0)\n\t\t(unit 1)\n\t\t(uuid \"4a1c0f2e-0000-4000-8000-0000000000e2\")\n\t\t(property \"Reference\" \"#PWR01\" (at 75 75 0))\n\t\t(property \"Value\" \"+5V\" (at 75 75 0))\n\t)\n\t(sheet_instances\n\t\t(path \"/\"\n\t\t\t(page \"1\")\n\t\t)\n\t)\n)\n";
+        let mut doc = crate::SchDoc::parse(sheet).expect("parse");
+        doc.refit_page(&Default::default());
+        let frames = doc
+            .items()
+            .iter()
+            .filter(|item| matches!(item, crate::Item::Rectangle(_)))
+            .count();
+        assert_eq!(frames, 0, "a frame around a lone power flag survived");
+    }
+
     use super::*;
 
     /// A sheet whose content sits at negative coordinates — what a graft leaves behind.
