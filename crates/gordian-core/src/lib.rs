@@ -35,6 +35,7 @@ pub mod review;
 pub mod review_kicad;
 pub mod session;
 pub mod testing;
+mod thrash;
 pub mod tools;
 
 pub use agent::{Agent, AgentEvent, ContextStats, StopReason, TurnOutcome};
