@@ -429,6 +429,7 @@ fn place_parts_inner(
             )?;
             let mut warnings = typeset_warnings;
             warnings.extend(writer.layout_warnings());
+            warnings.extend(writer.unplaced_unit_warnings());
             warnings.extend(net_conflict_warnings(env, &writer, &placed, &inc));
             crate::realize::graft(doc, writer)?;
             Ok(warnings)
@@ -812,6 +813,7 @@ fn rearrange_inner(
             )?;
             let mut warnings = typeset_warnings;
             warnings.extend(writer.layout_warnings());
+            warnings.extend(writer.unplaced_unit_warnings());
             warnings.extend(net_conflict_warnings(env, &writer, &placed, &inc));
             let labelled = writer.signal_label_count();
             crate::realize::graft_drawing(doc, writer)?;
@@ -1239,7 +1241,7 @@ struct BoundaryNet {
     /// Every pin of this net outside the selection. All of them are named, not
     /// just one: erasing the selection's drawing can cut the held side into
     /// pieces too, and a name on each pin is what puts it back together.
-    held: Vec<Point2>,
+    held: Vec<Pose>,
 }
 
 impl BoundaryNet {
@@ -1257,9 +1259,11 @@ fn boundary_nets(
     sheet: &SheetPins,
     namer: &mut Namer,
 ) -> Vec<BoundaryNet> {
-    let at: HashMap<(String, String), Point2> = sch_doc::placed_pins(doc)
+    // The pin's own outward reading pose, not just its point: a label seated on a
+    // west-facing pin at the default angle runs back over the symbol's pin names.
+    let at: HashMap<(String, String), Pose> = sch_doc::placed_pins(doc)
         .into_iter()
-        .map(|pin| ((pin.refdes, pin.number), pin.at))
+        .map(|pin| ((pin.refdes.clone(), pin.number.clone()), pin.label_pose()))
         .collect();
     before
         .nets
@@ -1269,7 +1273,7 @@ fn boundary_nets(
             // drawing is made of carry a `#` reference and are replaced wholesale by
             // the redraw, so a label left on one of their pins would be left
             // floating in space — KiCAD's `label_dangling`.
-            let held: Vec<Point2> = net
+            let held: Vec<Pose> = net
                 .pins
                 .iter()
                 .filter(|pin| !chosen.contains(&pin.refdes) && !pin.refdes.starts_with('#'))
@@ -1311,14 +1315,16 @@ fn name_held_halves(doc: &mut SchDoc, boundary: &[BoundaryNet]) {
             continue;
         };
         for held in &net.held {
-            let piece = piece_at.get(&coord(*held)).map_or("", String::as_str);
+            let piece = piece_at
+                .get(&coord(Point2::new(held.x, held.y)))
+                .map_or("", String::as_str);
             if named.insert((piece, minted)) {
                 labels.push((minted.to_string(), *held));
             }
         }
     }
     for (name, at) in labels {
-        doc.add_label(sch_doc::LabelKind::Local, &name, Pose::new(at.x, at.y, 0.0));
+        doc.add_label(sch_doc::LabelKind::Local, &name, at);
     }
 }
 
@@ -1726,9 +1732,11 @@ fn promote_authored_nets(
         return Vec::new();
     }
     let authored = authored_pin_nets(doc);
-    let at: HashMap<(String, String), Point2> = sch_doc::placed_pins(doc)
+    // The pin's own outward reading pose, not just its point: a label seated on a
+    // west-facing pin at the default angle runs back over the symbol's pin names.
+    let at: HashMap<(String, String), Pose> = sch_doc::placed_pins(doc)
         .into_iter()
-        .map(|pin| ((pin.refdes, pin.number), pin.at))
+        .map(|pin| ((pin.refdes.clone(), pin.number.clone()), pin.label_pose()))
         .collect();
     // Which connected piece of the drawing each point belongs to, so a recorded net
     // spread over several gets one label per piece rather than one label in total.
@@ -1743,7 +1751,7 @@ fn promote_authored_nets(
         let Some(pins) = authored.get(net) else {
             continue;
         };
-        let places: Vec<Point2> = pins
+        let places: Vec<Pose> = pins
             .iter()
             .filter_map(|key| at.get(key).copied())
             .collect();
@@ -1752,10 +1760,11 @@ fn promote_authored_nets(
         }
         let mut pieces: BTreeSet<String> = BTreeSet::new();
         for place in places {
-            let piece = piece_at.get(&coord(place)).cloned().unwrap_or_default();
+            let point = Point2::new(place.x, place.y);
+            let piece = piece_at.get(&coord(point)).cloned().unwrap_or_default();
             if pieces.insert(piece) {
-                doc.add_label(LabelKind::Local, net, Pose::new(place.x, place.y, 0.0));
-                joined.insert(coord(place));
+                doc.add_label(LabelKind::Local, net, place);
+                joined.insert(coord(point));
             }
         }
         named.push(net.to_string());

@@ -20,10 +20,10 @@ fn two_pins_same_net_name_are_electrically_connected() {
         .unwrap();
     w.add_symbol(&env, "Device:R", "R2", "1k", [152.4, 63.5], 0.0)
         .unwrap();
-    w.add_pin_label(&env, "R1", "1", "SIG").unwrap();
-    w.add_pin_label(&env, "R2", "1", "SIG").unwrap();
-    w.add_pin_label(&env, "R1", "2", "GND").unwrap();
-    w.add_pin_label(&env, "R2", "2", "GND").unwrap();
+    w.add_signal_label(&env, "R1", "1", "SIG").unwrap();
+    w.add_signal_label(&env, "R2", "1", "SIG").unwrap();
+    w.add_signal_label(&env, "R1", "2", "GND").unwrap();
+    w.add_signal_label(&env, "R2", "2", "GND").unwrap();
     let text = w.finish();
 
     let tmp = tempfile::Builder::new()
@@ -76,8 +76,8 @@ fn rotated_symbols_pins_land_on_the_same_nets() {
     w.add_symbol(&env, "Device:R", "R3", "1k", [177.8, 63.5], 270.0)
         .unwrap();
     for r in ["R1", "R2", "R3"] {
-        w.add_pin_label(&env, r, "1", "SIG").unwrap();
-        w.add_pin_label(&env, r, "2", "GND").unwrap();
+        w.add_signal_label(&env, r, "1", "SIG").unwrap();
+        w.add_signal_label(&env, r, "2", "GND").unwrap();
     }
     let text = w.finish();
 

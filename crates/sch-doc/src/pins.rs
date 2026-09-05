@@ -98,6 +98,25 @@ impl PlacedPin {
             style: self.text,
         }
     }
+
+    /// Where a net label seated ON this pin must sit and which way it must read.
+    ///
+    /// The text runs OUTWARD, away from the body: a label written at the default
+    /// angle 0 on a west-facing pin reads back across the pin line and over the
+    /// symbol's own pin name — a hundred such collisions on one dense MCU.
+    pub fn label_pose(&self) -> Pose {
+        let rot = match (
+            self.out.x.abs() >= self.out.y.abs(),
+            self.out.x >= 0.0,
+            self.out.y >= 0.0,
+        ) {
+            (true, true, _) => 0.0,
+            (true, false, _) => 180.0,
+            (false, _, true) => 270.0,
+            (false, _, false) => 90.0,
+        };
+        Pose::new(self.at.x, self.at.y, rot)
+    }
 }
 
 /// Sub-symbol names inside a definition end in `_<unit>_<style>`.

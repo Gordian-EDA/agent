@@ -53,7 +53,7 @@ mod textsolve;
 
 // Re-export the public surface VERBATIM so external `crate::write::…` paths
 // resolve unchanged across the split.
-pub use build::{pin_end0, point_key};
+pub use build::{PinSeat, pin_end0, point_key};
 pub use caption::BlockFrame;
 pub use sch_model::geometry::quantize_dir;
 pub use emit::{escape_sexpr_string, fmt_coord};
@@ -145,9 +145,7 @@ pub(super) struct PinLabel {
     /// physical pins, each of which gets its own label.
     pub(super) uuid_key: String,
     /// Direction the stub points (away from the symbol body). Drives the label's
-    /// rotation angle + justification so the text reads away from the body. The
-    /// direct `add_pin_label` path defaults to `Dir::East` (angle 0, justify
-    /// left), keeping its output byte-identical to pre-stub emission.
+    /// rotation angle + justification so the text reads away from the body.
     pub(super) dir: Dir,
     /// The freedom the text solver has over this label.
     pub(super) anchor: Anchor,
@@ -274,6 +272,10 @@ pub struct SchematicWriter {
     /// label of this block that lands on one welds the block's net onto the sheet's.
     /// Empty for a whole-sheet build, which has no neighbours.
     pub(super) beside: sch_model::route::RouteScene,
+    /// `(refdes, unit)` pairs a pin was requested for while no instance draws that
+    /// unit. The pin is left undrawn rather than resolved at a foreign unit's
+    /// placement; [`SchematicWriter::unplaced_unit_warnings`] reports it.
+    pub(super) unplaced_units: BTreeSet<(String, u8)>,
 }
 
 impl SchematicWriter {
