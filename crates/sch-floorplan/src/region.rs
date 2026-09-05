@@ -156,10 +156,15 @@ fn occupied(frames: &[Rect], obstacles: &[Rect]) -> Vec<Rect> {
 /// The boxes the new blocks may be typeset for: on each standard page, the larger of the
 /// two free strips `there` leaves — beside it and under it — and then the whole pages.
 ///
-/// The strips come first so a block shapes itself to the room actually left; the whole
-/// pages follow so the list is never empty. An empty list is what dropped the typesetter
-/// into its no-page fallback, which packs a fixed 260 mm column whatever the sheet looks
-/// like — and a column is exactly what a nearly full sheet must not be handed.
+/// The strips come first so a GROUP of blocks arranges itself for the room actually left;
+/// the whole pages follow so the list is never empty. An empty list is what dropped the
+/// typesetter into its no-page fallback, which packs a fixed 260 mm column whatever the
+/// sheet looks like — and a column is exactly what a nearly full sheet must not be handed.
+///
+/// A box never changes how a single block is DRAWN: a block's arrangement comes from its
+/// author's tree and knows nothing of the page. So on the one-call-per-block path this
+/// list decides nothing at all — [`seat_beside`] re-seats the group and the packed origin
+/// cancels. It earns its keep only when one call carries several blocks.
 fn beside_pages(there: Rect) -> Vec<[f64; 2]> {
     let right = there.max_x + BLOCK_GAP - geom::PAGE_MARGIN;
     let under = there.max_y + BLOCK_GAP - geom::PAGE_MARGIN;
@@ -193,6 +198,14 @@ fn beside_pages(there: Rect) -> Vec<[f64; 2]> {
 /// cost a whole row or column of sheet per block: a 28x20 mm block grew the sheet by
 /// 12,815 mm². Nine blocks came out 2.9x the area the same nine pack into, and the
 /// sparsest agent sheets were exactly the ones built from the most calls.
+///
+/// What is left to win here is about one point. Measured over the nine multi-frame
+/// fixtures of the block replay: the drawn frames leave 32.4% of their hull empty, an
+/// OFFLINE optimal pack of the very same claims — free to reorder the blocks — leaves
+/// about 31%, and an offline optimal pack of the frames as DRAWN leaves 15%. The 16 points
+/// between the last two are not packing at all: a claim is an upper bound and comes out
+/// 18.4% larger in area than the frame the realiser then draws inside it. Only a pass that
+/// re-seats blocks once they are drawn can reclaim that; no landing rule can.
 fn seat_beside(movable: &mut [Item], frames: &[Rect], taken: &[Rect], drawn: &[Rect]) {
     let (Some(here), false) = (hull(frames), taken.is_empty()) else {
         return;

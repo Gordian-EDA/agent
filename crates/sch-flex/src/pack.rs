@@ -108,12 +108,19 @@ fn gapped(r: &Rect, gap: f64) -> Rect {
     Rect::new(r.min_x - m, r.min_y - m, r.max_x + m, r.max_y + m)
 }
 
-/// Every free landing for a box of `size` among `placed`, lowest then left-most first.
+/// The free landings for a box of `size` among `placed`, lowest then left-most first.
 ///
-/// The candidates are exactly the corners a bottom-left pack can use: beside and under
-/// each box already down, and the same corners projected back onto the page margins, so a
-/// block can slide up into the band a short neighbour leaves. `limit` is how far right of
-/// the margin the box may reach; `gap` is the air kept between two frames.
+/// The candidates are the corners a bottom-left pack can use: beside and under each box
+/// already down, and the same corners projected back onto the page margins, so a block can
+/// slide up into the band a short neighbour leaves. `limit` is how far right of the margin
+/// the box may reach; `gap` is the air kept between two frames.
+///
+/// This is deliberately not every position a box could legally take: the hole bounded by
+/// two DIFFERENT neighbours is named by no single box's corner. Offering those as well
+/// (the full cross-product of the candidate x and y edges) was measured over the 24-fixture
+/// block replay and left the sheets emptier, not fuller — the extra freedom is spent by
+/// [`crate::pack`]'s callers, which score a landing on the sheet it makes now and cannot
+/// see the blocks still to come.
 pub fn landings(placed: &[Rect], size: (f64, f64), limit: f64, gap: f64) -> Vec<Point2> {
     let (w, h) = size;
     let mut corners = vec![Point2::new(MARGIN, MARGIN)];
