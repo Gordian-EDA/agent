@@ -173,7 +173,7 @@ pub fn minted_net_names(doc: &SchDoc, parts: &[&BenchPart]) -> BTreeMap<String, 
     namer.hold_all(doc.labels().map(|label| sch_doc::unescape(&label.text)));
     namer.hold_all(on_net.keys().copied());
     let mut out = BTreeMap::new();
-    for (net, pins) in on_net.iter().filter(|(net, _)| is_derived_name(net)) {
+    for (net, pins) in on_net.iter().filter(|(net, _)| netname::is_kicad_derivation(net)) {
         let named = netname::derived_parts(net);
         let anchors: Vec<Anchor<'_>> = pins
             .iter()
@@ -193,11 +193,6 @@ pub fn minted_net_names(doc: &SchDoc, parts: &[&BenchPart]) -> BTreeMap<String, 
 }
 
 /// A name KiCAD generates from a net's own pins, which is therefore not a name at
-/// all: writing it down forks the net as soon as the partition moves.
-fn is_derived_name(net: &str) -> bool {
-    net.starts_with("Net-(") || net.starts_with("unconnected-(")
-}
-
 /// The nets the sheet already names globally, so a bench label joins them in the
 /// scope they are already drawn in rather than clashing with it.
 fn global_nets(doc: &SchDoc) -> BTreeSet<String> {
@@ -268,13 +263,6 @@ fn occupied(doc: &SchDoc) -> Rect {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn a_generated_name_is_never_written_as_a_label() {
-        assert!(is_derived_name("Net-(R1-Pad1)"));
-        assert!(is_derived_name("unconnected-(U1-PA0-Pad14)"));
-        assert!(!is_derived_name("VBUS"));
-    }
 
     #[test]
     fn the_bench_column_starts_clear_of_the_drawing() {

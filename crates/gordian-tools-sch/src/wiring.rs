@@ -5,7 +5,7 @@
 use anyhow::Result;
 use geom::{EPS, Point2, Rect, Segment};
 use gordian_runtime::AgentRuntime;
-use sch_doc::netname::{Anchor, Namer};
+use sch_doc::netname::{Anchor, Namer, SheetPins};
 use sch_doc::{LabelKind, SchDoc, connect, placed_pins};
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
@@ -221,7 +221,10 @@ fn connect_one(input: Value, ctx: &AgentRuntime) -> Result<Value> {
                     ),
                 }));
             }
-            let net = net.unwrap_or_else(|| fallback_name(&edit.doc, &from, &to));
+            let (Target::Pin(a), Target::Pin(b)) = (&from, &to) else {
+                unreachable!("a bare point was refused above")
+            };
+            let net = net.unwrap_or_else(|| fallback_name(&edit.doc, [a, b]));
             let reason = if across {
                 "the ends sit in different sections"
             } else if by_name {
@@ -469,26 +472,17 @@ fn joined(doc: &SchDoc, a: Point2, b: Point2) -> bool {
 ///
 /// Named after the more specific of the two pins it joins — `PB6` rather than
 /// `N_J4_11_U2_27`, which is what a person would have written.
-fn fallback_name(doc: &SchDoc, from: &Target, to: &Target) -> String {
-    let mut symbol_pins: std::collections::HashMap<String, usize> =
-        std::collections::HashMap::new();
-    for pin in placed_pins(doc) {
-        *symbol_pins.entry(pin.refdes).or_default() += 1;
-    }
-    let anchors: Vec<Anchor<'_>> = [from, to]
+fn fallback_name(doc: &SchDoc, ends: [&sch_doc::PlacedPin; 2]) -> String {
+    let sheet = SheetPins::of(&placed_pins(doc));
+    let anchors: Vec<Anchor<'_>> = ends
         .into_iter()
-        .filter_map(|target| match target {
-            Target::Pin(pin) => Some(Anchor {
-                refdes: &pin.refdes,
-                number: &pin.number,
-                pin_name: &pin.name,
-                symbol_pins: symbol_pins.get(&pin.refdes).copied().unwrap_or(1),
-            }),
-            Target::Point(_) => None,
-        })
+        .map(|pin| sheet.anchor(&pin.refdes, &pin.number))
         .collect();
     let mut namer = Namer::new();
     namer.hold_all(connect::extract(doc).nets.iter().map(|net| net.name.clone()));
+    // Labels this batch has already hung are not in the netlist yet, and two
+    // connections in a row must not be given the one name.
+    namer.hold_all(doc.labels().map(|label| sch_doc::unescape(&label.text)));
     namer.mint(&anchors)
 }
 

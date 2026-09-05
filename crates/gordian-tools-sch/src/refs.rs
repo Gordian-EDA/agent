@@ -3,9 +3,8 @@
 
 use geom::Point2;
 use kicad_symbol::SymbolTable;
-use sch_doc::netname::{Anchor, Namer};
+use sch_doc::netname::{Anchor, Namer, SheetPins};
 use sch_doc::{Netlist, PinRef, PlacedPin, SchDoc, placed_pins};
-use std::collections::HashMap;
 use serde_json::Value;
 
 /// One end of a connection the model asked for.
@@ -289,16 +288,7 @@ pub(crate) const NET_OF_PIN: char = '@';
 /// Named after the most specific pin the net touches, so the sheet ends up saying
 /// `SCL` where it used to say `N_U3_9`.
 fn minted_net_name(doc: &SchDoc, netlist: &Netlist, pin: &PlacedPin) -> String {
-    let mut symbol_pins: HashMap<&str, usize> = HashMap::new();
-    let mut named: HashMap<(&str, &str), &str> = HashMap::new();
-    let all = placed_pins(doc);
-    for placed in &all {
-        *symbol_pins.entry(placed.refdes.as_str()).or_default() += 1;
-        named.insert(
-            (placed.refdes.as_str(), placed.number.as_str()),
-            placed.name.as_str(),
-        );
-    }
+    let sheet = SheetPins::of(&placed_pins(doc));
     let on_net = netlist
         .nets
         .iter()
@@ -312,26 +302,17 @@ fn minted_net_name(doc: &SchDoc, netlist: &Netlist, pin: &PlacedPin) -> String {
     let mut anchors: Vec<Anchor<'_>> = on_net
         .iter()
         .filter(|p| !p.refdes.starts_with('#'))
-        .map(|p| Anchor {
-            refdes: &p.refdes,
-            number: &p.pin,
-            pin_name: named
-                .get(&(p.refdes.as_str(), p.pin.as_str()))
-                .copied()
-                .unwrap_or(""),
-            symbol_pins: symbol_pins.get(p.refdes.as_str()).copied().unwrap_or(1),
-        })
+        .map(|p| sheet.anchor(&p.refdes, &p.pin))
         .collect();
     if anchors.is_empty() {
-        anchors.push(Anchor {
-            refdes: &pin.refdes,
-            number: &pin.number,
-            pin_name: &pin.name,
-            symbol_pins: symbol_pins.get(pin.refdes.as_str()).copied().unwrap_or(1),
-        });
+        anchors.push(sheet.anchor(&pin.refdes, &pin.number));
     }
     let mut namer = Namer::new();
     namer.hold_all(netlist.nets.iter().map(|net| net.name.as_str()));
+    // The netlist is the sheet as it stood before this batch; the labels are the
+    // sheet as it stands NOW. A batch resolving several nameless nets in a row
+    // needs the second one to see what the first was just called.
+    namer.hold_all(doc.labels().map(|label| sch_doc::unescape(&label.text)));
     namer.mint(&anchors)
 }
 

@@ -6,7 +6,9 @@
 //! the agent asked for without naming — mints through [`Namer`] so they all read
 //! the same way.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+
+use crate::PlacedPin;
 
 /// A pin a nameless net could be named after.
 #[derive(Debug, Clone, Copy)]
@@ -20,16 +22,72 @@ pub struct Anchor<'a> {
     pub symbol_pins: usize,
 }
 
+/// What every pin drawn on one sheet is called, and how many pins its symbol has
+/// — what [`Namer`] needs to name a net after the most specific pin it touches.
+#[derive(Debug, Default)]
+pub struct SheetPins {
+    /// Ordered, so the pin a name resolves to is the same one every run: a
+    /// connector with `GND` on two pins must not answer differently twice.
+    name: BTreeMap<(String, String), String>,
+    count: HashMap<String, usize>,
+}
+
+impl SheetPins {
+    pub fn of(pins: &[PlacedPin]) -> SheetPins {
+        let mut out = SheetPins::default();
+        for pin in pins {
+            *out.count.entry(pin.refdes.clone()).or_default() += 1;
+            out.name
+                .insert((pin.refdes.clone(), pin.number.clone()), pin.name.clone());
+        }
+        out
+    }
+
+    /// `refdes.number` as a candidate to name its net after.
+    pub fn anchor<'a>(&'a self, refdes: &'a str, number: &'a str) -> Anchor<'a> {
+        Anchor {
+            refdes,
+            number,
+            pin_name: self
+                .name
+                .get(&(refdes.to_string(), number.to_string()))
+                .map_or("", String::as_str),
+            symbol_pins: self.symbol_pins(refdes),
+        }
+    }
+
+    pub fn symbol_pins(&self, refdes: &str) -> usize {
+        self.count.get(refdes).copied().unwrap_or(1)
+    }
+
+    /// The `(number, name)` of the pin `refdes` calls `id`, which may be either.
+    pub fn pin_of(&self, refdes: &str, id: &str) -> Option<(String, String)> {
+        self.name
+            .get(&(refdes.to_string(), id.to_string()))
+            .map(|name| (id.to_string(), name.clone()))
+            .or_else(|| {
+                self.name
+                    .iter()
+                    .find(|((r, _), name)| r == refdes && name.eq_ignore_ascii_case(id))
+                    .map(|((_, number), name)| (number.clone(), name.clone()))
+            })
+    }
+}
+
 /// Whether a net name was derived by a tool rather than written by an author.
 ///
 /// These are recomputed from the net's own pins, so writing one down as a label
 /// freezes a name that stops being true the moment a pin moves.
 pub fn is_derived(net: &str) -> bool {
-    net.starts_with("Net-(")
-        || net.starts_with("unconnected-(")
+    is_kicad_derivation(net)
         || net
             .strip_prefix("N$")
             .is_some_and(|rest| !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// Whether KiCAD itself computed this name from the net's pins.
+pub fn is_kicad_derivation(net: &str) -> bool {
+    net.starts_with("Net-(") || net.starts_with("unconnected-(")
 }
 
 /// The `(refdes, pin name)` KiCAD encoded into a `Net-(U1-NRST)` derivation.
@@ -92,7 +150,7 @@ impl Namer {
     /// Note every name on the sheet that nothing may be minted over.
     pub fn hold_all<S: AsRef<str>>(&mut self, names: impl IntoIterator<Item = S>) {
         for name in names {
-            self.held.entry(name.as_ref().to_string()).or_default();
+            self.hold(name.as_ref(), [] as [(String, String); 0]);
         }
     }
 
@@ -109,7 +167,7 @@ impl Namer {
         let mut ranked: Vec<&Anchor<'_>> = anchors.iter().collect();
         ranked.sort_by_key(|a| {
             (
-                std::cmp::Reverse(readable_pin_name(a.pin_name, a.number).is_some()),
+                std::cmp::Reverse(name_rank(a)),
                 std::cmp::Reverse(a.symbol_pins),
                 a.refdes,
                 a.number,
@@ -123,7 +181,14 @@ impl Namer {
             })
             .collect();
         let Some((fallback, fallback_key)) = candidates.last().cloned() else {
-            return "N_UNNAMED".to_string();
+            // Nothing to name it after — a net of rail terminals alone. It still
+            // needs a name of its OWN, or two of them would merge into one.
+            let name = std::iter::once("N_UNNAMED".to_string())
+                .chain((2..).map(|n| format!("N_UNNAMED_{n}")))
+                .find(|name| !self.held.contains_key(name))
+                .expect("the suffix space is unbounded");
+            self.held.entry(name.clone()).or_default();
+            return name;
         };
         let mine = candidates
             .iter()
@@ -147,6 +212,16 @@ impl Namer {
     }
 }
 
+/// How well a pin can name its net: a full name beats a diode's bare `K`, which
+/// beats a passive's `~`.
+fn name_rank(anchor: &Anchor<'_>) -> u8 {
+    match readable_pin_name(anchor.pin_name, anchor.number) {
+        Some(_) => 2,
+        None if short_pin_name(anchor.pin_name, anchor.number).is_some() => 1,
+        None => 0,
+    }
+}
+
 /// The names one pin offers its net, best first.
 fn names_for(anchor: &Anchor<'_>) -> Vec<String> {
     let mut out = Vec::new();
@@ -154,6 +229,10 @@ fn names_for(anchor: &Anchor<'_>) -> Vec<String> {
         if !looks_like_rail(&pin) {
             out.push(pin.clone());
         }
+        out.push(format!("{}_{}", identifier(anchor.refdes), pin));
+    } else if let Some(pin) = short_pin_name(anchor.pin_name, anchor.number) {
+        // A diode's `K` or a transistor's `G` says nothing on its own, but
+        // `D4_K` is still what a person would have called that node.
         out.push(format!("{}_{}", identifier(anchor.refdes), pin));
     }
     out.push(format!(
@@ -164,28 +243,52 @@ fn names_for(anchor: &Anchor<'_>) -> Vec<String> {
     out
 }
 
+/// A one-letter pin name — only ever used qualified by its designator.
+fn short_pin_name(name: &str, number: &str) -> Option<String> {
+    let name = as_label(name);
+    (name.len() == 1 && name != number && name.starts_with(|c: char| c.is_ascii_alphabetic()))
+        .then(|| name.to_ascii_uppercase())
+}
+
+/// Whether a pin's name can stand as its net's identity, bare or qualified.
+pub fn reads_as_name(name: &str, number: &str) -> bool {
+    readable_pin_name(name, number).is_some() || short_pin_name(name, number).is_some()
+}
+
 /// A pin name a reader would recognise as the net's identity.
 ///
 /// A passive's `~`, a connector's `Pin_3` and a transistor's single-letter `G`
-/// name nothing; `PB6`, `NRST`, `OSC_IN` and `VOUT` do.
+/// name nothing; `PB6`, `~{RESET}`, `SWDIO/TMS` and `VOUT` do.
 fn readable_pin_name(name: &str, number: &str) -> Option<String> {
-    let name = name.trim();
-    if name.len() < 2
-        || name == number
-        || !name.starts_with(|c: char| c.is_ascii_alphabetic())
-        || !name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
-        || name.eq_ignore_ascii_case("nc")
-        || is_placeholder(name)
-    {
-        return None;
+    let name = as_label(name);
+    (name.len() >= 2
+        && name != number
+        && name.starts_with(|c: char| c.is_ascii_alphabetic())
+        && !name.eq_ignore_ascii_case("nc")
+        && !is_placeholder(&name))
+    .then_some(name)
+}
+
+/// A pin name as a label: KiCAD's `~{…}` overbar markup dropped and every other
+/// separator folded to one `_`, so `SWDIO/TMS` reads `SWDIO_TMS` and `~{RESET}`
+/// reads `RESET`.
+fn as_label(name: &str) -> String {
+    let mut out = String::new();
+    for ch in name.trim().chars() {
+        match ch {
+            '~' | '{' | '}' => {}
+            ch if ch.is_ascii_alphanumeric() => out.push(ch),
+            _ if !out.ends_with('_') => out.push('_'),
+            _ => {}
+        }
     }
-    Some(name.to_string())
+    out.trim_matches('_').to_string()
 }
 
 /// `Pin_3`, `PIN12`, `PAD7` — a generic symbol's stand-in for a pin number.
 fn is_placeholder(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
-    for stem in ["pin_", "pin", "pad_", "pad", "p"] {
+    for stem in ["pin_", "pin", "pad_", "pad"] {
         if let Some(rest) = lower.strip_prefix(stem)
             && !rest.is_empty()
             && rest.bytes().all(|b| b.is_ascii_digit())
@@ -204,7 +307,6 @@ fn looks_like_rail(name: &str) -> bool {
         "GND", "VSS", "VDD", "VCC", "VEE", "AGND", "DGND", "VBAT", "VIN", "VBUS",
     ];
     RAILS.contains(&upper.as_str())
-        || upper.starts_with("+")
         || (upper.starts_with('V') && upper[1..].bytes().all(|b| b.is_ascii_digit()))
 }
 
@@ -253,6 +355,12 @@ mod tests {
     }
 
     #[test]
+    fn a_one_letter_pin_name_is_used_only_qualified() {
+        let mut namer = Namer::new();
+        assert_eq!(namer.mint(&[pin("D1", "2", "K", 2), pin("R4", "1", "~", 2)]), "D1_K");
+    }
+
+    #[test]
     fn a_rail_pin_name_is_qualified_rather_than_forking_the_supply() {
         let mut namer = Namer::new();
         assert_eq!(namer.mint(&[pin("U1", "8", "VDD", 8)]), "U1_VDD");
@@ -274,8 +382,18 @@ mod tests {
     }
 
     #[test]
+    fn kicad_markup_and_separators_survive_as_a_label() {
+        let mut namer = Namer::new();
+        assert_eq!(namer.mint(&[pin("U1", "7", "~{RESET}", 48)]), "RESET");
+        assert_eq!(namer.mint(&[pin("J5", "4", "SWDIO/TMS", 10)]), "SWDIO_TMS");
+    }
+
+    #[test]
     fn derived_names_are_recognised_and_parsed() {
         assert!(is_derived("Net-(U1-NRST)"));
+        assert!(is_kicad_derivation("unconnected-(U1-PA0-Pad14)"));
+        assert!(!is_kicad_derivation("N$14"));
+        assert!(!is_derived("VBUS"));
         assert!(is_derived("N$14"));
         assert!(!is_derived("N$PWR"));
         assert!(!is_derived("SCL"));

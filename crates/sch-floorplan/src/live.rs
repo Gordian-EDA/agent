@@ -40,7 +40,7 @@ use kicad_symbol::SymbolTable;
 use kicad_symbol::geometry::SymbolGeometry;
 use sch_check::model::{Block, Component, Design, PinTarget};
 use sch_check::{ExistingSheet, PayloadAudit, PlacePartsInput};
-use sch_doc::netname::{Anchor, Namer};
+use sch_doc::netname::{Anchor, Namer, SheetPins};
 use sch_doc::{LabelKind, NetSource, Netlist, Pose, SchDoc, connect};
 use sch_model::item::{Incidence, Item};
 use serde::{Deserialize, Serialize};
@@ -175,6 +175,11 @@ pub struct PlaceReport {
     /// had derived for that partition; the partition itself is unchanged.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub promoted: Vec<String>,
+    /// Machine-made net name → the readable one drawn in its place. The caller
+    /// asked for `Net-(U1-PB6)`; the sheet says `PB6`, and that is the name any
+    /// later call must use.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub renamed: BTreeMap<String, String>,
     /// Empty when the edit stands; otherwise the document was restored.
     pub mismatch: Mismatch,
     pub committed: bool,
@@ -462,6 +467,10 @@ fn place_parts_inner(
             true => promoted,
             false => Vec::new(),
         },
+        renamed: match committed {
+            true => readable,
+            false => BTreeMap::new(),
+        },
         mismatch,
         committed,
     })
@@ -667,7 +676,7 @@ fn rearrange_inner(
         // A net with a pin on both sides of the selection has to be reached by NAME:
         // the redraw draws the selection's own terminals only, so a wire run to where
         // a held pin's wire used to be reaches nothing.
-        let facts = pin_facts(doc);
+        let facts = SheetPins::of(&sch_doc::placed_pins(doc));
         let mut namer = net_namer(&before);
         let boundary = boundary_nets(doc, &before, &chosen, &facts, &mut namer);
         for net in &boundary {
@@ -1245,7 +1254,7 @@ fn boundary_nets(
     doc: &SchDoc,
     before: &Netlist,
     chosen: &BTreeSet<String>,
-    facts: &PinFacts,
+    sheet: &SheetPins,
     namer: &mut Namer,
 ) -> Vec<BoundaryNet> {
     let at: HashMap<(String, String), Point2> = sch_doc::placed_pins(doc)
@@ -1271,7 +1280,7 @@ fn boundary_nets(
             }
             Some(BoundaryNet {
                 mint: (net.source == sch_doc::NetSource::Auto)
-                    .then(|| namer.mint(&name_anchors(net, facts))),
+                    .then(|| namer.mint(&name_anchors(net, sheet))),
                 name: net.name.clone(),
                 held,
             })
@@ -1324,7 +1333,7 @@ fn name_held_halves(doc: &mut SchDoc, boundary: &[BoundaryNet]) {
 fn interior_mints(
     before: &Netlist,
     chosen: &BTreeSet<String>,
-    facts: &PinFacts,
+    sheet: &SheetPins,
     namer: &mut Namer,
 ) -> BTreeMap<String, String> {
     let mut out = BTreeMap::new();
@@ -1334,58 +1343,18 @@ fn interior_mints(
         if !chosen.contains(&lead.refdes) || !real.all(|pin| chosen.contains(&pin.refdes)) {
             continue;
         }
-        out.insert(net.name.clone(), namer.mint(&name_anchors(net, facts)));
+        out.insert(net.name.clone(), namer.mint(&name_anchors(net, sheet)));
     }
     out
 }
 
-/// What each pin on the sheet is called, and how many pins its symbol has — what
-/// [`Namer`] needs to name a net after the most specific pin it touches.
-#[derive(Debug, Default)]
-struct PinFacts {
-    name: HashMap<(String, String), String>,
-    symbol_pins: HashMap<String, usize>,
-}
-
-impl PinFacts {
-    /// The `(number, name)` of the pin `refdes` calls `id`, which may be either.
-    fn pin_of(&self, refdes: &str, id: &str) -> Option<(String, String)> {
-        self.name
-            .get(&(refdes.to_string(), id.to_string()))
-            .map(|name| (id.to_string(), name.clone()))
-            .or_else(|| {
-                self.name
-                    .iter()
-                    .find(|((r, _), name)| r == refdes && name.eq_ignore_ascii_case(id))
-                    .map(|((_, number), name)| (number.clone(), name.clone()))
-            })
-    }
-}
-
-fn pin_facts(doc: &SchDoc) -> PinFacts {
-    let mut facts = PinFacts::default();
-    for pin in sch_doc::placed_pins(doc) {
-        *facts.symbol_pins.entry(pin.refdes.clone()).or_default() += 1;
-        facts.name.insert((pin.refdes, pin.number), pin.name);
-    }
-    facts
-}
-
 /// The real pins of `net`, as candidates to name it after. Rail terminals and
 /// flags carry a `#` reference and name nothing.
-fn name_anchors<'a>(net: &'a sch_doc::Net, facts: &'a PinFacts) -> Vec<Anchor<'a>> {
+fn name_anchors<'a>(net: &'a sch_doc::Net, sheet: &'a SheetPins) -> Vec<Anchor<'a>> {
     net.pins
         .iter()
         .filter(|pin| !pin.refdes.starts_with('#'))
-        .map(|pin| Anchor {
-            refdes: &pin.refdes,
-            number: &pin.pin,
-            pin_name: facts
-                .name
-                .get(&(pin.refdes.clone(), pin.pin.clone()))
-                .map_or("", String::as_str),
-            symbol_pins: facts.symbol_pins.get(&pin.refdes).copied().unwrap_or(1),
-        })
+        .map(|pin| sheet.anchor(&pin.refdes, &pin.pin))
         .collect()
 }
 
@@ -1442,7 +1411,7 @@ fn readable_renames(
     // The pin a machine name spells out may belong to a part an EARLIER call
     // placed — a header joining an MCU's `Net-(U1-PB6)` mentions only the header.
     // Reading that pin off the sheet is what makes the two calls agree on `PB6`.
-    let facts = pin_facts(doc);
+    let facts = SheetPins::of(&sch_doc::placed_pins(doc));
     let mut out = BTreeMap::new();
     for (net, pins) in &on_net {
         let Some((spelled_ref, spelled_pin)) = sch_doc::netname::machine_parts(net) else {
@@ -1457,18 +1426,21 @@ fn readable_renames(
                 refdes: spelled_ref,
                 number,
                 pin_name: name,
-                symbol_pins: facts.symbol_pins.get(spelled_ref).copied().unwrap_or(1),
+                symbol_pins: facts.symbol_pins(spelled_ref),
             })
             .chain(pins.iter()
             .map(|pin| Anchor {
                 refdes: &pin.refdes,
                 number: &pin.number,
-                // The library is the truth about a pin's name; what the machine
-                // name spells out is the fallback for an unresolvable symbol.
-                pin_name: match (pin.pin_name.is_empty(), pin.refdes == spelled_ref) {
-                    (true, true) => spelled_pin,
-                    (true, false) => "",
-                    (false, _) => pin.pin_name.as_str(),
+                // The library names the pin, but a library name that reads as
+                // nothing — `Pin_6`, or a symbol nothing could resolve — loses to
+                // what the machine name itself spells out, which is where the
+                // author's `SWO_TDO` survives.
+                pin_name: match pin.refdes == spelled_ref
+                    && !sch_doc::netname::reads_as_name(&pin.pin_name, &pin.number)
+                {
+                    true => spelled_pin,
+                    false => pin.pin_name.as_str(),
                 },
                 symbol_pins: pin.symbol_pins,
             }))
