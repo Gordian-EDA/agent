@@ -36,8 +36,10 @@ async fn the_loop_reads_swaps_and_checks_a_live_schematic() {
             json!({"ref": "R1", "lib_id": "Device:R_Small"}),
         ),
         tool_call("t4", "check_schematic", json!({})),
-        // The loop asks a part-creating turn to check its part list against the
-        // request before its summary stands, so "done" is said twice.
+        // The loop asks a part-creating turn both to check its part list against
+        // the request and to let the visual critic see the sheet, so "done" is
+        // said more than once.
+        final_text("done"),
         final_text("done"),
         final_text("done: R1 and R2 are on the sheet"),
     ];
@@ -86,6 +88,7 @@ async fn moving_a_symbol_preserves_connectivity() {
             json!({"moves": [{"ref": "R2", "by": [0.0, 25.4]}]}),
         ),
         tool_call("t3", "check_schematic", json!({})),
+        final_text("done"),
         final_text("done"),
         final_text("done: R1 and R2 are on the sheet"),
     ];

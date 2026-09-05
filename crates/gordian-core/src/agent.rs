@@ -279,6 +279,15 @@ const MAX_COVERAGE_NUDGES: usize = 1;
 /// start it before final prose is rejected by the end-to-end quality gate.
 const MAX_PCB_COMPLETION_NUDGES: usize = 1;
 
+/// One chance, before a turn that drew or re-arranged parts ends, to let the
+/// visual critic see the sheet.
+///
+/// The review loop is what the drawing is actually judged by, and half the runs
+/// that produce a sheet never call it: the prompt asks, and nothing enforces it.
+/// Like the coverage check it is asked once and never re-armed — the answer is a
+/// loop the model then owns, not a question to repeat after every `arrange`.
+const MAX_REVIEW_NUDGES: usize = 1;
+
 /// Events the agent loop emits as it runs, for a live UI. Headless paths pass
 /// `None` and never see these.
 #[derive(Clone, Debug)]
@@ -720,7 +729,13 @@ impl<P: Provider> Agent<P> {
     /// a round that comes back below the best is named as the regression it is,
     /// with the round to go back to — the model owns the layout trees, so it can.
     fn against_the_best(&self, mut value: Value) -> Value {
-        let Some(score) = value.get("score").and_then(Value::as_f64) else {
+        // The mean of the samples, not its rounding: a half-point regression is
+        // exactly what the extra samples exist to see.
+        let Some(score) = value
+            .get("mean")
+            .or_else(|| value.get("score"))
+            .and_then(Value::as_f64)
+        else {
             return value;
         };
         let round = self.review_round.fetch_add(1, Ordering::Relaxed) + 1;
@@ -940,9 +955,12 @@ impl<P: Provider> Agent<P> {
         let mut schematic_mutated = false;
         let mut schematic_check_complete = false;
         let mut successful_place_parts = 0usize;
+        let mut parts_drawn_or_moved = false;
+        let mut sheet_reviewed = false;
         let mut check_nudges_left = MAX_ERC_CLEANUP_NUDGES;
         let mut pcb_completion_nudges_left = MAX_PCB_COMPLETION_NUDGES;
         let mut coverage_nudges_left = MAX_COVERAGE_NUDGES;
+        let mut review_nudges_left = MAX_REVIEW_NUDGES;
         let mut provider_requests = self.turn_requests;
         let mut provider_error_retries_left = MAX_PROVIDER_ERROR_RETRIES;
         let mut stream_transport_available = true;
@@ -1104,6 +1122,11 @@ impl<P: Provider> Agent<P> {
                     )));
                     continue;
                 }
+                if parts_drawn_or_moved && !sheet_reviewed && review_nudges_left > 0 {
+                    review_nudges_left -= 1;
+                    self.history.push(ChatMessage::user(REVIEW_SCHEMATIC_NUDGE));
+                    continue;
+                }
                 return Ok(TurnOutcome {
                     applied,
                     final_text: text,
@@ -1253,11 +1276,19 @@ impl<P: Provider> Agent<P> {
                     if matches!(call.fn_name.as_str(), "place_parts" | "add_parts") {
                         successful_place_parts += 1;
                     }
+                    parts_drawn_or_moved |= matches!(
+                        call.fn_name.as_str(),
+                        "place_parts" | "add_parts" | "arrange"
+                    );
                     schematic_check_complete = successful_place_parts > 1
                         && parsed
                             .get("check_schematic")
                             .is_some_and(check_schematic_is_complete);
                 }
+                // Any dispatched review counts: the gate enforces that the critic
+                // was consulted, and a model whose critic is unavailable (no vision,
+                // a timeout) gains nothing from being told to consult it again.
+                sheet_reviewed |= dispatched && call.fn_name == "review_schematic";
                 if dispatched && call.fn_name == "check_schematic" {
                     let complete = check_schematic_is_complete(&parsed);
                     if schematic_mutated {
@@ -2000,6 +2031,15 @@ fn coverage_nudge(drawn: &[String], floor: Option<usize>) -> String {
         }
     )
 }
+
+/// Asked of a turn that drew or re-arranged parts and never let the critic see
+/// the result. It hands over the loop rather than one more instruction: the
+/// stopping rule is the tool's own mean, not this message.
+const REVIEW_SCHEMATIC_NUDGE: &str =
+    "Before you finish: this turn drew or re-arranged parts and never reviewed the sheet. \
+     Call review_schematic now. If the `mean` is below 8, fix the blocks its defects name \
+     with arrange and review again; finish only when the mean reaches 8 or has stopped \
+     improving. State the final mean in your summary.";
 
 fn pcb_completion_nudge(missing: &[&str]) -> String {
     format!(
@@ -2857,6 +2897,25 @@ mod tests {
         assert!(!outcome.final_text.contains("Partial state"));
     }
 
+    /// Every text the loop put in front of the model, flattened — what a nudge
+    /// assertion reads.
+    fn asked_of_the_model(seen: &std::sync::Mutex<Vec<Vec<ChatMessage>>>) -> String {
+        seen.lock()
+            .unwrap()
+            .iter()
+            .flatten()
+            .flat_map(|message| {
+                message
+                    .content
+                    .texts()
+                    .into_iter()
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     /// A turn that drew a sheet may not end on its first "done": nothing else in
     /// the loop has seen the request, so the model is asked to check the drawn part
     /// list against it before its summary stands.
@@ -2878,6 +2937,7 @@ mod tests {
             crate::testing::final_text("Done: the divider is drawn."),
             crate::testing::final_text("Done: the divider is drawn."),
             crate::testing::final_text("Done: the divider is drawn."),
+            crate::testing::final_text("Done: the divider is drawn."),
             crate::testing::final_text("R1 and R2 are on the sheet; nothing else was asked for."),
         ];
         let (client, seen) = ScriptedClient::recording(script);
@@ -2889,21 +2949,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(outcome.stop_reason, StopReason::Completed);
-        let asked = seen
-            .lock()
-            .unwrap()
-            .iter()
-            .flatten()
-            .flat_map(|message| {
-                message
-                    .content
-                    .texts()
-                    .into_iter()
-                    .map(str::to_owned)
-                    .collect::<Vec<_>>()
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
+        let asked = asked_of_the_model(&seen);
         assert!(
             asked.contains("list every part it named"),
             "the coverage check never ran: {asked}"
@@ -2911,6 +2957,91 @@ mod tests {
         assert!(
             asked.contains("R1, R2"),
             "the nudge did not show the parts drawn: {asked}"
+        );
+    }
+
+    /// Half the runs that drew a sheet never let the critic see it. A turn that
+    /// drew or moved parts is asked once, before its summary stands.
+    #[tokio::test]
+    async fn a_drawn_sheet_is_sent_to_the_critic_before_the_turn_ends() {
+        let Some(ctx) = AgentRuntime::detect_for_test() else {
+            eprintln!("SKIP: no KiCAD detected");
+            return;
+        };
+        let script = vec![
+            crate::testing::tool_call(
+                "place",
+                "place_parts",
+                json!({"parts": [
+                    {"ref": "R1", "part": "Device:R", "pins": {"1": "IN", "2": "MID"}},
+                    {"ref": "R2", "part": "Device:R", "pins": {"1": "MID", "2": "GND"}}
+                ]}),
+            ),
+            crate::testing::final_text("Done."),
+            crate::testing::final_text("Done."),
+            crate::testing::final_text("Done."),
+            crate::testing::final_text("Done."),
+            crate::testing::final_text("Done."),
+        ];
+        let (client, seen) = ScriptedClient::recording(script);
+        let mut agent = Agent::new(client, ctx, system_prompt());
+
+        let outcome = agent
+            .run_turn("Draw a two-resistor divider.", None)
+            .await
+            .unwrap();
+
+        assert_eq!(outcome.stop_reason, StopReason::Completed);
+        let asked = asked_of_the_model(&seen);
+        let nudges = asked.matches("never reviewed the sheet").count();
+        assert_eq!(nudges, 1, "the review gate fired {nudges} times: {asked}");
+        assert!(asked.contains("mean` is below 8"), "{asked}");
+    }
+
+    /// ...and only of a turn that did not review. One call is the whole gate; the
+    /// stopping rule after it belongs to the critic's own mean.
+    #[tokio::test]
+    async fn a_turn_that_already_reviewed_is_not_asked_again() {
+        let Some(ctx) = AgentRuntime::detect_for_test() else {
+            eprintln!("SKIP: no KiCAD detected");
+            return;
+        };
+        let mut script = vec![
+            crate::testing::tool_call(
+                "place",
+                "place_parts",
+                json!({"parts": [
+                    {"ref": "R1", "part": "Device:R", "pins": {"1": "IN", "2": "MID"}},
+                    {"ref": "R2", "part": "Device:R", "pins": {"1": "MID", "2": "GND"}}
+                ]}),
+            ),
+            crate::testing::tool_call("review", "review_schematic", json!({})),
+        ];
+        // The critic is the model itself: one scripted verdict per grading sample.
+        script.extend((0..gordian_tools_sch::review::SAMPLES).map(|_| {
+            crate::testing::final_text(
+                r#"FINAL_JSON: {"score": 8, "summary": "reads well", "defects": []}"#,
+            )
+        }));
+        script.extend([
+            crate::testing::final_text("Done."),
+            crate::testing::final_text("Done."),
+            crate::testing::final_text("Done."),
+            crate::testing::final_text("Reviewed at a mean of 8; R1 and R2 are on the sheet."),
+        ]);
+        let (client, seen) = ScriptedClient::recording(script);
+        let mut agent = Agent::new(client, ctx, system_prompt());
+
+        let outcome = agent
+            .run_turn("Draw a two-resistor divider.", None)
+            .await
+            .unwrap();
+
+        assert_eq!(outcome.stop_reason, StopReason::Completed);
+        let asked = asked_of_the_model(&seen);
+        assert!(
+            !asked.contains("never reviewed the sheet"),
+            "the review gate fired on a turn that reviewed: {asked}"
         );
     }
 
