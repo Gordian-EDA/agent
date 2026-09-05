@@ -1,17 +1,18 @@
 //! Which part a support part SERVES, and on which side of it.
 //!
-//! A decoupler, a pull-up, a reset cap, a crystal load cap: two pins, one on a rail, the
-//! other on a net that reaches one unambiguous part. A human draws it beside the pin it
-//! serves — a five-millimetre wire, and the node never needs a name. This is the relation
-//! that says which pin that is, so the typesetter can seat the part there whenever the
-//! author left it no place of its own.
+//! A decoupler, a pull-up, a reset cap: two pins, one on a rail, and the other alone on a
+//! net with one device. A human draws it beside the pin it serves — a five-millimetre
+//! wire, and the node never needs a name. This is the relation that says which pin that
+//! is, so the typesetter can seat the part there whenever the author left it no place of
+//! its own.
 //!
-//! A net that reaches two devices is a signal, not a service: nobody can seat one cap
-//! beside both ends, and the humans do not try.
+//! A net that reaches anything ELSE as well is a node, not a service: nobody can seat one
+//! part beside both ends of it, and moving it to one end is what turns a node somebody had
+//! already drawn as wire into a pair of labels.
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use circuit_graph::netclass::is_power_net;
+use circuit_graph::netclass::{is_connector_like, is_power_net};
 use geom::Dir;
 use sch_model::geometry::quantize_dir;
 use sch_model::item::Item;
@@ -61,24 +62,12 @@ pub(crate) fn serving(items: &[Item], members: &[usize]) -> BTreeMap<usize, Serv
             .copied()
             .filter(|(j, _)| *j != i)
             .collect();
-        let links: Vec<(usize, &str)> = others
-            .iter()
-            .copied()
-            .filter(|(j, _)| links_a_chain(&items[*j]))
-            .collect();
-        let devices: Vec<(usize, &str)> = others
-            .iter()
-            .copied()
-            .filter(|(j, _)| items[*j].pins.len() >= 3)
-            .collect();
-        // A part the signal passes THROUGH wins over the device at the end of the net: a
-        // crystal's load cap reaches the crystal AND the MCU, and the pair a human draws
-        // is the cap with its crystal. Anything else has to be unambiguous.
-        let (served, pin) = match (links.len(), devices.len(), others.len()) {
-            (1, _, _) => links[0],
-            (0, 1, _) => devices[0],
-            (0, 0, 1) => others[0],
-            _ => continue,
+        // Exactly one other part on the net, or this is a NODE rather than a service:
+        // a pull-up that also feeds a motor, a cap between a crystal and its MCU. Seating
+        // the part beside one of them tears it away from the other, and a node already
+        // drawn as wire comes apart into a label pair.
+        let [(served, pin)] = others[..] else {
+            continue;
         };
         if !here.contains(&served) {
             continue;
@@ -86,11 +75,7 @@ pub(crate) fn serving(items: &[Item], members: &[usize]) -> BTreeMap<usize, Serv
         let Some(geom) = items[served].geom.pins.iter().find(|p| p.number == pin) else {
             continue;
         };
-        // A leg off a two-pin node is left exactly where its author put it. Moving one
-        // reorders the row it stands in — the divider reads backwards, the timing cap ends
-        // up past the resistor it times — and a chain already drawn as wire comes apart
-        // into two halves bridged by a label. Only a DEVICE has a pin worth moving to.
-        if links_a_chain(&items[served]) {
+        if !seatable_against(&items[served]) {
             continue;
         }
         out.insert(
@@ -110,13 +95,24 @@ pub(crate) fn serving(items: &[Item], members: &[usize]) -> BTreeMap<usize, Serv
     out
 }
 
-/// A part the signal passes THROUGH: two pins, or a discrete whose only other pins are
-/// rails — a crystal, shield pins and all. A support part belongs beside one of these
-/// before it belongs beside the device at the far end of the net.
-fn links_a_chain(item: &Item) -> bool {
+/// Whether a support part can be seated against this one at all.
+///
+/// A DEVICE: enough pins to have sides, and not a part people plug into or press. A part
+/// the signal passes THROUGH — two pins, or a discrete whose only other pins are rails, a
+/// crystal shield and all — keeps its place in the chain it links, and seating something
+/// against it only reorders that chain. Nor is a MECHANICAL part a device: a connector, a
+/// jumper, a switch. The typesetter deliberately never puts a column on a connector's pin
+/// lines, so a part seated against one lands beside nothing and takes its old neighbours'
+/// drawing with it — and nobody stacks decoupling caps along the edge of a switch either.
+fn seatable_against(item: &Item) -> bool {
     let rails = |net: &Option<String>| net.as_deref().is_some_and(is_power_net);
     let signal = item.pins.iter().filter(|(_, _, net)| !rails(net)).count();
-    signal == 2 && (item.pins.len() == 2 || item.part.starts_with("Device:"))
+    let links_a_chain = signal == 2 && (item.pins.len() == 2 || item.part.starts_with("Device:"));
+    let mechanical = is_connector_like(&item.part)
+        || item.part.starts_with("Switch:")
+        || item.refdes.starts_with('J')
+        || item.refdes.starts_with("SW");
+    item.pins.len() >= 3 && !links_a_chain && !mechanical
 }
 
 /// The net a two-pin part's non-rail pin sits on, when its other pin sits on a rail.
