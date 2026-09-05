@@ -104,6 +104,16 @@ pub fn route_edge(
         ys.push(grid.snap_down(r.min_y - CLEAR_MM));
         ys.push(grid.snap_up(r.max_y + CLEAR_MM));
     }
+    // And around drawn ink — bodies and pin text — for the same reason: without a
+    // lane past it the only answer to a body in the way is a net label.
+    for ink in &scene.ink {
+        for r in &ink.boxes {
+            xs.push(grid.snap_down(r.min_x - CLEAR_MM));
+            xs.push(grid.snap_up(r.max_x + CLEAR_MM));
+            ys.push(grid.snap_down(r.min_y - CLEAR_MM));
+            ys.push(grid.snap_up(r.max_y + CLEAR_MM));
+        }
+    }
     xs.push(grid.snap((a.x + b.x) / 2.0));
     ys.push(grid.snap((a.y + b.y) / 2.0));
     xs.push(a.x + LEAD_MM);
@@ -318,7 +328,28 @@ mod tests {
                 .collect(),
             segments,
             label_solids: Vec::new(),
+            ink: Vec::new(),
         }
+    }
+
+    #[test]
+    fn a_route_detours_around_drawn_ink() {
+        use sch_model::route::SymbolInk;
+        let mut s = scene(Vec::new(), Vec::new(), Vec::new());
+        s.ink.push(SymbolInk {
+            boxes: vec![Rect::new(5.0, -3.0, 15.0, 3.0)],
+            pins: Vec::new(),
+        });
+        let p = route_edge(
+            Point2::new(0.0, 0.0),
+            Dir::East,
+            Point2::new(25.0, 0.0),
+            "SIG",
+            &s,
+        )
+        .expect("a lane past the ink exists");
+        assert!(path_ok(&p, "SIG", &s));
+        assert!(p.len() > 2, "a straight run would cross the ink: {p:?}");
     }
 
     fn net_segment(a: Point2, b: Point2, net: &str) -> NetSegment {

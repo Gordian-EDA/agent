@@ -587,22 +587,6 @@ impl SchematicWriter {
         }
     }
 
-    /// What a placed instance DRAWS, as solved text must see it: the graphics of
-    /// its own unit, read from the very definition the writer will embed, posed
-    /// onto the sheet.
-    ///
-    /// This is the same shape [`sch_doc::body_rect`] hands the visual audit, so
-    /// a seat the solver calls clear is one the render shows clear. Every text
-    /// object — rail names, net labels, field pairs — dodges it and not the
-    /// padded placement cell: the cell is a placement clearance, floored to
-    /// 10 mm square for a one-pin power symbol and bounding a multi-unit part's
-    /// every unit at once, so text solved against it finds open paper blocked
-    /// and lands on its neighbour instead.
-    fn symbol_ink(&self, inst: &super::Instance) -> Rect {
-        self.definition_box(inst)
-            .unwrap_or_else(|| crate::write::build::ink_box(inst))
-    }
-
     /// Every power symbol's glyph and seated rail name.
     ///
     /// A part's power pins hang their rails off one side of it, and an IC's
@@ -628,27 +612,10 @@ impl SchematicWriter {
             .collect()
     }
 
-    /// The name/number text THIS instance draws — its own unit's pins only.
-    ///
-    /// `sym_pins` holds every unit's pins flattened together, so boxing them
-    /// all at one instance stamps a five-unit part's whole pin list onto each
-    /// of its five placements and walls off the paper around every one.
-    fn unit_pin_text(&self, inst: &super::Instance) -> Vec<Rect> {
-        self.sym_pins
-            .get(&inst.lib_id)
-            .into_iter()
-            .flatten()
-            .filter(|pg| pg.unit.max(1) == inst.unit.max(1))
-            .flat_map(|pg| {
-                sch_model::text::pin_text_boxes(pg, inst.at, inst.angle, inst.mirror)
-            })
-            .collect()
-    }
-
     /// Out to the pin tips: where a field pair may first stand without covering
     /// the part or the pins it hangs on.
     fn symbol_extent(&self, inst: &super::Instance) -> Rect {
-        let ink = self.symbol_ink(inst);
+        let ink = self.definition_ink(inst);
         let pins = self.sym_pins.get(&inst.lib_id).and_then(|pins| {
             sch_model::text::unit_extent_box(pins, inst.unit, inst.at, inst.angle, inst.mirror)
         });
@@ -663,34 +630,6 @@ impl SchematicWriter {
         }
     }
 
-    /// The instance's unit box from its embedded definition, posed onto the
-    /// sheet. Memoized per `(lib_id, unit)`: the definition of a 121-pin FPGA is
-    /// tens of kilobytes and the solver asks for it once per instance per pass.
-    fn definition_box(&self, inst: &super::Instance) -> Option<Rect> {
-        thread_local! {
-            static LOCAL_BOX: std::cell::RefCell<BTreeMap<(String, u8), Option<Rect>>> =
-                const { std::cell::RefCell::new(BTreeMap::new()) };
-        }
-        let key = (inst.lib_id.clone(), inst.unit);
-        let local = LOCAL_BOX.with(|memo| {
-            *memo.borrow_mut().entry(key).or_insert_with(|| {
-                let def = self.lib_symbols.get(&inst.lib_id)?;
-                sch_doc::definition_unit_box(def, inst.unit)
-            })
-        })?;
-        let corners = [
-            Point2::new(local.min_x, local.min_y),
-            Point2::new(local.max_x, local.min_y),
-            Point2::new(local.min_x, local.max_y),
-            Point2::new(local.max_x, local.max_y),
-        ]
-        .map(|p| {
-            let off = p.transform_offset(inst.angle, inst.mirror);
-            Point2::new(inst.at[0] + off.x, inst.at[1] + off.y)
-        });
-        Rect::bounding(&corners)
-    }
-
     /// Everything solved text must avoid: symbol bodies (angle-aware, exempt
     /// for their own refdes), pin name/number text, wires, no-connect markers,
     /// and fixed (stub-less) labels.
@@ -699,7 +638,7 @@ impl SchematicWriter {
         let mut obstacles: Vec<Obstacle> = Vec::new();
         for inst in &self.instances {
             obstacles.push(Obstacle {
-                bbox: self.symbol_ink(inst),
+                bbox: self.definition_ink(inst),
                 owner: Some(Owner::Symbol(inst.refdes.clone())),
             });
             // Pin name/number text (skip power/flag graphics — single
@@ -772,7 +711,7 @@ impl SchematicWriter {
             let b = sch_model::text::label_box(at, dir, &label.net);
             self.instances.iter().all(|inst| {
                 inst.refdes.starts_with('#')
-                    || (!self.symbol_ink(inst).overlaps(&b)
+                    || (!self.definition_ink(inst).overlaps(&b)
                         && !self.unit_pin_text(inst).iter().any(|pb| pb.overlaps(&b)))
             })
         };
@@ -1081,7 +1020,7 @@ impl SchematicWriter {
         // instead put a whole ring of far seats ahead of a near one on another
         // side, which is how a refdes came to stand beyond the ground symbol
         // under its part with clear paper directly above it.
-        let ink = self.symbol_ink(inst);
+        let ink = self.definition_ink(inst);
         let mut cands: Vec<(FieldSeat, usize, usize)> = FIELD_PAD_RINGS
             .iter()
             .enumerate()
@@ -1635,7 +1574,7 @@ impl SchematicWriter {
             if inst.refdes.starts_with('#') {
                 continue;
             }
-            if inst.refdes != own_refdes && self.symbol_ink(inst).overlaps(&b) {
+            if inst.refdes != own_refdes && self.definition_ink(inst).overlaps(&b) {
                 return false;
             }
             if self.unit_pin_text(inst).iter().any(|pb| pb.overlaps(&b)) {
@@ -1709,7 +1648,7 @@ impl SchematicWriter {
             }
             items.push((
                 format!("symbol {}", inst.refdes),
-                self.symbol_ink(inst),
+                self.definition_ink(inst),
                 inst.refdes.clone(),
                 Kind::Body,
             ));

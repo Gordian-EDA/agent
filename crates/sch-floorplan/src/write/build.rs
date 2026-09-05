@@ -10,7 +10,7 @@ use kicad::KicadInstallation;
 use kicad_symbol::geometry::{PinGeom, SymbolGeometry};
 use sch_model::geometry::{pin_endpoint, quantize_dir};
 
-use sch_model::route::{DrawnSegment, NetSegment};
+use sch_model::route::{DrawnSegment, NetSegment, SymbolInk};
 
 use super::{
     Anchor, Dir, Instance, Junction, NoConnect, PinLabel, SchematicWriter, SheetRect, SheetText,
@@ -163,7 +163,7 @@ impl SchematicWriter {
     ///
     /// Displacing the label off the pin endpoint risks landing it on a *foreign*
     /// connection point (most often a horizontal power pin's power symbol, which
-    /// `emit_power_pin` parks one row over via a riser): a label there would
+    /// `emit_rail` parks one row over via a riser): a label there would
     /// silently merge two nets. No fixed stub length is collision-free in a dense
     /// auto-placed sheet. So the label/stub is recorded as *retractable* and a
     /// finalize pass ([`SchematicWriter::retract_colliding_stubs`]) drops the stub
@@ -648,14 +648,100 @@ impl SchematicWriter {
         out
     }
 
+
+    /// The INK one placed instance draws, as a routing obstacle: its own unit's body
+    /// graphics and its own unit's pin name/number text, with its pin connection points.
+    ///
+    /// The body comes from the definition the writer will embed, posed onto the sheet —
+    /// the same shape `sch_doc::body_rect` hands the visual audit, so a route the router
+    /// calls clear is one the render shows clear. [`ink_box`] cannot stand in for it: it
+    /// is a box CENTRED on the placement origin, and a symbol whose graphics sit off that
+    /// origin (a crystal's plates, a regulator's tab) leaves real ink outside it — which
+    /// is where every measured wire-through-body ran.
+    ///
+    /// Field text is deliberately absent: `solve_text_positions` seats it after the
+    /// wires are drawn, so a box reserved here would guard paper the text has left.
+    fn symbol_ink(&self, inst: &Instance) -> SymbolInk {
+        let mut boxes = vec![self.definition_ink(inst)];
+        if !inst.refdes.starts_with('#') {
+            boxes.extend(self.unit_pin_text(inst));
+        }
+        SymbolInk {
+            boxes,
+            pins: self.unit_pin_points(inst),
+        }
+    }
+
+    /// `inst`'s unit box read off its embedded definition and posed onto the sheet,
+    /// falling back to [`ink_box`] when the definition does not parse.
+    ///
+    /// Memoized per `(lib_id, unit)`: a routing pass asks for the scene once per net,
+    /// and the definition of a 121-pin FPGA is tens of kilobytes.
+    pub(super) fn definition_ink(&self, inst: &Instance) -> Rect {
+        thread_local! {
+            static LOCAL_BOX: std::cell::RefCell<
+                std::collections::BTreeMap<(String, u8), Option<Rect>>,
+            > = const { std::cell::RefCell::new(std::collections::BTreeMap::new()) };
+        }
+        let local = LOCAL_BOX.with(|memo| {
+            *memo
+                .borrow_mut()
+                .entry((inst.lib_id.clone(), inst.unit))
+                .or_insert_with(|| {
+                    sch_doc::definition_unit_box(self.lib_symbols.get(&inst.lib_id)?, inst.unit)
+                })
+        });
+        let Some(local) = local else {
+            return ink_box(inst);
+        };
+        let corners = [
+            Point2::new(local.min_x, local.min_y),
+            Point2::new(local.max_x, local.min_y),
+            Point2::new(local.min_x, local.max_y),
+            Point2::new(local.max_x, local.max_y),
+        ]
+        .map(|p| {
+            let off = p.transform_offset(inst.angle, inst.mirror);
+            Point2::new(inst.at.x + off.x, inst.at.y + off.y)
+        });
+        Rect::bounding(&corners).unwrap_or_else(|| ink_box(inst))
+    }
+
+    /// The name/number text `inst`'s OWN unit draws. `sym_pins` flattens every unit's
+    /// pins together, so boxing them all at one instance walls off the paper around
+    /// every placement of a multi-unit part.
+    pub(super) fn unit_pin_text(&self, inst: &Instance) -> Vec<Rect> {
+        self.unit_pins(inst)
+            .flat_map(|pg| sch_model::text::pin_text_boxes(pg, inst.at, inst.angle, inst.mirror))
+            .collect()
+    }
+
+    /// Where `inst`'s own unit's pins connect — the points its own wires leave from.
+    fn unit_pin_points(&self, inst: &Instance) -> Vec<Point2> {
+        self.unit_pins(inst)
+            .map(|pg| Point2::from(pin_endpoint(pg, inst.at, inst.angle, inst.mirror)))
+            .collect()
+    }
+
+    fn unit_pins(&self, inst: &Instance) -> impl Iterator<Item = &PinGeom> {
+        self.sym_pins
+            .get(&inst.lib_id)
+            .into_iter()
+            .flatten()
+            .filter(move |pg| pg.unit.max(1) == inst.unit.max(1))
+    }
+
     /// Build the routing obstacle scene from everything placed so far.
     ///
     /// Solids are symbol bodies SHRUNK by 2.54 mm per side: `approx_size` pads
     /// 2.54 beyond the pin endpoints, so shrinking puts pin connection points
     /// exactly ON the solid boundary (open-interval checks let wires depart
-    /// from them) while the glyph stays protected. Points carry the same
-    /// foreign-anchor model as `retract_colliding_stubs` (power origins,
-    /// no-connects, label anchors); wire segments carry the net they were drawn for.
+    /// from them) while the glyph stays protected. That box is CENTRED on the
+    /// placement origin, though, so it is a placement clearance and not the
+    /// drawing: [`Self::symbol_ink`] states the ink itself alongside it. Points
+    /// carry the same foreign-anchor model as `retract_colliding_stubs` (power
+    /// origins, no-connects, label anchors); wire segments carry the net they
+    /// were drawn for.
     pub fn route_scene(&self) -> sch_model::route::RouteScene {
         const NC: &str = "\0no_connect";
         let mut scene = sch_model::route::RouteScene {
@@ -663,8 +749,10 @@ impl SchematicWriter {
             points: Vec::new(),
             segments: Vec::new(),
             label_solids: Vec::new(),
+            ink: Vec::new(),
         };
         for inst in &self.instances {
+            scene.ink.push(self.symbol_ink(inst));
             if inst.refdes.starts_with('#') {
                 // Power symbols: the single pin at the origin is the anchor, and the GLYPH
                 // itself is ink with real extent. A foreign wire drawn 2.54 mm off the
@@ -712,6 +800,7 @@ impl SchematicWriter {
         scene.points.extend(self.beside.points.iter().cloned());
         scene.segments.extend(self.beside.segments.iter().cloned());
         scene.solids.extend(self.beside.solids.iter().copied());
+        scene.ink.extend(self.beside.ink.iter().cloned());
         scene
     }
 
