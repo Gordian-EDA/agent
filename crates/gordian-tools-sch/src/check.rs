@@ -307,6 +307,7 @@ struct FixPin {
 struct FixPlanner {
     pins: Vec<FixPin>,
     parts: BTreeMap<String, String>,
+    rotations: BTreeMap<String, f64>,
     default_footprints: BTreeMap<String, String>,
 }
 
@@ -343,9 +344,14 @@ impl FixPlanner {
                     .map(|footprint| (reference.clone(), footprint))
             })
             .collect();
+        let rotations = doc
+            .symbols()
+            .map(|symbol| (symbol.refdes().to_string(), symbol.at.rot))
+            .collect();
         Self {
             pins,
             parts,
+            rotations,
             default_footprints,
         }
     }
@@ -363,7 +369,7 @@ impl FixPlanner {
             } else if code.contains("polarity")
                 || (message.contains("reversed") && message.contains("led"))
             {
-                None
+                self.polarity(finding)
             } else if is_assignable_footprint(&code, &message) {
                 self.footprint(finding, ctx)
             } else if is_connection_finding(&code, &message) {
@@ -568,6 +574,31 @@ impl FixPlanner {
 
     fn output_conflict(&self, _finding: &Finding) -> Option<(ToolFix, String)> {
         None
+    }
+
+    /// A reversed two-pin indicator is repaired by turning the symbol in place:
+    /// a half turn lands each pin exactly where the other one was, so the two
+    /// pins exchange nets and every wire, junction and label stays put.
+    fn polarity(&self, finding: &Finding) -> Option<(ToolFix, String)> {
+        let refdes = finding
+            .refs
+            .iter()
+            .map(|reference| reference.split('.').next().unwrap_or(reference))
+            .find(|reference| self.rotations.contains_key(*reference))?;
+        if self.pins.iter().filter(|pin| pin.refdes == refdes).count() != 2 {
+            return None;
+        }
+        let turned = (self.rotations[refdes] + 180.0).rem_euclid(360.0);
+        Some((
+            ToolFix {
+                tool: "move_symbols",
+                args: json!({"moves": [{"ref": refdes, "rot": turned, "turn_in_place": true}]}),
+            },
+            format!(
+                "A half turn in place puts each of {refdes}'s two pins where the other one was, \
+                 so they exchange nets and no wire moves."
+            ),
+        ))
     }
 
     fn footprint(&self, finding: &Finding, ctx: &AgentRuntime) -> Option<(ToolFix, String)> {
@@ -777,6 +808,72 @@ fn diagnostic_finding(
             .unwrap_or_else(|| "No safe one-call repair is known for this finding.".to_string()),
         advisory: diagnostic.severity == sch_check::Severity::Warning,
     }
+}
+
+/// Findings that count toward `checks`: everything the sheet itself states,
+/// as opposed to advice (completeness), a reference comparison, or KiCAD's ERC.
+fn local_findings(findings: &[Finding], severity: &str) -> usize {
+    findings
+        .iter()
+        .filter(|finding| {
+            !matches!(
+                finding.source,
+                "completeness" | "netlist_fidelity" | "kicad_erc"
+            ) && finding.severity == severity
+        })
+        .count()
+}
+
+/// An electrical-rule error the planner could not turn into a call is not
+/// something the model can clear. Presented as blocking, it is what drives the
+/// agent to delete the very parts and rails the request named — the LED, the
+/// USB-serial bridge, every `#PWR`/`#FLG` on the sheet — because destruction is
+/// the only move that makes the finding go away. Demote those to reported
+/// findings, name them in the result, and let the turn finish.
+///
+/// Lint, footprint and netlist-fidelity errors keep blocking: they are statements
+/// about the file rather than about the circuit, and deleting a part does not
+/// make one of them pass.
+fn demote_unrepairable(findings: &mut [Finding]) -> Vec<Value> {
+    let mut reported = Vec::new();
+    for finding in findings {
+        if finding.severity != "error"
+            || finding.fix.is_some()
+            || !matches!(finding.source, "deterministic_erc" | "kicad_erc")
+        {
+            continue;
+        }
+        finding.severity = "warning".to_string();
+        finding.advisory = true;
+        finding.why = unrepairable_why(&finding.code, &finding.message);
+        reported.push(json!({
+            "code": finding.code,
+            "refs": finding.refs,
+            "message": finding.message,
+            "why": finding.why,
+        }));
+    }
+    reported
+}
+
+/// Why no edit clears this finding, said plainly enough that the honest answer
+/// is obvious.
+fn unrepairable_why(code: &str, message: &str) -> String {
+    let message = message.to_ascii_lowercase();
+    if message.contains("power output") && message.contains("connected") {
+        return "Two library pins are both typed Power output on one rail. That is how the \
+                symbols are typed, not a fault in the wiring: leave it, or attach a single \
+                PWR_FLAG to the rail. Removing the rail symbols does not fix it."
+            .to_string();
+    }
+    if code.contains("polarity") {
+        return "This part does not have exactly two placed pins, so no half turn exchanges \
+                them. Re-pick the symbol or wire it deliberately; do not delete it."
+            .to_string();
+    }
+    "No edit clears this rule. Report it in your summary; deleting the parts it names is not \
+     a repair."
+        .to_string()
 }
 
 fn erc_finding(locator: &FindingLocator<'_>, violation: &kicad::Violation) -> Finding {
@@ -1278,6 +1375,9 @@ pub fn check_schematic(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         planner.plan(finding, ctx);
     }
     inherit_duplicate_footprint_fixes(&mut inspection.findings);
+    let unrepairable = demote_unrepairable(&mut inspection.findings);
+    inspection.local_errors = local_findings(&inspection.findings, "error");
+    inspection.local_warnings = local_findings(&inspection.findings, "warning");
     inspection
         .findings
         .sort_by_key(|finding| finding.severity != "error");
@@ -1351,6 +1451,17 @@ pub fn check_schematic(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             report["erc"] = json!({ "error": error });
         }
     }
+    if !unrepairable.is_empty() {
+        report["reported_not_blocking"] = json!(unrepairable);
+        if report["ok"] == json!(true) {
+            report["message"] = json!(format!(
+                "no finding left that an edit can clear; {} electrical rule(s) remain reported \
+                 under `reported_not_blocking` — say what they are, do not delete parts to \
+                 silence them",
+                unrepairable.len()
+            ));
+        }
+    }
     report["finding_counts"] = json!({
         "errors": inspection.findings.iter().filter(|finding| finding.severity == "error").count(),
         "warnings": inspection.findings.iter().filter(|finding| finding.severity == "warning").count(),
@@ -1379,6 +1490,7 @@ mod tests {
         FixPlanner {
             pins,
             parts: BTreeMap::new(),
+            rotations: BTreeMap::new(),
             default_footprints: BTreeMap::new(),
         }
     }

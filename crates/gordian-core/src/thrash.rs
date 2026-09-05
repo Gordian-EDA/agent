@@ -1,24 +1,29 @@
-//! Breaks edit loops: the same kind of mutation re-applied to the same targets.
+//! Breaks edit loops: the same mutation re-applied until the sheet is wrecked.
 //!
 //! Failing tools are already self-limiting — the model sees the error and moves
 //! on. The pathology this guard exists for is the opposite: every call *succeeds*
 //! and the model still undoes its own work, because the check it is chasing has
 //! no repair (`fix: null`) or its suggested repair does not clear the finding.
-//! Observed shapes, all with `status: ok`:
+//! Three loops, all with `status: ok`, each caught by its own rule here:
 //!
-//! - `label {net: "+3V3", pin: "U2.2"}` issued 28 times with identical arguments;
-//! - `delete_wires` and `connect` alternating on `D1.1, D1.2, R6.2` nine times
-//!   while `check_schematic` kept reporting `led-polarity at D1 → fix: null`;
-//! - `remove_symbols {refs: ["U4", "C12", "C13"]}` three times, the last of which
-//!   left the requested USB-serial bridge off the finished sheet.
-//!
-//! Keying on the tool name alone would miss the alternation and keying on the
-//! full arguments would miss it too (the net names change every cycle). So the
-//! key is the *edit family* (wiring, population) plus the exact set of refs and pins touched: the
-//! delete and the connect that fight over one pin share a key, while wiring a
-//! 48-pin MCU pin by pin does not.
+//! - **wiring** — `label {net: "+3V3", pin: "U2.2"}` issued 28 times with
+//!   identical arguments; `delete_wires` and `connect` alternating on
+//!   `D1.1, D1.2, R6.2` nine times while the checker kept reporting
+//!   `led-polarity at D1 → fix: null`. Keyed by the exact set of pins touched,
+//!   with the net names collapsed away — that is what makes the delete and the
+//!   connect that undoes it share a budget, while wiring a 48-pin MCU pin by pin
+//!   does not.
+//! - **existence** — `remove_symbols {refs: ["D2"]}`, `add_parts` putting D2
+//!   back, `remove_symbols {refs: ["D2"]}` again. The re-add names a whole block
+//!   (`R4, D2`) so an exact-set key misses it; counting *presence flips per ref*
+//!   does not. The initial placement seeds presence and is not a flip.
+//! - **furniture purge** — `#FLG1`, then four `#PWR_GND_*`, then five more
+//!   `#PWR_*`, then `#PWR_GND_4`: each removal names a fresh set, so every
+//!   per-set key was fresh and the whole rail furniture of the sheet went. The
+//!   `#`-prefixed symbols KiCAD generates share one budget regardless of which
+//!   ones are named.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use serde_json::{Value, json};
 
@@ -33,44 +38,112 @@ const TARGET_KEYS: [&str; 9] = [
     "ref", "refs", "pin", "pins", "from", "to", "part", "parts", "uuids",
 ];
 
-/// Per-subturn tally of edits by (family, targets).
 #[derive(Default)]
 pub(crate) struct ThrashGuard {
-    seen: HashMap<(&'static str, Vec<String>), usize>,
+    wiring: HashMap<Vec<String>, usize>,
+    present: HashSet<String>,
+    flips: HashMap<String, usize>,
+    furniture_removals: usize,
 }
 
 impl ThrashGuard {
-    /// Record one mutating call and, once its key reaches [`LIMIT`], return the
-    /// intervention to hand back *instead of* running it.
+    /// Record one mutating call and, when it is the third turn of a loop, return
+    /// the intervention to hand back *instead of* running it.
     pub(crate) fn intervene(&mut self, tool: &str, args: &Value) -> Option<Value> {
-        let family = edit_family(tool)?;
         let targets = targets_of(args);
         if targets.is_empty() {
             return None;
         }
-        let count = self.seen.entry((family, targets.clone())).or_default();
+        match family(tool)? {
+            Family::Wiring => self.wiring(tool, targets),
+            Family::Add => self.population(tool, targets, true),
+            Family::Remove => self.population(tool, targets, false),
+        }
+    }
+
+    fn wiring(&mut self, tool: &str, targets: Vec<String>) -> Option<Value> {
+        let count = self.wiring.entry(targets.clone()).or_default();
         *count += 1;
-        (*count >= LIMIT && refusable(tool)).then(|| intervention(tool, *count, &targets))
+        (*count >= LIMIT).then(|| {
+            intervention(
+                tool,
+                format!("has edited {} {count} times", targets.join(", ")),
+                "Change what those pins connect to, accept the current wiring and say what is \
+                 wrong with it, or move on to another part of the design.",
+            )
+        })
+    }
+
+    /// Population edits are budgeted per ref, by how often the ref's presence on
+    /// the sheet has been flipped. A ref seen for the first time only seeds its
+    /// state, so building the sheet costs nothing; deleting and restoring one
+    /// part costs two. Power furniture shares a single budget because KiCAD
+    /// mints a fresh reference for every flag and rail symbol, which would give
+    /// each round of a purge a key of its own.
+    fn population(&mut self, tool: &str, targets: Vec<String>, adding: bool) -> Option<Value> {
+        if !adding && targets.iter().any(|target| is_furniture(target)) {
+            self.furniture_removals += 1;
+            if self.furniture_removals >= LIMIT {
+                return Some(intervention(
+                    tool,
+                    format!(
+                        "has removed power symbols and flags {} times",
+                        self.furniture_removals
+                    ),
+                    "The rails are furniture, not the defect. Leave them and report the rule \
+                     you cannot satisfy.",
+                ));
+            }
+        }
+        let mut worst = 0;
+        let mut flipped = Vec::new();
+        for target in targets.iter().filter(|target| !is_furniture(target)) {
+            let known = self.flips.contains_key(target);
+            let flips = self.flips.entry(target.clone()).or_default();
+            let changed = known && self.present.contains(target) != adding;
+            if adding {
+                self.present.insert(target.clone());
+            } else {
+                self.present.remove(target);
+            }
+            if !changed {
+                continue;
+            }
+            *flips += 1;
+            worst = worst.max(*flips);
+            flipped.push(target.clone());
+        }
+        // A restore always runs: refusing it would strand whatever the previous
+        // removal took off the sheet, which is the wreck this guard prevents.
+        (worst >= LIMIT && !adding).then(|| {
+            intervention(
+                tool,
+                format!("has added and removed {} {worst} times", flipped.join(", ")),
+                "The part belongs to the request. Keep it, wire it as best you can, and report \
+                 what is still wrong instead of deleting it.",
+            )
+        })
     }
 }
 
-/// Whether refusing this tool is safe. Refusing a call that puts parts back
-/// would strand whatever the previous cycle deleted — exactly the wreck this
-/// guard exists to prevent — so the additive tools always run. They still count
-/// toward their key, which is what makes the *next* removal the refused one.
-fn refusable(tool: &str) -> bool {
-    !matches!(tool, "place_parts" | "add_parts" | "add_symbols")
+/// KiCAD mints `#PWR*` rail symbols and `#FLG*` power flags itself, with a fresh
+/// reference each time, so their names never repeat across a purge.
+fn is_furniture(target: &str) -> bool {
+    target.starts_with('#')
 }
 
-/// The class of edit a mutating tool performs. Tools in one family fight over
-/// the same state, so an alternation between them is the loop to catch.
-fn edit_family(tool: &str) -> Option<&'static str> {
+enum Family {
+    Wiring,
+    Add,
+    Remove,
+}
+
+fn family(tool: &str) -> Option<Family> {
     Some(match tool {
         "connect" | "label" | "no_connect" | "add_power" | "delete_wires" | "delete_labels"
-        | "rewire" => "wiring",
-        "place_parts" | "add_parts" | "add_symbols" | "remove_symbols" | "remove_region" => {
-            "population"
-        }
+        | "rewire" => Family::Wiring,
+        "place_parts" | "add_parts" | "add_symbols" => Family::Add,
+        "remove_symbols" | "remove_region" => Family::Remove,
         // Layout and field edits neither strand parts nor change connectivity,
         // and re-arranging one block after touching another is ordinary work.
         _ => return None,
@@ -90,8 +163,7 @@ fn targets_of(args: &Value) -> Vec<String> {
 /// re-dispatches on its own keys whatever it was reached through, so the
 /// net-per-pin maps of `place_parts` (`pins: {"1": "+3V3"}`) contribute nothing.
 /// Library ids are filtered out by their `Lib:Name` colon, which no refdes or
-/// pin carries — that is what lets a `place_parts` restore and the
-/// `remove_symbols` it undoes share one key.
+/// pin carries.
 fn collect(value: &Value, named: bool, out: &mut Vec<String>) {
     match value {
         Value::String(text) if named && !text.is_empty() && !text.contains(':') => {
@@ -107,15 +179,12 @@ fn collect(value: &Value, named: bool, out: &mut Vec<String>) {
     }
 }
 
-fn intervention(tool: &str, count: usize, targets: &[String]) -> Value {
+fn intervention(tool: &str, loop_description: String, demand: &str) -> Value {
     json!({
         "error": "edit loop refused",
         "note": format!(
-            "This turn has already edited {} {count} times and the sheet keeps returning to the \
-             same state, so `{tool}` was NOT applied. Repeating it will keep being refused. \
-             Change what those pins connect to, accept the current wiring and say what is wrong \
-             with it, or move on to another part of the design.",
-            targets.join(", ")
+            "This turn {loop_description} and the sheet keeps returning to the same state, so \
+             `{tool}` was NOT applied. Repeating it will keep being refused. {demand}"
         ),
     })
 }
@@ -123,6 +192,10 @@ fn intervention(tool: &str, count: usize, targets: &[String]) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn place(refs: &[&str]) -> Value {
+        json!({"parts": refs.iter().map(|r| json!({"ref": r})).collect::<Vec<_>>()})
+    }
 
     #[test]
     fn a_third_identical_edit_is_refused_and_the_first_two_are_not() {
@@ -135,8 +208,8 @@ mod tests {
         assert!(refusal["note"].as_str().unwrap().contains("U2.2"));
     }
 
-    /// The blue-pill loop: `delete_wires` and `connect` alternate over one pin
-    /// set while only the net names change. They must share a key.
+    /// The blue-pill wiring loop: `delete_wires` and `connect` alternate over one
+    /// pin set while only the net names change. They must share a key.
     #[test]
     fn delete_and_connect_on_the_same_pins_share_one_budget() {
         let mut guard = ThrashGuard::default();
@@ -192,24 +265,92 @@ mod tests {
         }
     }
 
-    /// The arduino loop: `remove_symbols` and the `place_parts` that restores the
-    /// same parts are one population fight, so the third removal never runs.
+    /// v4 blue-pill #45/#46/#48: the re-add names the whole `LEDS` block, so its
+    /// argument set never matches the removal's. Presence flips per ref do.
     #[test]
-    fn removing_and_restoring_the_same_parts_is_one_loop() {
+    fn a_removal_and_a_block_shaped_restore_share_one_budget() {
         let mut guard = ThrashGuard::default();
-        let remove = json!({"refs": ["U4", "C12", "C13"]});
-        let restore = json!({
-            "block": "usb_serial_restore",
-            "layout": {"usb_serial_restore": {"row": [
-                {"part": "U4"}, {"part": "C12"}, {"part": "C13"}
-            ]}}
-        });
-        assert!(guard.intervene("remove_symbols", &remove).is_none());
-        assert!(guard.intervene("place_parts", &restore).is_none());
         assert!(
-            guard.intervene("place_parts", &restore).is_none(),
-            "a restore is never the refused call"
+            guard
+                .intervene("place_parts", &place(&["R4", "D2"]))
+                .is_none()
         );
-        assert!(guard.intervene("remove_symbols", &remove).is_some());
+        assert!(
+            guard
+                .intervene("remove_symbols", &json!({"refs": ["D2"]}))
+                .is_none()
+        );
+        assert!(
+            guard
+                .intervene("add_parts", &place(&["R4", "D2"]))
+                .is_none()
+        );
+        let refusal = guard
+            .intervene("remove_symbols", &json!({"refs": ["D2"]}))
+            .expect("the second removal of a restored part is refused");
+        assert!(refusal["note"].as_str().unwrap().contains("D2"));
+    }
+
+    /// Building a sheet block by block, and re-placing a block that is already
+    /// there, must cost nothing.
+    #[test]
+    fn placing_the_same_block_repeatedly_is_never_a_loop() {
+        let mut guard = ThrashGuard::default();
+        for _ in 0..6 {
+            assert!(
+                guard
+                    .intervene("place_parts", &place(&["U2", "C4", "C5", "R1"]))
+                    .is_none()
+            );
+        }
+        assert!(
+            guard
+                .intervene("remove_symbols", &json!({"refs": ["C4"]}))
+                .is_none(),
+            "a first removal is still allowed after any number of placements"
+        );
+    }
+
+    /// v4 blue-pill #64/#65/#70/#100/#117/#125: every purge named a fresh set of
+    /// KiCAD-minted references, so all of them shared no key at all.
+    #[test]
+    fn power_furniture_shares_one_budget_whatever_it_is_called() {
+        let mut guard = ThrashGuard::default();
+        assert!(
+            guard
+                .intervene("remove_symbols", &json!({"refs": ["#FLG1"]}))
+                .is_none()
+        );
+        assert!(
+            guard
+                .intervene(
+                    "remove_symbols",
+                    &json!({"refs": ["#PWR_GND_0_4", "#PWR_GND_0_5", "#PWR_GND_0_2"]})
+                )
+                .is_none()
+        );
+        let refusal = guard
+            .intervene("remove_symbols", &json!({"refs": ["#PWR_+5V_2"]}))
+            .expect("the third purge is refused");
+        assert!(
+            refusal["note"]
+                .as_str()
+                .unwrap()
+                .contains("power symbols and flags")
+        );
+    }
+
+    /// Attaching rails is how a sheet gets built; only removing them is a purge.
+    #[test]
+    fn adding_power_furniture_is_never_refused() {
+        let mut guard = ThrashGuard::default();
+        for pin in ["U1.1", "U2.8", "U3.4", "C1.2", "C2.2", "R1.1"] {
+            assert!(
+                guard
+                    .intervene("add_power", &json!({"net": "GND", "pin": pin}))
+                    .is_none(),
+                "{pin}"
+            );
+        }
     }
 }
