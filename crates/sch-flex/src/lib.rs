@@ -362,12 +362,22 @@ fn seat_beside(tree: &Tree, device: &str, flanks: &Flanks) -> Tree {
     let Tree::Container(c) = tree else {
         return tree.clone();
     };
-    Tree::Container(Container {
-        children: c
-            .children
+    let mut children: Vec<Tree> = c
+        .children
+        .iter()
+        .map(|child| seat_beside(child, device, flanks))
+        .collect();
+    // A bank `flanked` handed back untouched goes in beside the device as its own sibling.
+    if let (Some(parts), Some(at)) = (
+        flanks.get(&Seat::Bank).filter(|_| flanks.len() == 1),
+        children
             .iter()
-            .map(|child| seat_beside(child, device, flanks))
-            .collect(),
+            .position(|k| matches!(k, Tree::Leaf(l) if l.part == device)),
+    ) {
+        children.insert(at + 1, Tree::row_of(parts.clone()));
+    }
+    Tree::Container(Container {
+        children,
         ..c.clone()
     })
 }
@@ -382,6 +392,13 @@ fn seat_beside(tree: &Tree, device: &str, flanks: &Flanks) -> Tree {
 /// it into side-by-side bands the seating no longer recognises, which strands every part
 /// in it a page from the pin it serves.
 fn flanked(device: Tree, flanks: &Flanks) -> Tree {
+    // A bank alone is not a group: wrapping the device in one shifts its alignment line
+    // onto the group's, and the column the AUTHOR composed beside it then wires to its
+    // pins through a bend. The bank is a plain sibling, exactly as it was drawn before
+    // any of this.
+    if flanks.keys().eq([Seat::Bank].iter()) {
+        return device;
+    }
     let column = |side| {
         flanks
             .get(&Seat::Beside(side))

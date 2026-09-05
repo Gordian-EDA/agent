@@ -963,19 +963,6 @@ fn face_neighbours(
             continue;
         }
         if !part_ref.two_pin() {
-            // Turn the device to face the row it stands in, then line it up on the pin
-            // that reaches its neighbour.
-            let (left, right) = side_nets(children, parts, i);
-            let pose = match axis == Axis::Row
-                && turning_faces_more(part_ref, pose, &left, &right)
-            {
-                true => {
-                    let turned = Pose { mirror: !pose.mirror, ..pose };
-                    children[i] = leaf_node(part, parts, turned, axis);
-                    turned
-                }
-                false => pose,
-            };
             if let Some(shift) = anchor_pin_shift(part_ref, pose, axis, &before, &after) {
                 match axis {
                     Axis::Row => children[i].ay = children[i].anchor().y + shift.y,
@@ -1098,56 +1085,6 @@ fn connector_faces_away(part: &Part, pose: Pose, axis: Axis, i: usize, len: usiz
         Axis::Row => (first && d == Dir::West) || (last && d == Dir::East),
         Axis::Col => (first && d == Dir::North) || (last && d == Dir::South),
     }
-}
-
-/// The signal nets of everything before and after child `i` in its container.
-///
-/// Which way a device should FACE is decided against the whole row, not the part next to
-/// it: a device whose output net is read three seats to its right still belongs with that
-/// pin on the right, however its immediate neighbour is wired.
-fn side_nets(children: &[Node], parts: &[Part], i: usize) -> (BTreeSet<String>, BTreeSet<String>) {
-    let of = |range: &[Node]| -> BTreeSet<String> {
-        range.iter().flat_map(|k| k.signal_nets(parts)).collect()
-    };
-    (of(&children[..i]), of(&children[i + 1..]))
-}
-
-/// Whether flipping a device left-for-right puts MORE of its pins on the side the parts
-/// sharing their net are on.
-///
-/// The same convention as the one that turns a connector at the end of a row, applied to
-/// the device in the middle of it: a level translator whose B pins are drawn on the right
-/// but whose B-side parts the author composed on the left is drawn backwards, and every
-/// net across it becomes a label and a detour. Nothing else about the symbol changes —
-/// mirroring leaves a pin's rail direction alone, so a supply still leaves at the top.
-fn turning_faces_more(
-    part: &Part,
-    pose: Pose,
-    before: &BTreeSet<String>,
-    after: &BTreeSet<String>,
-) -> bool {
-    let facing = |pose: Pose| {
-        part.pins
-            .iter()
-            .filter(|pin| {
-                let dir = part.pin_dir(pin, pose);
-                part.net(pin).is_some_and(|net| match dir {
-                    Dir::West => before.contains(net),
-                    Dir::East => after.contains(net),
-                    _ => false,
-                })
-            })
-            .count()
-    };
-    let turned = Pose {
-        mirror: !pose.mirror,
-        ..pose
-    };
-    // Only a device drawn ENTIRELY backwards is turned. Trading one wired side for the
-    // other reverses the convention the symbol was drawn with — a 555 whose timing parts
-    // happen to sit on its right ends up with its output pointing back into the block —
-    // and buys nothing the alignment line does not already give.
-    facing(pose) == 0 && facing(turned) > 0
 }
 
 /// Where a multi-pin part's alignment line goes: onto the pin that faces the neighbour it

@@ -475,25 +475,3 @@ fn a_bare_row_still_seats_supports_beside_what_they_serve() {
         "C1 is further from the pin it serves than a part that serves nothing"
     );
 }
-
-/// A device whose neighbours wire to pins on its far side is drawn backwards: every net
-/// across it becomes a label and a detour. It is turned, exactly as a connector at the end
-/// of a row is.
-#[test]
-fn a_device_is_turned_to_face_the_column_wired_to_it() {
-    let mut items = vec![
-        ic("U1", ["A", "B", "GND"]),
-        passive("R1", "A", "GND"),
-        passive("R2", "B", "GND"),
-    ];
-    let tree = stack(
-        Axis::Row,
-        vec![leaf("U1"), stack(Axis::Col, vec![leaf("R1"), leaf("R2")])],
-    );
-    sch_flex::typeset(&mut items, &trees(tree), &[]);
-    let u1 = items.iter().find(|i| i.refdes == "U1").unwrap();
-    assert!(
-        u1.mirror,
-        "U1's pins are drawn away from the column on them"
-    );
-}
