@@ -1232,11 +1232,11 @@ fn resolve_pin_net_refs(
                     refdes,
                     number,
                     net,
+                    at,
                 } = &found
-                    && let Ok(pin) = crate::refs::pin(&edit.doc, &format!("{refdes}.{number}"))
                 {
                     edit.doc
-                        .add_label(sch_doc::LabelKind::Local, net, crate::wiring::pose(pin.at));
+                        .add_label(sch_doc::LabelKind::Local, net, crate::wiring::pose(*at));
                     result.allowed.push(net.clone());
                     if let Some(was) =
                         crate::refs::net_of(edit.before(), refdes, number).map(str::to_string)

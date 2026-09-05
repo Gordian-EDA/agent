@@ -321,10 +321,14 @@ pub(crate) enum PinNet {
     /// The pin sits on a net that already has a usable name.
     Named(String),
     /// The pin's net has no usable name; label the pin with this to mint one.
+    /// `at` is where that label goes — carried here so recording the name and
+    /// writing it down cannot come apart, which would leave a name claimed by
+    /// nothing for the next mint to collide with.
     Mint {
         refdes: String,
         number: String,
         net: String,
+        at: Point2,
     },
 }
 
@@ -358,6 +362,7 @@ pub(crate) fn net_of_pin(doc: &SchDoc, netlist: &Netlist, spec: &str) -> Result<
         Some(net) => PinNet::Named(net.name.clone()),
         None => PinNet::Mint {
             net: minted_net_name(doc, netlist, &pin),
+            at: pin.at,
             refdes: pin.refdes,
             number: pin.number,
         },

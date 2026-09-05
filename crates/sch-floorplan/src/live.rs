@@ -1381,6 +1381,10 @@ fn readable_renames(
         pin_name: String,
         symbol_pins: usize,
     }
+    // The pin a machine name spells out may belong to a part an EARLIER call
+    // placed — a header joining an MCU's `Net-(U1-PB6)` mentions only the header.
+    // Reading that pin off the sheet is what makes the two calls agree on `PB6`.
+    let facts = SheetPins::of(&sch_doc::placed_pins(doc));
     let mut on_net: BTreeMap<&str, Vec<Pin>> = BTreeMap::new();
     for part in &input.parts {
         let Some(refdes) = part.refdes.as_deref() else {
@@ -1389,11 +1393,19 @@ fn readable_renames(
         let meta = provider.symbol(&part.part);
         let lib_pins = meta.as_ref().map_or(&[][..], |meta| meta.pins.as_slice());
         for (key, net) in &part.pins {
-            let pin = kicad_symbol::find_pin(lib_pins, key);
+            // A payload names a pin however it likes; an anchor is keyed by the
+            // pin NUMBER or it can never be recognised as a net the sheet
+            // already named. The sheet is the second opinion when the library
+            // spells a name differently from the payload — `SWO/TDO`, `SWO_TDO`.
+            let lib = kicad_symbol::find_pin(lib_pins, key);
+            let seen = lib
+                .map(|pin| (pin.number.clone(), pin.name.clone()))
+                .or_else(|| facts.pin_of(refdes, key));
+            let (number, pin_name) = seen.unwrap_or_else(|| (key.clone(), String::new()));
             on_net.entry(net.as_str()).or_default().push(Pin {
                 refdes: refdes.to_string(),
-                number: pin.map_or(key.clone(), |pin| pin.number.clone()),
-                pin_name: pin.map_or(String::new(), |pin| pin.name.clone()),
+                number,
+                pin_name,
                 symbol_pins: lib_pins.len().max(part.pins.len()),
             });
         }
@@ -1408,10 +1420,6 @@ fn readable_renames(
         );
     }
     namer.hold_all(on_net.keys().copied());
-    // The pin a machine name spells out may belong to a part an EARLIER call
-    // placed — a header joining an MCU's `Net-(U1-PB6)` mentions only the header.
-    // Reading that pin off the sheet is what makes the two calls agree on `PB6`.
-    let facts = SheetPins::of(&sch_doc::placed_pins(doc));
     let mut out = BTreeMap::new();
     for (net, pins) in &on_net {
         let Some((spelled_ref, spelled_pin)) = sch_doc::netname::machine_parts(net) else {

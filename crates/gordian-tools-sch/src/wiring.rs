@@ -378,10 +378,10 @@ fn resolve_tool_net(
         refdes,
         number,
         net,
+        at,
     } = &found
     {
-        let pin = refs::pin(&edit.doc, &format!("{refdes}.{number}"))?;
-        edit.doc.add_label(LabelKind::Local, net, pose(pin.at));
+        edit.doc.add_label(LabelKind::Local, net, pose(*at));
         let mut allowed = vec![net.clone()];
         if let Some(was) = refs::net_of(edit.before(), refdes, number) {
             allowed.push(was.to_string());

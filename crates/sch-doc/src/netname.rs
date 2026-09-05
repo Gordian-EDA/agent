@@ -11,6 +11,12 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use crate::PlacedPin;
 
 /// A pin a nameless net could be named after.
+///
+/// `number` is the pin's PHYSICAL number and nothing else. It is the key
+/// [`Namer`] recognises a net by, so an anchor keyed by anything the sheet does
+/// not use — a payload's `"SWO_TDO"` where the pin is `6` — can never match a
+/// name the sheet already drew, and forks the net instead of joining it.
+/// Resolve a caller's spelling through [`SheetPins::pin_of`] first.
 #[derive(Debug, Clone, Copy)]
 pub struct Anchor<'a> {
     pub refdes: &'a str,
@@ -60,15 +66,20 @@ impl SheetPins {
         self.count.get(refdes).copied().unwrap_or(1)
     }
 
-    /// The `(number, name)` of the pin `refdes` calls `id`, which may be either.
+    /// The `(number, name)` of the pin `refdes` calls `id`, which may be its
+    /// number or its name — spelled either as the library writes it (`SWO/TDO`)
+    /// or as a label carries it (`SWO_TDO`).
     pub fn pin_of(&self, refdes: &str, id: &str) -> Option<(String, String)> {
         self.name
             .get(&(refdes.to_string(), id.to_string()))
             .map(|name| (id.to_string(), name.clone()))
             .or_else(|| {
+                let wanted = as_label(id);
                 self.name
                     .iter()
-                    .find(|((r, _), name)| r == refdes && name.eq_ignore_ascii_case(id))
+                    .find(|((r, _), name)| {
+                        r == refdes && as_label(name).eq_ignore_ascii_case(&wanted)
+                    })
                     .map(|((_, number), name)| (number.clone(), name.clone()))
             })
     }

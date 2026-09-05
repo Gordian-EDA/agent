@@ -154,3 +154,53 @@ fn a_boundary_net_minted_by_arrange_reads_as_a_pin_name() {
         machine_shaped(&drawn)
     );
 }
+
+/// A machine name spells a pin the way a LABEL carries it (`N_J5_SWO_TDO`) while
+/// the library spells it `SWO/TDO`. Both calls sharing that net must still land
+/// on one name, or the sheet says it twice and joins neither.
+#[test]
+fn a_pin_name_with_markup_names_one_net_across_two_calls() {
+    let Some(env) = KicadInstallation::detect() else {
+        eprintln!("SKIP: no KiCad environment detected");
+        return;
+    };
+    let header: PlacePartsInput = serde_json::from_value(serde_json::json!({
+        "parts": [
+            {"ref": "J5", "block": "debug", "part": "Connector:Conn_ARM_JTAG_SWD_10",
+             "pins": {"6": "N_J5_SWO_TDO", "3": "GND", "1": "+3V3"}},
+        ]
+    }))
+    .unwrap();
+    let pulldown: PlacePartsInput = serde_json::from_value(serde_json::json!({
+        "parts": [
+            {"ref": "R7", "block": "mcu", "part": "Device:R",
+             "pins": {"1": "N_J5_SWO_TDO", "2": "GND"}},
+        ]
+    }))
+    .unwrap();
+
+    let mut doc = live::blank_sheet().unwrap();
+    let first = live::place_parts(&env, &mut doc, &header).unwrap();
+    assert!(first.committed, "{:?}", first.mismatch);
+    assert_eq!(first.renamed.get("N_J5_SWO_TDO").map(String::as_str), Some("SWO_TDO"));
+
+    let second = live::place_parts(&env, &mut doc, &pulldown).unwrap();
+    assert!(second.committed, "{:?}", second.mismatch);
+    // The second call names the net from the pin the FIRST call named it after,
+    // read off the sheet. Minting it afresh would draw a second name for one net.
+    assert_eq!(second.renamed.get("N_J5_SWO_TDO").map(String::as_str), Some("SWO_TDO"));
+
+    let netlist = sch_doc::connect::extract(&doc);
+    let shared = netlist
+        .nets
+        .iter()
+        .find(|net| net.pins.iter().any(|pin| pin.refdes == "R7" && pin.pin == "1"))
+        .expect("R7.1 is on a net");
+    let mut pins: Vec<String> = shared
+        .pins
+        .iter()
+        .map(|pin| format!("{}.{}", pin.refdes, pin.pin))
+        .collect();
+    pins.sort();
+    assert_eq!(pins, vec!["J5.6".to_string(), "R7.1".to_string()]);
+}
