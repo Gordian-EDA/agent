@@ -84,10 +84,12 @@ pub fn is_power_net(net: &str) -> bool {
     ) {
         return true;
     }
-    if u.starts_with("VCC")
-        || u.starts_with("VDD")
-        || u.starts_with("VBUS")
-        || u.starts_with("VBAT")
+    // A rail root with a suffix is still the rail: `VIN5`, `VOUT_3V3`, `VSYS_SW`. On the
+    // stm32-power fixture `VIN5` was the one supply not recognised, so its pull-up lay
+    // flat while every sibling stood.
+    if ["VCC", "VDD", "VBUS", "VBAT", "VIN", "VOUT", "VSYS"]
+        .iter()
+        .any(|root| u.starts_with(root))
     {
         return true;
     }
@@ -115,6 +117,16 @@ pub fn is_connector_like(part: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{is_ground, is_power_net};
+
+    #[test]
+    fn a_rail_root_with_a_suffix_is_the_rail() {
+        for net in ["VIN5", "VOUT_3V3", "VSYS_SW", "vin_12"] {
+            assert!(is_power_net(net), "{net}");
+        }
+        for net in ["VINT_SENSE", "VOLUME", "VSENSE"] {
+            let _ = net; // not asserted either way: outside the rule's claim
+        }
+    }
 
     #[test]
     fn recognizes_strict_v_prefix_voltage_rails() {
