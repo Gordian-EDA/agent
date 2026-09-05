@@ -134,10 +134,7 @@ fn report(
     blocks: usize,
     rolled_back: &[String],
 ) {
-    let symbols = doc
-        .symbols()
-        .filter(|s| !s.refdes().starts_with('#'))
-        .count();
+    let symbols = doc.symbols().filter(|s| !s.refdes().starts_with('#')).count();
     let labels = doc.labels().count();
     let wires = doc.wires().count();
     let page = doc

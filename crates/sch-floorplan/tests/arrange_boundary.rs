@@ -152,8 +152,10 @@ fn arranging_a_forty_part_block_keeps_its_netlist() {
         return;
     };
     let payload: PlacePartsInput = serde_json::from_str(
-        &std::fs::read_to_string("tests/fixtures/validation/campaign-stm32-buck.place-parts.json")
-            .unwrap(),
+        &std::fs::read_to_string(
+            "tests/fixtures/validation/campaign-stm32-buck.place-parts.json",
+        )
+        .unwrap(),
     )
     .unwrap();
     assert!(payload.parts.len() >= 40, "the block is the point");

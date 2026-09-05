@@ -117,6 +117,7 @@ pub fn path_crossings(path: &[Point2], net: &str, scene: &RouteScene) -> usize {
     n
 }
 
+
 /// A schematic wire ROUTER: the leaf that turns "connect these terminals" into drawn
 /// orthogonal paths.
 ///

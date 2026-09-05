@@ -120,9 +120,7 @@ fn union(a: &Rect, b: &Rect) -> Rect {
 }
 
 fn hull(rects: &[Rect]) -> Option<Rect> {
-    rects
-        .split_first()
-        .map(|(a, rest)| rest.iter().fold(*a, |h, r| union(&h, r)))
+    rects.split_first().map(|(a, rest)| rest.iter().fold(*a, |h, r| union(&h, r)))
 }
 
 /// What the sheet is already using, as one rect per BLOCK: every part's frame and every
@@ -211,9 +209,7 @@ fn seat_beside(movable: &mut [Item], taken: &[Rect], drawn: &[Rect]) {
     // by the same amount are not equally good, and the one that leaves a ribbon reads
     // worse. A landing that fills a hole changes neither term, so it still wins outright.
     let cost = |r: &Rect| {
-        let aspect = ((r.width() / r.height().max(1.0)) / SHEET_ASPECT)
-            .ln()
-            .abs();
+        let aspect = ((r.width() / r.height().max(1.0)) / SHEET_ASPECT).ln().abs();
         r.width() * r.height() * (1.0 + aspect)
     };
     let best = |limit: f64, page: Option<[f64; 2]>| {

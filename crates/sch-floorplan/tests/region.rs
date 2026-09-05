@@ -146,7 +146,13 @@ fn arrange_with_no_neighbours_is_the_bulk_placement_path() {
     let (design, items) = gathered(&env);
     let n = items.len();
     let ir = floorplan::infer_ir(&env, &design);
-    let out = arrange(RegionProblem::new(&env, items, Vec::new(), Vec::new(), ir));
+    let out = arrange(RegionProblem::new(
+        &env,
+        items,
+        Vec::new(),
+        Vec::new(),
+        ir,
+    ));
     assert_eq!(out.poses.len(), n);
     assert_eq!(out.result.truthfulness_breaks, 0);
 }

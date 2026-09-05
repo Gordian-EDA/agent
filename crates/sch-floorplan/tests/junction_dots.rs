@@ -112,12 +112,7 @@ fn no_corpus_seam_splits_a_run_nothing_meets() {
             let at = geom::Point2::new(k.0 as f64 / 1000.0, k.1 as f64 / 1000.0);
             let mut arms = doc
                 .wires()
-                .flat_map(|w| {
-                    w.points
-                        .windows(2)
-                        .map(|p| (p[0], p[1]))
-                        .collect::<Vec<_>>()
-                })
+                .flat_map(|w| w.points.windows(2).map(|p| (p[0], p[1])).collect::<Vec<_>>())
                 .filter_map(|(a, b)| match () {
                     _ if a.near_eq(at, 1e-6) => Some(b),
                     _ if b.near_eq(at, 1e-6) => Some(a),

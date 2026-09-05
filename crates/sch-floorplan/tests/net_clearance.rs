@@ -50,8 +50,8 @@ fn defects_of(env: &KicadInstallation, provider: &SymbolTable, name: &str) -> Ve
         .clone()
         .map(sch_check::Intent::into_layout_ir)
         .unwrap_or_else(|| floorplan::baseline_ir(&design));
-    let out =
-        floorplan::emit_strategy(env, &design, Some(ir)).unwrap_or_else(|e| panic!("{name}: {e}"));
+    let out = floorplan::emit_strategy(env, &design, Some(ir))
+        .unwrap_or_else(|e| panic!("{name}: {e}"));
     out.net_shorts
         .into_iter()
         .chain(out.net_opens.into_iter().map(|net| format!("OPEN {net}")))

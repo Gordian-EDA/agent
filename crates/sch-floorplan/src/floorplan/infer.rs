@@ -154,6 +154,7 @@ pub fn infer_ir(env: &KicadInstallation, design: &Design) -> LayoutIr {
 
 /// Whether a net name reads as something entering the sheet rather than leaving it.
 fn net_is_input(net: &str) -> bool {
+
     let u = net.to_ascii_uppercase();
     u.contains("IN")
         || u.contains("VIN")
