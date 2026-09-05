@@ -15,6 +15,8 @@
 //!   a fixed neighbour, or another movable part is walked out to the nearest clear grid
 //!   position. With no obstacles this is a no-op.
 
+use std::collections::BTreeMap;
+
 use geom::{Point2, Rect};
 
 use kicad::KicadInstallation;
@@ -23,8 +25,8 @@ use sch_model::item::{Incidence, Item};
 use sch_model::place::PlaceResult;
 
 use crate::floorplan::place::{RoutedEvaluator, RoutedSheetRealizer, incidence};
-use sch_flex::pack::{BLOCK_GAP, FRAME_PAD, landings};
-use sch_model::geometry::{body_rect, item_rect};
+use sch_flex::pack::{BLOCK_GAP, landings};
+use sch_model::geometry::body_rect;
 
 /// The width-to-height ratio a sheet aims for: a landscape page's usable area.
 const SHEET_ASPECT: f64 = 1.5;
@@ -95,19 +97,21 @@ impl<'a> RegionProblem<'a> {
     }
 }
 
-/// The FRAME an item claims: its body, the band its reference/value text is solved into,
-/// and the air the realiser's dashed rectangle needs around a block.
+/// One rect per block among `which`: the frame the realiser will draw around it.
 ///
-/// Packing to bare bodies is what puts two blocks' label columns on top of each other, so
-/// what a graft packs is the same rectangle the typesetter measured its own blocks by.
-fn frame_of(it: &Item) -> Rect {
-    let r = item_rect(it, it.at);
-    Rect::new(
-        r.min_x - FRAME_PAD,
-        r.min_y - FRAME_PAD,
-        r.max_x + FRAME_PAD,
-        r.max_y + FRAME_PAD,
-    )
+/// A frame is a BLOCK's, not a part's. Measuring it per part and letting the merge below
+/// recover the block reads the same on a tight block and quite differently on a loose
+/// one, and neither is the rectangle the drawing ends up carrying — which is the only one
+/// a seat may be trusted to keep clear.
+fn block_frames(all: &[Item], which: impl Iterator<Item = usize>) -> Vec<Rect> {
+    let mut blocks: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
+    for i in which {
+        blocks.entry(all[i].block.as_str()).or_default().push(i);
+    }
+    blocks
+        .into_values()
+        .filter_map(|members| sch_flex::pack::block_frame(all, &members))
+        .collect()
 }
 
 fn union(a: &Rect, b: &Rect) -> Rect {
@@ -123,20 +127,14 @@ fn hull(rects: &[Rect]) -> Option<Rect> {
     rects.split_first().map(|(a, rest)| rest.iter().fold(*a, |h, r| union(&h, r)))
 }
 
-/// What the sheet is already using, as one rect per BLOCK: every part's frame and every
-/// obstacle, with overlapping ones merged.
+/// What the sheet is already using: the blocks' own frames and every obstacle, with
+/// overlapping ones merged.
 ///
-/// A block's parts sit close enough that their frames touch, so merging recovers the
-/// blocks without the sheet having to record them; two blocks that were drawn apart stay
-/// apart, and the hole between them is a hole a new block may land in. Seating against a
-/// single hull of all of it — what this used to do — is what cost a row or a column of
-/// sheet per block added, whatever the block's own size.
-fn occupied(fixed: &[Item], obstacles: &[Rect]) -> Vec<Rect> {
-    let mut rects: Vec<Rect> = fixed
-        .iter()
-        .map(frame_of)
-        .chain(obstacles.iter().copied())
-        .collect();
+/// Two blocks that were drawn apart stay apart, and the hole between them is a hole a new
+/// block may land in. Seating against a single hull of all of it — what this used to do —
+/// is what cost a row or a column of sheet per block added, whatever the block's own size.
+fn occupied(frames: &[Rect], obstacles: &[Rect]) -> Vec<Rect> {
+    let mut rects: Vec<Rect> = frames.iter().chain(obstacles).copied().collect();
     let mut merged = true;
     while merged {
         merged = false;
@@ -179,6 +177,9 @@ fn beside_pages(there: Rect) -> Vec<[f64; 2]> {
 }
 
 /// Seat the freshly typeset blocks in the free sheet among what is already drawn.
+/// `frames` is what the new blocks will DRAW — the rects the realiser outlines — so a
+/// landing that clears `taken` is a frame that lands clear of its neighbours' rather than
+/// through them.
 ///
 /// The landing is chosen from the same corner lattice the typesetter packs an empty page
 /// with ([`sch_flex::pack::landings`]) — beside and under every block already down, one
@@ -192,9 +193,8 @@ fn beside_pages(there: Rect) -> Vec<[f64; 2]> {
 /// cost a whole row or column of sheet per block: a 28x20 mm block grew the sheet by
 /// 12,815 mm². Nine blocks came out 2.9x the area the same nine pack into, and the
 /// sparsest agent sheets were exactly the ones built from the most calls.
-fn seat_beside(movable: &mut [Item], taken: &[Rect], drawn: &[Rect]) {
-    let frames: Vec<Rect> = movable.iter().map(frame_of).collect();
-    let (Some(here), false) = (hull(&frames), taken.is_empty()) else {
+fn seat_beside(movable: &mut [Item], frames: &[Rect], taken: &[Rect], drawn: &[Rect]) {
+    let (Some(here), false) = (hull(frames), taken.is_empty()) else {
         return;
     };
     let size = (here.width(), here.height());
@@ -360,8 +360,9 @@ pub fn arrange(problem: RegionProblem) -> RegionOutput {
     // What the sheet is already using, one rect per block — and, from it, what the new
     // blocks may be typeset for: the whole page ladder on an empty sheet, the free strips
     // of each page on a sheet that already carries a drawing.
-    let taken = occupied(&fixed, &obstacles);
-    let drawn = occupied(&fixed, &[]);
+    let neighbours = block_frames(&all, movable..all.len());
+    let taken = occupied(&neighbours, &obstacles);
+    let drawn = occupied(&neighbours, &[]);
     let pages = match hull(&taken) {
         None => crate::write::usable_pages(),
         Some(there) => beside_pages(there),
@@ -370,7 +371,8 @@ pub fn arrange(problem: RegionProblem) -> RegionOutput {
     // The typesetter lays a block out from the origin: it draws the block, not the sheet.
     // On a sheet that already has content, that is on top of what is there, so the group
     // is seated in the free sheet among the blocks already down.
-    seat_beside(&mut all[..movable], &taken, &drawn);
+    let ours = block_frames(&all, 0..movable);
+    seat_beside(&mut all[..movable], &ours, &taken, &drawn);
 
     // With nothing to avoid, the typeset arrangement is authoritative — walking parts
     // apart here would only undo the alignment it just computed. A collision the

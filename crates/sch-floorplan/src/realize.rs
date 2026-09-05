@@ -132,62 +132,78 @@ fn seated_uuids(doc: &SchDoc) -> BTreeSet<String> {
         .collect()
 }
 
-/// Drop the block frames `sheet` is about to redraw: every rectangle it overlaps, and the
-/// captions and notes that went with them — matched by their TEXT, because a frame's
-/// caption sits just outside its rectangle and a geometric test orphans it. A block
-/// extended by a later call gets a new frame around the parts it now has, and the stale
-/// one must not survive beside it. Frames are decoration the realiser owns.
-/// A caption's text with its line breaks undone, so a note recognises its own
-/// older self even though the frame it wrapped to has since changed width.
+/// A caption's text with its line breaks undone, so a note recognises its own older self
+/// even though the frame it wrapped to has since changed width.
 fn unwrapped(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+/// How far a caption may sit from the frame it names. A title is seated a clear line above
+/// its outline and a note a clear line below, so anything further off is another block's.
+const CAPTION_REACH: f64 = 12.7;
+
+/// The frame `at` is seated against: the nearest one within [`CAPTION_REACH`].
+fn worn_frame(at: geom::Point2, frames: &[geom::Rect]) -> Option<geom::Rect> {
+    let gap = |f: &geom::Rect| {
+        let dx = (f.min_x - at.x).max(at.x - f.max_x).max(0.0);
+        let dy = (f.min_y - at.y).max(at.y - f.max_y).max(0.0);
+        dx.hypot(dy)
+    };
+    frames
+        .iter()
+        .map(|f| (gap(f), f))
+        .filter(|(d, _)| *d <= CAPTION_REACH)
+        .min_by(|a, b| a.0.total_cmp(&b.0))
+        .map(|(_, f)| *f)
+}
+
+/// Drop the block frames `sheet` is about to redraw — and only those.
+///
+/// A frame belongs to the block whose caption it wears, so a caption this sheet redraws
+/// takes its old rectangle with it wherever that rectangle sits: a block extended by a
+/// later call gets a new frame around the parts it now has, and a block redrawn somewhere
+/// else leaves nothing behind. Frames are decoration the realiser owns.
+///
+/// Deleting on OVERLAP instead is what stripped a neighbour's outline the moment two
+/// blocks were seated next to each other — and it was needed only because the seat
+/// reserved less sheet than the frame drew, so adjacent frames intersected by
+/// construction. They no longer do ([`sch_flex::pack::block_frame`]), so overlap says
+/// nothing about whose frame a rectangle is.
 fn replace_frames(doc: &mut SchDoc, sheet: &SchDoc) {
-    let mut frames: Vec<geom::Rect> = Vec::new();
-    let mut captions: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut redrawn = false;
+    let mut captions: BTreeSet<String> = BTreeSet::new();
     for item in sheet.items() {
         match item {
-            sch_doc::Item::Rectangle(r) => frames.push(geom::Rect::from_points(r.start, r.end)),
+            sch_doc::Item::Rectangle(_) => redrawn = true,
             sch_doc::Item::Text(t) => {
                 captions.insert(unwrapped(&t.text));
             }
             _ => {}
         }
     }
-    if frames.is_empty() {
+    if !redrawn {
         return;
     }
-    // A block redrawn somewhere else leaves a frame that overlaps nothing, so overlap
-    // alone never catches it — which is how a sheet ends up with three captioned boxes
-    // and no parts in any of them. The caption identifies the block, so a rectangle
-    // wearing a caption this sheet is about to redraw goes with it, wherever it sits.
-    const LINE: f64 = 5.08;
-    let recaptioned: Vec<geom::Rect> = doc
+    let frames: Vec<geom::Rect> = doc
         .items()
         .iter()
         .filter_map(|item| match item {
-            sch_doc::Item::Text(t) if captions.contains(&unwrapped(&t.text)) => Some(t.at.point()),
+            sch_doc::Item::Rectangle(r) => Some(geom::Rect::from_points(r.start, r.end)),
             _ => None,
         })
-        .flat_map(|at| {
-            doc.items().iter().filter_map(move |item| match item {
-                sch_doc::Item::Rectangle(r) => {
-                    let f = geom::Rect::from_points(r.start, r.end);
-                    ((at.x - f.min_x).abs() <= LINE
-                        && at.y >= f.min_y - LINE
-                        && at.y <= f.max_y + LINE)
-                        .then_some(f)
-                }
-                _ => None,
-            })
+        .collect();
+    let stale: Vec<geom::Rect> = doc
+        .items()
+        .iter()
+        .filter_map(|item| match item {
+            sch_doc::Item::Text(t) if captions.contains(&unwrapped(&t.text)) => {
+                worn_frame(t.at.point(), &frames)
+            }
+            _ => None,
         })
         .collect();
     doc.retain_drawing(|item| match item {
-        sch_doc::Item::Rectangle(r) => {
-            let f = geom::Rect::from_points(r.start, r.end);
-            !frames.iter().any(|n| n.overlaps(&f)) && !recaptioned.contains(&f)
-        }
+        sch_doc::Item::Rectangle(r) => !stale.contains(&geom::Rect::from_points(r.start, r.end)),
         sch_doc::Item::Text(t) => !captions.contains(&unwrapped(&t.text)),
         _ => true,
     });
@@ -231,6 +247,52 @@ fn debug_assert_unique_wire_segments(_doc: &SchDoc) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A captioned block frame, seated the way [`crate::write::SchematicWriter`] seats
+    /// one: the title a clear line above the outline's top-left corner.
+    fn captioned(writer: &mut SchematicWriter, title: &str, frame: geom::Rect) {
+        writer.add_rect([frame.min_x, frame.min_y], [frame.max_x, frame.max_y], title);
+        writer.add_text(
+            title,
+            [frame.min_x, frame.min_y - 1.905],
+            2.54,
+            true,
+            &format!("{title}:title"),
+        );
+    }
+
+    fn frames(doc: &SchDoc) -> Vec<geom::Rect> {
+        doc.items()
+            .iter()
+            .filter_map(|item| match item {
+                sch_doc::Item::Rectangle(r) => Some(geom::Rect::from_points(r.start, r.end)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Redrawing one block takes its own outline with it, wherever the old one sat, and
+    /// leaves every other block's alone — a neighbour's frame is not the redrawn block's
+    /// to delete, however close the two land.
+    #[test]
+    fn a_redraw_replaces_its_own_frame_and_only_its_own() {
+        let neighbour = geom::Rect::new(101.6, 50.8, 152.4, 101.6);
+        let mut sheet = SchematicWriter::new();
+        captioned(&mut sheet, "regulators", geom::Rect::new(25.4, 50.8, 76.2, 101.6));
+        captioned(&mut sheet, "audio", neighbour);
+        let mut doc = to_doc(sheet).unwrap();
+        assert_eq!(frames(&doc).len(), 2);
+
+        let mut redraw = SchematicWriter::new();
+        captioned(&mut redraw, "regulators", geom::Rect::new(25.4, 127.0, 88.9, 177.8));
+        replace_frames(&mut doc, &to_doc(redraw).unwrap());
+
+        assert_eq!(
+            frames(&doc),
+            vec![neighbour],
+            "the redrawn block's old frame goes, the neighbour's stays"
+        );
+    }
 
     #[cfg(debug_assertions)]
     #[test]
