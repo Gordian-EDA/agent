@@ -254,27 +254,8 @@ impl SchematicWriter {
     /// length, which the members already sit at.
     fn align_stub_columns(&mut self) {
         let (points, segments) = self.anchor_model();
-        let side = |dir: Dir| match dir {
-            Dir::East => 0u8,
-            Dir::West => 1,
-            Dir::North => 2,
-            Dir::South => 3,
-        };
-        let mut groups: BTreeMap<(String, u8), Vec<usize>> = BTreeMap::new();
-        for (i, label) in self.labels.iter().enumerate() {
-            if !matches!(label.anchor, Anchor::Stub(_)) {
-                continue;
-            }
-            let Some(refdes) = label.uuid_key.split(':').next() else {
-                continue;
-            };
-            groups
-                .entry((refdes.to_string(), side(label.dir)))
-                .or_default()
-                .push(i);
-        }
         let pitch = GRID_50_MIL.pitch();
-        for ((refdes, _), members) in groups {
+        for ((refdes, _), members) in self.stub_columns() {
             if members.len() < 2 {
                 continue;
             }
@@ -356,6 +337,35 @@ impl SchematicWriter {
         }
     }
 
+    /// The stub labels leaving one symbol on one side, keyed `(refdes, side)`.
+    ///
+    /// A group of two or more is a COLUMN: a connector's pins read as a datasheet
+    /// list, and both the shared stub length ([`Self::align_stub_columns`]) and
+    /// the ban on turning a member on end ([`Self::stub_label_movables`]) are
+    /// about keeping that list looking like one.
+    fn stub_columns(&self) -> BTreeMap<(String, u8), Vec<usize>> {
+        let side = |dir: Dir| match dir {
+            Dir::East => 0u8,
+            Dir::West => 1,
+            Dir::North => 2,
+            Dir::South => 3,
+        };
+        let mut groups: BTreeMap<(String, u8), Vec<usize>> = BTreeMap::new();
+        for (i, label) in self.labels.iter().enumerate() {
+            if !matches!(label.anchor, Anchor::Stub(_)) {
+                continue;
+            }
+            let Some(refdes) = label.uuid_key.split(':').next() else {
+                continue;
+            };
+            groups
+                .entry((refdes.to_string(), side(label.dir)))
+                .or_default()
+                .push(i);
+        }
+        groups
+    }
+
     /// Retract any signal stub whose wire or far-end label would touch a *foreign*
     /// net's geometry, then emit the surviving stub wires.
     ///
@@ -363,7 +373,7 @@ impl SchematicWriter {
     /// touch another net's geometry, silently merging the two nets — KiCAD reads a
     /// shared point or a wire-end-on-wire T-junction as a deliberate connection,
     /// so there is *no ERC error* to catch it. The collisions come in several
-    /// flavours (label on a power symbol parked one row over by `emit_power_pin`'s
+    /// flavours (label on a power symbol parked one row over by `emit_rail`'s
     /// riser; a stub end landing on a neighbour's stub wire; a stub crossing a
     /// foreign pin) and no fixed stub length avoids them all in a dense
     /// auto-placed sheet. Rather than chase each flavour, we resolve it with one
@@ -719,10 +729,49 @@ impl SchematicWriter {
         obstacles
     }
 
+    /// `poses` with the TURNED ones (everything past the first two, which lie on
+    /// the label's own axis) dropped unless they read clear of the sheet's drawn
+    /// ink — every symbol's body and pin text, the label's own symbol included.
+    ///
+    /// The greedy solver already dodges that ink whenever a seat is free; its LAST
+    /// RESORT is the candidate burying the least area, and a name stood on end
+    /// buries very little of a body while reading exactly as if it had been written
+    /// across it. Ruling the turned poses out of that fallback keeps a crowded label
+    /// on its axis, where the worst case is a tight row rather than a name lying
+    /// over a chip.
+    ///
+    /// `columned` drops them outright: a connector's side of stub labels is a
+    /// datasheet column, and one member stood vertical among nineteen horizontal
+    /// siblings is a defect however clear its box is.
+    fn readable_poses(
+        &self,
+        label: &super::PinLabel,
+        poses: Vec<(Point2, Dir)>,
+        columned: bool,
+    ) -> Vec<(Point2, Dir)> {
+        let ink_clear = |at: Point2, dir: Dir| {
+            let b = sch_model::text::label_box(at, dir, &label.net);
+            self.instances.iter().all(|inst| {
+                inst.refdes.starts_with('#')
+                    || (!self.symbol_ink(inst).overlaps(&b)
+                        && !self.unit_pin_text(inst).iter().any(|pb| pb.overlaps(&b)))
+            })
+        };
+        poses
+            .into_iter()
+            .enumerate()
+            .filter(|&(n, (at, dir))| n < 2 || (!columned && ink_clear(at, dir)))
+            .map(|(_, pose)| pose)
+            .collect()
+    }
+
     /// Stub signal labels (most constrained, solved first), in deterministic
-    /// uuid_key order. Each has two candidates: stay at the stub end, or retract
-    /// onto the always-safe pin endpoint keeping the outward direction (the stub
-    /// wire is dropped when retraction wins).
+    /// uuid_key order. Its candidates are [`stub_poses`] filtered by
+    /// [`Self::readable_poses`]: the two on the label's own axis — stay at the
+    /// stub end, or retract onto the always-safe pin endpoint keeping the outward
+    /// direction (the stub wire is dropped when retraction wins) — plus the turned
+    /// poses, which a member of a column never gets and the rest get only over
+    /// clear paper.
     fn stub_label_movables(&self) -> (Vec<sch_model::text::Movable>, Vec<Apply>) {
         use sch_model::text::Movable;
         let mut movables: Vec<Movable> = Vec::new();
@@ -731,12 +780,19 @@ impl SchematicWriter {
             .filter(|&i| matches!(self.labels[i].anchor, Anchor::Stub(_)))
             .collect();
         stub_idx.sort_by(|&a, &b| self.labels[a].uuid_key.cmp(&self.labels[b].uuid_key));
+        let columned: BTreeSet<usize> = self
+            .stub_columns()
+            .into_values()
+            .filter(|members| members.len() > 1)
+            .flatten()
+            .collect();
         for &i in &stub_idx {
             let l = &self.labels[i];
             let Anchor::Stub(pin_at) = l.anchor else {
                 unreachable!()
             };
-            let poses = stub_poses(pin_at, l.at, l.dir);
+            let poses =
+                self.readable_poses(l, stub_poses(pin_at, l.at, l.dir), columned.contains(&i));
             movables.push(Movable {
                 owner: Some(sch_model::text::Owner::Net(l.net.clone())),
                 candidates: poses
@@ -771,12 +827,17 @@ impl SchematicWriter {
                 let Anchor::Swivel(home) = l.anchor else {
                     unreachable!()
                 };
-                let dirs = swivel_poses(home);
+                let poses = swivel_poses(home).map(|dir| (l.at, dir));
+                let dirs: Vec<Dir> = self
+                    .readable_poses(l, poses.to_vec(), false)
+                    .into_iter()
+                    .map(|(_, dir)| dir)
+                    .collect();
                 let movable = Movable {
                     owner: Some(Owner::Net(l.net.clone())),
                     candidates: dirs.iter().map(|&dir| label_rect(l, l.at, dir)).collect(),
                 };
-                (movable, Apply::SwivelLabel(i, dirs.to_vec()))
+                (movable, Apply::SwivelLabel(i, dirs))
             })
             .unzip()
     }
@@ -1888,6 +1949,52 @@ mod tests {
                 .all(|c| c.max_y < 80.1 || c.min_y > 119.9),
             "IC fields should never use side bands over pin text: {:?}",
             movable.candidates
+        );
+    }
+
+    /// The turned poses — the ones that stand a label on end — are offered only
+    /// when they read clear of drawn ink, and never to a member of a column.
+    ///
+    /// Both are about the greedy solver's LAST RESORT, which takes the candidate
+    /// burying the least area: a name stood on end buries very little of a chip
+    /// while reading as if written across it, and one vertical name among
+    /// horizontal siblings is a defect however clear its box is. What the two
+    /// rules do is keep a walled-in label on its axis.
+    #[test]
+    fn turned_poses_are_offered_only_over_clear_paper() {
+        let Some(env) = detect_env() else { return };
+        let mut w = SchematicWriter::new();
+        w.add_symbol(&env, "Device:R", "R1", "1k", [127.0, 63.5], 0.0)
+            .unwrap();
+        w.add_signal_label(&env, "R1", "1", "SIG").unwrap();
+        let label = &w.labels[0];
+        let poses = stub_poses(Point2::new(127.0, 63.5), label.at, label.dir);
+        assert_eq!(
+            w.readable_poses(label, poses.clone(), false).len(),
+            poses.len(),
+            "over open paper every pose stands"
+        );
+        assert_eq!(
+            w.readable_poses(label, poses.clone(), true).len(),
+            2,
+            "a column member is offered its axis and nothing else"
+        );
+
+        // A body under the turned poses' box takes them out of the running.
+        let turned = poses[2].0;
+        w.add_symbol(
+            &env,
+            "Device:R",
+            "R2",
+            "2k",
+            [turned.x, turned.y - 5.08],
+            0.0,
+        )
+        .unwrap();
+        assert_eq!(
+            w.readable_poses(&w.labels[0], poses, false).len(),
+            3,
+            "a turned pose over a body is not a candidate"
         );
     }
 
