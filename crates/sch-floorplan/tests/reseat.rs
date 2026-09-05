@@ -17,23 +17,23 @@ fn payload() -> serde_json::Value {
     serde_json::json!({
         "name": "reseat",
         "parts": [
-            {"ref": "U1", "lib": "Amplifier_Operational:LM358", "unit": 1, "block": "gain",
+            {"ref": "U1", "part": "Amplifier_Operational:LM358", "block": "gain",
              "pins": {"1": "OUT_A", "2": "INV_A", "3": "IN_A"}},
-            {"ref": "R1", "lib": "Device:R", "value": "10k", "block": "gain",
+            {"ref": "R1", "part": "Device:R", "value": "10k", "block": "gain",
              "pins": {"1": "INV_A", "2": "GND"}},
-            {"ref": "R2", "lib": "Device:R", "value": "100k", "block": "gain",
+            {"ref": "R2", "part": "Device:R", "value": "100k", "block": "gain",
              "pins": {"1": "INV_A", "2": "OUT_A"}},
-            {"ref": "C1", "lib": "Device:C", "value": "100n", "block": "filter",
+            {"ref": "C1", "part": "Device:C", "value": "100n", "block": "filter",
              "pins": {"1": "OUT_A", "2": "FILT"}},
-            {"ref": "R3", "lib": "Device:R", "value": "1k", "block": "filter",
+            {"ref": "R3", "part": "Device:R", "value": "1k", "block": "filter",
              "pins": {"1": "FILT", "2": "OUT"}},
-            {"ref": "C2", "lib": "Device:C", "value": "1u", "block": "filter",
+            {"ref": "C2", "part": "Device:C", "value": "1u", "block": "filter",
              "pins": {"1": "OUT", "2": "GND"}},
-            {"ref": "J1", "lib": "Connector:Conn_01x03_Pin", "block": "io",
+            {"ref": "J1", "part": "Connector:Conn_01x03_Pin", "block": "io",
              "pins": {"1": "IN_A", "2": "OUT", "3": "GND"}},
-            {"ref": "R4", "lib": "Device:R", "value": "22k", "block": "io",
+            {"ref": "R4", "part": "Device:R", "value": "22k", "block": "io",
              "pins": {"1": "IN_A", "2": "GND"}},
-            {"ref": "C3", "lib": "Device:C", "value": "10n", "block": "io",
+            {"ref": "C3", "part": "Device:C", "value": "10n", "block": "io",
              "pins": {"1": "IN_A", "2": "GND"}}
         ]
     })
@@ -63,6 +63,12 @@ fn build(env: &KicadInstallation, calls: &[PlacePartsInput]) -> SchDoc {
     doc
 }
 
+/// How far two builds of the same design may span apart before they are different
+/// drawings. Not zero: a block routed beside foreign content is not drawn identically to
+/// one routed on an empty sheet, so the blocks themselves differ by a few millimetres
+/// whatever the packer then does with them. The page is the exact check.
+const SPAN_TOLERANCE: f64 = 0.25;
+
 fn hull(doc: &SchDoc) -> f64 {
     doc.content_bbox().map_or(0.0, |r| r.width() * r.height())
 }
@@ -81,7 +87,7 @@ fn one_call_and_three_calls_draw_the_same_sheet() {
     assert_eq!(whole.page(), split.page(), "different paper");
     let (a, b) = (hull(&whole), hull(&split));
     assert!(
-        (a - b).abs() <= 0.25 * a.max(b),
+        (a - b).abs() <= SPAN_TOLERANCE * a.max(b),
         "one call spans {a:.0} mm² and three span {b:.0} mm²"
     );
 }
@@ -99,7 +105,7 @@ fn the_call_order_does_not_change_the_arrangement() {
     assert_eq!(forward.page(), backward.page(), "different paper");
     let (a, b) = (hull(&forward), hull(&backward));
     assert!(
-        (a - b).abs() <= 0.25 * a.max(b),
+        (a - b).abs() <= SPAN_TOLERANCE * a.max(b),
         "forward spans {a:.0} mm² and backward {b:.0} mm²"
     );
 }
