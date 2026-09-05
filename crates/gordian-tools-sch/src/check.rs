@@ -576,6 +576,7 @@ impl FixPlanner {
                 self.pins
                     .iter()
                     .filter(|pin| pin.id != from.id)
+                    .filter(|pin| !pin.refdes.starts_with('#'))
                     .filter(|pin| pin.net.as_ref() == Some(net))
                     .min_by(|left, right| left.id.cmp(&right.id))
             })
@@ -1971,6 +1972,24 @@ mod tests {
         assert!(!is_output_conflict(code, message));
         assert!(!is_assignable_footprint(code, message));
         assert!(!code.contains("polarity"));
+    }
+
+    #[test]
+    fn a_connect_repair_never_aims_at_a_flag_or_rail_glyph() {
+        let planner = planner(vec![
+            pin("C7.2", "~", "passive", None, 10.0),
+            pin("#FLG_GND.1", "pwr", "power_in", Some("GND"), 20.0),
+            pin("U3.4", "SW", "output", Some("GND"), 80.0),
+        ]);
+        let finding = finding("dangling-passive", &["C7.2"], &["GND"], "C7.2 is loose");
+
+        assert_eq!(
+            planner.connection(&finding).unwrap().0,
+            ToolFix {
+                tool: "connect",
+                args: json!({"from": "C7.2", "to": "U3.4"}),
+            }
+        );
     }
 
     #[test]
