@@ -1438,12 +1438,6 @@
 		(uuid "d1f57789-71e9-5e49-8b96-4b5b31b710c2")
 	)
 	(junction
-		(at 41.91 60.96)
-		(diameter 0)
-		(color 0 0 0 0)
-		(uuid "b9c6356a-a591-5687-a81f-6652af8b1cac")
-	)
-	(junction
 		(at 41.91 63.5)
 		(diameter 0)
 		(color 0 0 0 0)
@@ -1456,28 +1450,16 @@
 		(uuid "ffa429ad-fe07-5fcc-bb4e-e270daf49446")
 	)
 	(junction
-		(at 72.39 58.42)
+		(at 97.79 58.42)
 		(diameter 0)
 		(color 0 0 0 0)
-		(uuid "e9fd11f1-9933-58ea-922c-b324db9271c1")
+		(uuid "03b7cefe-74c5-580b-9157-2e779223b4dd")
 	)
 	(junction
-		(at 72.39 60.96)
+		(at 118.11 58.42)
 		(diameter 0)
 		(color 0 0 0 0)
-		(uuid "74596e6c-595c-53b2-baa2-36d5e46181d2")
-	)
-	(junction
-		(at 85.09 43.18)
-		(diameter 0)
-		(color 0 0 0 0)
-		(uuid "0e7de05d-2549-5277-9eaa-c7278bc3234f")
-	)
-	(junction
-		(at 97.79 60.96)
-		(diameter 0)
-		(color 0 0 0 0)
-		(uuid "b80ff9d5-523a-5384-b072-4db351573793")
+		(uuid "ab2a3f0a-2c7f-5170-b1d9-5a72a5da4709")
 	)
 	(symbol
 		(lib_id "power:PWR_FLAG")

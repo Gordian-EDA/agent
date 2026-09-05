@@ -632,9 +632,14 @@ mod tests {
     #[test]
     fn junctions_render_sorted_and_deduped() {
         let mut w = SchematicWriter::new();
-        w.add_junction_on_net([50.8, 25.4], "N2");
+        // A trunk tapped twice: both taps are real three-way joins once the trunk
+        // splits, so both are drawn.
+        w.add_wire_on_net([12.7, 25.4], [63.5, 25.4], "N1");
+        w.add_wire_on_net([25.4, 25.4], [25.4, 38.1], "N1");
+        w.add_wire_on_net([50.8, 25.4], [50.8, 38.1], "N1");
+        w.add_junction_on_net([50.8, 25.4], "N1");
         w.add_junction_on_net([25.4, 25.4], "N1");
-        w.add_junction_on_net([50.8, 25.4], "N2"); // duplicate -> dropped
+        w.add_junction_on_net([50.8, 25.4], "N1"); // duplicate -> dropped
         let sch = w.finish();
         let count = sch.matches("(junction").count();
         assert_eq!(count, 2);

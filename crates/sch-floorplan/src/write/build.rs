@@ -365,12 +365,12 @@ impl SchematicWriter {
     /// Record a tap where `net`'s own wires meet. Deduplicated by position.
     ///
     /// The tap always splits this net's through-wire at `at` (which is what makes the
-    /// join real in the netlist). It is also DRAWN as a junction dot unless
-    /// [`Self::set_weld_guard`] is on and a foreign net's wire runs through the point: a
-    /// dot welds everything through it, and the shipped sheet must never be the thing
-    /// that merges two nets. Suppressing the dot does not make such a point tidy — the
-    /// geometry is still crowded and [`crate::floorplan::place::net_conflicts`] reports
-    /// anything it does weld — but this net stays whole either way.
+    /// join real in the netlist). Whether it is also DRAWN as a junction dot is NOT
+    /// decided here — the caller cannot see the sheet it is about to finish, so the
+    /// decision belongs to `place_junction_dots`, which runs over the final geometry
+    /// and dots exactly the points where three conductors meet. A tap whose point never
+    /// becomes a real join is simply not drawn; a join nobody recorded a tap for is
+    /// drawn anyway.
     pub fn add_junction_on_net(&mut self, at: impl Into<Point2>, net: &str) {
         let at = GRID_50_MIL.snap_point(at.into());
         let uuid_key = format!("{}:{}", at.x, at.y);
@@ -384,21 +384,12 @@ impl SchematicWriter {
         {
             return;
         }
-        let welds_foreign = self
-            .wires
-            .iter()
-            .any(|w| w.net != net && Segment::new(w.a, w.b).contains_point(at));
         self.junctions.push(Junction {
             at,
             uuid_key,
             net: net.to_string(),
-            dot: !(self.weld_guard && welds_foreign),
+            dot: false,
         });
-    }
-
-    /// Refuse junction dots that would weld two nets (see [`Self::add_junction_on_net`]).
-    pub fn set_weld_guard(&mut self, on: bool) {
-        self.weld_guard = on;
     }
 
     /// Set the sheet title (rendered in the drawing frame's title block).
@@ -671,6 +662,24 @@ impl SchematicWriter {
             .collect())
     }
 
+    /// The sheet-space connection point of every pin the placed instances draw.
+    ///
+    /// A multi-unit part places one instance per unit, so each instance
+    /// contributes only its own unit's pins. Power symbols contribute their
+    /// single origin pin like any other.
+    pub(super) fn pin_points(&self) -> Vec<Point2> {
+        let mut out = Vec::new();
+        for inst in &self.instances {
+            let Some(pins) = self.sym_pins.get(&inst.lib_id) else {
+                continue;
+            };
+            for pg in pins.iter().filter(|p| p.unit.max(1) == inst.unit) {
+                out.push(Point2::from(pin_endpoint(pg, inst.at, inst.angle, inst.mirror)));
+            }
+        }
+        out
+    }
+
     /// Build the routing obstacle scene from everything placed so far.
     ///
     /// Solids are symbol bodies SHRUNK by 2.54 mm per side: `approx_size` pads
@@ -795,8 +804,9 @@ impl SchematicWriter {
             .collect()
     }
 
-    /// Junction-dot positions (for `count_merges`: a junction sitting on wires of
-    /// two different nets fuses them).
+    /// Positions of the junction dots the sheet DRAWS, which
+    /// `place_junction_dots` decides over the final geometry — so this reports the
+    /// shipped dots only on a writer that has been through [`Self::prepare`].
     pub fn junction_positions(&self) -> Vec<[f64; 2]> {
         let mut seen = std::collections::BTreeSet::new();
         self.junctions

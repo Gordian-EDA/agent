@@ -31,7 +31,6 @@ pub(crate) fn wire(
     needs_flag: &BTreeSet<String>,
     flag_points: &mut BTreeMap<String, ([f64; 2], f64)>,
 ) -> io::Result<()> {
-    w.set_weld_guard(true);
     let refdes_of = |i: usize| items[i].refdes.clone();
     // Endpoints of every net first, so all rails can share common bands.
     let mut net_eps: BTreeMap<String, Vec<([f64; 2], Dir)>> = BTreeMap::new();
@@ -2177,10 +2176,12 @@ mod tests {
 
         assert_eq!(writer.wires_with_nets().len(), 1);
         assert_eq!(scene.segments.len(), 1);
-        assert_eq!(writer.junction_positions(), vec![[105.41, 21.59]]);
 
+        // The reused run recorded a tap, so the covering wire splits there — a plain
+        // collinear split, which is why no dot is drawn.
         writer.prepare();
         assert_eq!(writer.wires_with_nets().len(), 2);
+        assert!(writer.junction_positions().is_empty());
     }
 
     #[test]
@@ -2220,13 +2221,17 @@ mod tests {
 
     #[test]
     fn routed_segment_covered_by_beside_wire_gets_attachment_junctions() {
-        let mut writer = SchematicWriter::new();
-        let mut scene = sch_model::route::RouteScene::default();
-        scene.segments.push(sch_model::route::NetSegment::new(
+        // The covering wire belongs to the SHEET this block is drawn beside, which is
+        // how the router sees it (`route_scene` chains the neighbour's segments in).
+        let mut beside = sch_model::route::RouteScene::default();
+        beside.segments.push(sch_model::route::NetSegment::new(
             [10.16, 10.16].into(),
             [20.32, 10.16].into(),
             "SIG",
         ));
+        let mut writer = SchematicWriter::new();
+        writer.set_beside(beside);
+        let mut scene = writer.route_scene();
 
         emit_routed_segment(
             &mut writer,
@@ -2237,6 +2242,7 @@ mod tests {
         );
 
         assert!(writer.wires_with_nets().is_empty());
+        writer.prepare();
         assert_eq!(
             writer.junction_positions(),
             vec![[12.7, 10.16], [17.78, 10.16]]
@@ -2323,7 +2329,6 @@ mod tests {
         ];
         let foreign = [([40.64, 45.72], "SIG".to_string())];
         let mut w = SchematicWriter::new();
-        w.set_weld_guard(true);
         emit_rail(
             &env,
             &mut w,

@@ -735,6 +735,12 @@
 		(uuid "f40fbe83-64ca-5cda-a055-66c263e0c0ae")
 	)
 	(junction
+		(at 85.09 50.8)
+		(diameter 0)
+		(color 0 0 0 0)
+		(uuid "77b303ad-847f-5c12-acda-ade1792f585a")
+	)
+	(junction
 		(at 107.95 53.34)
 		(diameter 0)
 		(color 0 0 0 0)

@@ -843,6 +843,101 @@ impl SchematicWriter {
         self.wires.retain(|w| seen.insert(w.uuid_key.clone()));
     }
 
+    /// Decide which taps are DRAWN as junction dots, from the FINAL sheet geometry.
+    ///
+    /// KiCAD's rule, applied once everything that can meet at a point has been
+    /// written: a point's degree counts one per wire END and per pin tip that lands
+    /// on it, plus two for every wire whose INTERIOR it splits, and a dot belongs
+    /// exactly where that reaches three. Two segments meeting at a bend, or a wire
+    /// ending on a pin, are degree two — a dot there reads to an engineer as a
+    /// branch that is not on the sheet. The router cannot decide this while it
+    /// routes: its own tap splits and the label stubs land afterwards, so a bend
+    /// looked like a join and a real three-way join looked like a bend.
+    ///
+    /// Candidates are the points something could END at — wire endpoints, pin tips,
+    /// and the recorded taps. Two wires merely crossing mid-span is not one of them:
+    /// KiCAD leaves such a crossing unconnected and so do we.
+    fn place_junction_dots(&mut self) {
+        let key = super::build::point_key;
+        let mut degree: BTreeMap<(i64, i64), usize> = BTreeMap::new();
+        let mut candidates: BTreeMap<(i64, i64), Point2> = BTreeMap::new();
+        for w in &self.wires {
+            for end in [w.a, w.b] {
+                *degree.entry(key(end)).or_default() += 1;
+                candidates.insert(key(end), end);
+            }
+        }
+        for p in self.pin_points() {
+            *degree.entry(key(p)).or_default() += 1;
+            candidates.insert(key(p), p);
+        }
+        for j in &self.junctions {
+            candidates.insert(key(j.at), j.at);
+        }
+        // The neighbouring sheet's wires are conductors too: a block whose route was
+        // already covered by one draws no wire of its own and attaches to it instead.
+        let beside = self.beside_wires();
+        let ours = self
+            .wires
+            .iter()
+            .map(|w| (Segment::new(w.a, w.b), w.net.clone()));
+        let conductors: Vec<(Segment, String)> = ours.chain(beside.iter().cloned()).collect();
+        for (seg, _) in &beside {
+            for end in [seg.a, seg.b] {
+                *degree.entry(key(end)).or_default() += 1;
+            }
+        }
+        // Nets touching each candidate, and the two degrees an interior split adds.
+        let interior = |seg: &Segment, p: Point2| {
+            seg.contains_point(p)
+                && (p[0] - seg.a[0]).abs() + (p[1] - seg.a[1]).abs() > EPS
+                && (p[0] - seg.b[0]).abs() + (p[1] - seg.b[1]).abs() > EPS
+        };
+        let mut nets: BTreeMap<(i64, i64), std::collections::BTreeSet<&str>> = BTreeMap::new();
+        for (k, p) in &candidates {
+            for (seg, net) in &conductors {
+                if !seg.contains_point(*p) {
+                    continue;
+                }
+                nets.entry(*k).or_default().insert(net.as_str());
+                if interior(seg, *p) {
+                    *degree.entry(*k).or_default() += 2;
+                }
+            }
+        }
+        // A dot welds every conductor through it, so a point where a second net's wire
+        // runs never gets one — the tap split already keeps each net whole there.
+        let alone = |k: &(i64, i64)| nets.get(k).is_some_and(|n| n.len() == 1);
+        let draws = |k: &(i64, i64)| degree.get(k).copied().unwrap_or(0) >= 3 && alone(k);
+        for j in &mut self.junctions {
+            // A tap landing inside a NEIGHBOUR's wire is an attachment: this writer
+            // holds only its block, so the block terminal that meets the sheet there is
+            // geometry it cannot see, and the join is real however few of its own
+            // conductors show up.
+            let attaches = beside
+                .iter()
+                .any(|(seg, net)| *net == j.net && interior(seg, j.at));
+            let k = key(j.at);
+            j.dot = draws(&k) || (attaches && alone(&k));
+        }
+        // A join no tap was recorded for still needs its dot: a wire ending on another
+        // wire's interior reads as a crossing without one, which silently changes the
+        // netlist an engineer reads off the sheet.
+        let tapped: std::collections::BTreeSet<(i64, i64)> =
+            self.junctions.iter().map(|j| key(j.at)).collect();
+        for (k, p) in &candidates {
+            if tapped.contains(k) || !draws(k) {
+                continue;
+            }
+            self.junctions.push(super::Junction {
+                at: *p,
+                uuid_key: format!("{}:{}", p.x, p.y),
+                net: nets[k].iter().next().unwrap().to_string(),
+                dot: true,
+            });
+        }
+    }
+
     /// Shift the whole drawing so its true minimum corner — including the rail
     /// power symbols, edge port labels, and solved field text that extend beyond
     /// the symbol bodies — lands at the page margin. The corner is
@@ -968,6 +1063,8 @@ impl SchematicWriter {
         // Split through-wires at their taps so every junction actually connects in
         // the netlist (KiCAD won't connect a mid-span tap on an unsplit wire).
         self.split_wires_at_nodes();
+        // Only now, on geometry nothing else will move, decide which taps are dots.
+        self.place_junction_dots();
         // Then place movable text (fields, stub labels) collision-free against
         // the final geometry.
         self.solve_text_positions();
@@ -1286,6 +1383,33 @@ mod tests {
     use geom::Point2;
     use kicad::KicadInstallation;
     use kicad_symbol::geometry::PinGeom;
+
+    /// KiCAD's junction rule on finished geometry: a corner joins nothing, a tap
+    /// on a trunk and a wire landing on another wire's interior each join three.
+    #[test]
+    fn dots_only_where_three_conductors_meet() {
+        let dots = |w: &mut SchematicWriter| {
+            w.prepare();
+            w.junction_positions()
+        };
+
+        let mut bend = SchematicWriter::new();
+        bend.add_wire_on_net([25.4, 25.4], [50.8, 25.4], "N");
+        bend.add_wire_on_net([50.8, 25.4], [50.8, 50.8], "N");
+        assert!(dots(&mut bend).is_empty(), "an L-bend is not a join");
+
+        let mut tee = SchematicWriter::new();
+        tee.add_wire_on_net([25.4, 25.4], [50.8, 25.4], "N");
+        tee.add_wire_on_net([50.8, 25.4], [76.2, 25.4], "N");
+        tee.add_wire_on_net([50.8, 25.4], [50.8, 50.8], "N");
+        assert_eq!(dots(&mut tee), vec![[50.8, 25.4]]);
+
+        // The end lands mid-trunk: the tap splits the trunk and the dot says so.
+        let mut tap = SchematicWriter::new();
+        tap.add_wire_on_net([25.4, 25.4], [76.2, 25.4], "N");
+        tap.add_wire_on_net([50.8, 25.4], [50.8, 50.8], "N");
+        assert_eq!(dots(&mut tap), vec![[50.8, 25.4]]);
+    }
 
     /// `add_symbol` needs a real symbol library to resolve geometry, so these
     /// tests SKIP-gracefully when no KiCAD environment is detected.

@@ -185,7 +185,9 @@ pub(super) struct Wire {
 /// One tap: a point where `net`'s own wires meet.
 ///
 /// A tap is what the finalize split cuts a through-wire at, so the three ends coincide
-/// and KiCAD joins them. `dot` is whether it is also DRAWN as a `(junction …)`: a dot
+/// and KiCAD joins them. `dot` is whether it is also DRAWN as a `(junction …)`, and it
+/// is decided only in [`SchematicWriter::prepare`], over geometry nothing else will
+/// move: a dot goes exactly where three conductors meet, never at a bend. A dot also
 /// welds every wire passing through it, so where a foreign net's wire runs through the
 /// tap the dot is suppressed — the split still keeps this net whole, and the foreign
 /// wire, meeting only wire ENDS on its interior, stays separate.
@@ -260,10 +262,6 @@ pub struct SchematicWriter {
     /// extend past the symbol bodies). Off for direct-writer and fixed-coordinate paths,
     /// which place content at fixed absolute coordinates.
     pub(super) frame: bool,
-    /// When set, a junction dot is refused where a FOREIGN net's wire already runs — a
-    /// dot welds everything through it, so the realiser must never be the thing that
-    /// merges two nets.
-    pub(super) weld_guard: bool,
     /// Points occupied by a pin the design put on a NET. A no-connect marker there is
     /// refused: symbols stack their duplicate power pins on one endpoint (an ESP32's
     /// four GNDs, a USB-C receptacle's two VBUS), so an unmentioned pin can share its
