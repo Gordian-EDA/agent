@@ -25,10 +25,11 @@ mod measure;
 mod orient;
 pub mod pack;
 mod part;
+mod serve;
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use geom::{Point2, Rect};
+use geom::{Dir, Point2, Rect};
 use sch_model::item::Item;
 use sch_model::tree::{Align, Axis, Container, Tree, Trees};
 
@@ -132,11 +133,7 @@ pub fn typeset(items: &mut [Item], trees: &Trees, pages: &[[f64; 2]]) -> Report 
 /// The pins that will carry a net label: one per net of `block` that continues elsewhere
 /// (or has no second pin at all). The writer draws one label per net per block, so
 /// reserving room on every pin of the net is what makes a block sprawl.
-fn label_pins(
-    items: &[Item],
-    block: &str,
-    members: &[usize],
-) -> BTreeSet<(usize, String)> {
+fn label_pins(items: &[Item], block: &str, members: &[usize]) -> BTreeSet<(usize, String)> {
     let leaving = leaving(items, block);
     let mut taken: BTreeSet<&str> = BTreeSet::new();
     let mut out = BTreeSet::new();
@@ -195,16 +192,11 @@ fn compose(
         .into_iter()
         .map(|block| {
             let mine = members.remove(&block).unwrap_or_default();
-            let units = || {
-                mine.iter()
-                    .map(|i| (items[*i].refdes.clone(), items[*i].unit))
-                    .collect::<Vec<_>>()
-            };
             let tree = match trees.get(&block) {
                 Some(tree) => complete(tree, items, &mine, &block, report),
                 None => {
                     report.untreed.push(block.clone());
-                    Tree::row_of(units())
+                    bare_row(items, &mine)
                 }
             };
             (block, tree, mine)
@@ -214,11 +206,12 @@ fn compose(
 
 /// The authored tree plus everything it left out, so every part is drawn.
 ///
-/// A part left out falls into two kinds, and they are not the same omission. A SYNTHESIZED
-/// part — a `decouple` cap the sugar expanded — was never the author's to name: it is
-/// seated beside the part it supports, which is where a human draws it, and nobody is told
-/// off for it. Anything else is the author's own gap: it goes in a trailing row with a note
-/// saying so, because a bare row is not a composition.
+/// A part left out falls into two kinds, and they are not the same omission. A part that
+/// SERVES another — a `decouple` cap the sugar expanded, a pull-up nobody named — is
+/// seated in a column beside the pin it serves, which is where a human draws it, and
+/// nobody is told off for a cap the author never saw. Anything else is the author's own
+/// gap: it goes in a trailing row with a note saying so, because a bare row is not a
+/// composition.
 ///
 /// This only ever INSERTS. An authored leaf never changes place or order, so a tree that
 /// already reads as a signal path still does.
@@ -239,25 +232,31 @@ fn complete(
     if missing.is_empty() {
         return tree.clone();
     }
-    // A part supports something only if that something is in this tree: a cap whose parent
+    // A part serves something only if that something is in this tree: a cap whose device
     // the author ALSO left out has no slot to be seated beside.
-    let mut beside: BTreeMap<String, Vec<(String, u8)>> = BTreeMap::new();
+    let serving = serve::serving(items, members);
+    let mut beside: BTreeMap<String, Flanks> = BTreeMap::new();
     let mut orphans: Vec<(String, u8)> = Vec::new();
     for i in missing {
-        match items[i]
-            .supports
-            .clone()
-            .filter(|parent| named.iter().any(|(r, _)| r == parent))
-        {
-            Some(parent) => beside.entry(parent).or_default().push(key(i)),
+        let seat = serving
+            .get(&i)
+            .map(|s| (items[s.served].refdes.clone(), s.side))
+            .or_else(|| items[i].supports.clone().map(|device| (device, Dir::East)))
+            .filter(|(device, _)| named.iter().any(|(r, _)| r == device));
+        match seat {
+            Some((device, side)) => seat_in(beside.entry(device).or_default(), side, key(i)),
             None => orphans.push(key(i)),
         }
     }
-    let seatable: Vec<(String, u8)> = beside.values().flatten().cloned().collect();
+    let seatable: Vec<(String, u8)> = beside
+        .values()
+        .flat_map(|flanks| flanks.values().flatten())
+        .cloned()
+        .collect();
     let tree = beside
         .into_iter()
-        .fold(tree.clone(), |tree, (parent, parts)| {
-            seat_beside(&tree, &parent, parts)
+        .fold(tree.clone(), |tree, (device, flanks)| {
+            seat_beside(&tree, &device, &flanks)
         });
     // A tree that is one bare leaf has no slot beside anything. Whatever the seating could
     // not place still has to be DRAWN — a part left out of the tree is never placed at all,
@@ -280,30 +279,116 @@ fn complete(
     })
 }
 
-/// Put `parts` in the slot right after the leaf drawing `parent`, wherever in the tree that
-/// leaf sits — the row of decoupling caps a human draws beside the device they serve.
+/// The parts serving one device, by the side of it they sit on.
+type Flanks = BTreeMap<Dir, Vec<(String, u8)>>;
+
+/// Add one support part to a device's flanks.
 ///
-/// They go in as ONE row, not as loose siblings. A bank spliced flat is measured child by
-/// child, and the wrap then folds the container between two of them: the caps come out in
-/// two bands with the far one stranded, which is the defect this is here to fix.
-fn seat_beside(tree: &Tree, parent: &str, parts: Vec<(String, u8)>) -> Tree {
+/// A pin on the TOP or BOTTOM edge of a symbol belongs to neither column, so it joins the
+/// shorter one: a device whose supports all hang off its edges gets two short columns
+/// rather than one tower down one side.
+fn seat_in(flanks: &mut Flanks, side: Dir, part: (String, u8)) {
+    let len = |side| flanks.get(&side).map_or(0, Vec::len);
+    let side = match side {
+        Dir::West | Dir::East => side,
+        _ if len(Dir::West) < len(Dir::East) => Dir::West,
+        _ => Dir::East,
+    };
+    flanks.entry(side).or_default().push(part);
+}
+
+/// The row a block whose author composed no tree is drawn as: its parts in payload order,
+/// with each support part lifted out of the row into a column beside the part it serves,
+/// on the side that part's pin leaves from.
+///
+/// A bare row is still not a composition, and the author is still told so. But a support
+/// part left in a row of strangers is drawn a page from the pin it exists for, and the
+/// engine can see which pin that is without being told.
+fn bare_row(items: &[Item], members: &[usize]) -> Tree {
+    let serving = serve::serving(items, members);
+    let key = |i: usize| (items[i].refdes.clone(), items[i].unit);
+    let mut flanks: BTreeMap<usize, Flanks> = BTreeMap::new();
+    for (server, s) in &serving {
+        seat_in(flanks.entry(s.served).or_default(), s.side, key(*server));
+    }
+    let children: Vec<Tree> = members
+        .iter()
+        .filter(|i| !serving.contains_key(i))
+        .map(|i| {
+            let leaf = Tree::leaf(items[*i].refdes.clone(), items[*i].unit);
+            match flanks.get(i) {
+                Some(flanks) => flanked(leaf, flanks),
+                None => leaf,
+            }
+        })
+        .collect();
+    Tree::Container(Container {
+        axis: Axis::Row,
+        children,
+        gap: None,
+        align: Align::Center,
+        wrap: None,
+    })
+}
+
+/// Put each of a device's `flanks` in a COLUMN beside the leaf drawing it, wherever in the
+/// tree that leaf sits — the caps a human stacks against the edge of the device they
+/// serve, each on the line of its own pin.
+///
+/// The leaf keeps its place and its order: it is only wrapped in a row with its columns,
+/// so a tree that already reads as a signal path still does. A row spliced in as a SIBLING
+/// instead — what this did while it only ever seated `decouple` caps — pushes whatever the
+/// author composed on that side a hand's width away from the pins it was composed for.
+fn seat_beside(tree: &Tree, device: &str, flanks: &Flanks) -> Tree {
+    if matches!(tree, Tree::Leaf(l) if l.part == device) {
+        return flanked(tree.clone(), flanks);
+    }
     let Tree::Container(c) = tree else {
         return tree.clone();
     };
-    let mut children: Vec<Tree> = c
-        .children
-        .iter()
-        .map(|child| seat_beside(child, parent, parts.clone()))
-        .collect();
-    if let Some(at) = children
-        .iter()
-        .position(|k| matches!(k, Tree::Leaf(l) if l.part == parent))
-    {
-        children.insert(at + 1, Tree::row_of(parts));
-    }
     Tree::Container(Container {
-        children,
+        children: c
+            .children
+            .iter()
+            .map(|child| seat_beside(child, device, flanks))
+            .collect(),
         ..c.clone()
+    })
+}
+
+/// A device and the parts serving it, as ONE drawing: a group the typesetter seats on the
+/// device's pin lines, and the packer folds as a unit rather than through.
+///
+/// Neither column ever folds. A column's length is set by the pins it reaches — each child
+/// is seated on the line of its own pin, inside the device's own height — and a fold turns
+/// it into side-by-side bands the seating no longer recognises, which strands every part
+/// in it a page from the pin it serves.
+fn flanked(device: Tree, flanks: &Flanks) -> Tree {
+    let column = |side| {
+        flanks.get(&side).map(|parts: &Vec<(String, u8)>| {
+            Tree::Container(Container {
+                axis: Axis::Col,
+                children: parts
+                    .iter()
+                    .cloned()
+                    .map(|(part, unit)| Tree::leaf(part, unit))
+                    .collect(),
+                gap: None,
+                align: Align::Center,
+                wrap: Some(f64::INFINITY),
+            })
+        })
+    };
+    Tree::Container(Container {
+        axis: Axis::Row,
+        children: column(Dir::West)
+            .into_iter()
+            .chain([device])
+            .chain(column(Dir::East))
+            .collect(),
+        gap: None,
+        align: Align::Center,
+        wrap: Some(f64::INFINITY),
     })
 }
 

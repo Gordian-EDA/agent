@@ -232,8 +232,10 @@ fn a_leaf_for_a_part_this_call_is_not_placing_leaves_no_hole() {
 }
 
 /// A `decouple` cap is synthesized after the author composed the block, so the author
-/// could not have named it. It is drawn as one row beside the part it supports — not in
-/// the leftovers row at the bottom of the block — and its author is not told off for it.
+/// could not have named it. It is drawn as one COLUMN beside the part it supports — not in
+/// the leftovers row at the bottom of the block, and not as a row spliced between that
+/// part and its neighbour, which pushes whatever the author composed on that side a hand's
+/// width away from the pins it was composed for.
 #[test]
 fn a_synthesized_decoupler_is_seated_beside_the_part_it_supports() {
     let cap = |refdes: &str| Item {
@@ -253,14 +255,14 @@ fn a_synthesized_decoupler_is_seated_beside_the_part_it_supports() {
     assert!(report.uncomposed.is_empty(), "{report:?}");
     let at = |refdes: &str| items.iter().find(|i| i.refdes == refdes).unwrap().at;
     let (u1, c1, c2, c3, r2) = (at("U1"), at("C1"), at("C2"), at("C3"), at("R2"));
-    assert_eq!((c1.y, c2.y), (c3.y, c3.y), "the caps are not on one line");
+    assert_eq!((c1.x, c2.x), (c3.x, c3.x), "the caps are not on one line");
     assert!(
-        u1.x < c1.x && c1.x < c2.x && c2.x < c3.x && c3.x < r2.x,
+        u1.x < c1.x && c1.x < r2.x,
         "the caps do not sit between U1 and the rest of the row"
     );
     assert!(
-        ((c2.x - c1.x) - (c3.x - c2.x)).abs() < 1e-6,
-        "the row is not evenly pitched"
+        ((c2.y - c1.y) - (c3.y - c2.y)).abs() < 1e-6,
+        "the column is not evenly pitched"
     );
 }
 
@@ -416,4 +418,64 @@ fn a_resistor_in_series_with_a_potentiometer_lies_along_it() {
     let tree = stack(Axis::Row, vec![leaf("R2"), leaf("RV1")]);
     sch_flex::typeset(&mut items, &trees(tree), &[]);
     assert_eq!(items[0].angle % 180.0, 90.0, "a resistor feeding a pot stood up");
+}
+
+/// A support part the author left out is drawn beside the pin it serves, not in a row of
+/// strangers: the wire between them is a few millimetres and never needs a name.
+#[test]
+fn a_support_part_left_out_is_seated_beside_the_pin_it_serves() {
+    let mut items = vec![
+        ic("U1", ["A", "B", "GND"]),
+        passive("R9", "B", "VCC"),
+        passive("R1", "IN", "OUT"),
+        passive("R2", "OUT", "GND"),
+    ];
+    let tree = stack(Axis::Row, vec![leaf("R1"), leaf("R2"), leaf("U1")]);
+    sch_flex::typeset(&mut items, &trees(tree), &[]);
+    let at = |refdes: &str| items.iter().find(|i| i.refdes == refdes).unwrap().at;
+    // U1's pin 2 carries B and so does R9's top pin; both are west-facing, so R9 sits one
+    // gap to the left of the IC with its pin on that pin's line.
+    let (r9, u1) = (at("R9"), at("U1"));
+    assert!(r9.x < u1.x, "R9 at {r9:?} is not on U1's pin side {u1:?}");
+    assert!(
+        r9.dist(u1) < 30.0,
+        "R9 at {r9:?} is a page from the U1 pin it serves at {u1:?}"
+    );
+}
+
+/// The same, for a block whose author composed nothing at all: a bare row is still not a
+/// composition, but the parts that plainly serve a pin are drawn beside it.
+#[test]
+fn a_bare_row_still_seats_supports_beside_what_they_serve() {
+    let mut items = vec![
+        passive("R1", "IN", "OUT"),
+        ic("U1", ["A", "B", "GND"]),
+        passive("C1", "A", "GND"),
+    ];
+    let report = sch_flex::typeset(&mut items, &Trees::new(), &[]);
+    assert_eq!(report.untreed, ["b"]);
+    let at = |refdes: &str| items.iter().find(|i| i.refdes == refdes).unwrap().at;
+    assert!(
+        at("C1").dist(at("U1")) < at("R1").dist(at("U1")),
+        "C1 is further from the pin it serves than a part that serves nothing"
+    );
+}
+
+/// A device whose neighbours wire to pins on its far side is drawn backwards: every net
+/// across it becomes a label and a detour. It is turned, exactly as a connector at the end
+/// of a row is.
+#[test]
+fn a_device_is_turned_to_face_the_column_wired_to_it() {
+    let mut items = vec![
+        ic("U1", ["A", "B", "GND"]),
+        passive("R1", "A", "GND"),
+        passive("R2", "B", "GND"),
+    ];
+    let tree = stack(
+        Axis::Row,
+        vec![leaf("U1"), stack(Axis::Col, vec![leaf("R1"), leaf("R2")])],
+    );
+    sch_flex::typeset(&mut items, &trees(tree), &[]);
+    let u1 = items.iter().find(|i| i.refdes == "U1").unwrap();
+    assert!(u1.mirror, "U1's pins are drawn away from the column on them");
 }

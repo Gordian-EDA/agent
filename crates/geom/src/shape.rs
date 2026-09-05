@@ -3,7 +3,7 @@
 use crate::point::Point2;
 
 /// One of the four axis directions.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Dir {
     East,
     West,
