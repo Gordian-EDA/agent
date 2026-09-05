@@ -58,6 +58,7 @@ pub use caption::BlockFrame;
 pub use sch_model::geometry::quantize_dir;
 pub use emit::{escape_sexpr_string, fmt_coord};
 pub(crate) use emit::usable_pages;
+pub(crate) use textsolve::DEFAULT_STUB_MM;
 
 /// Stable key identifying *this* schematic sheet for root-uuid derivation.
 ///
@@ -150,10 +151,6 @@ pub(super) struct PinLabel {
     pub(super) dir: Dir,
     /// The freedom the text solver has over this label.
     pub(super) anchor: Anchor,
-    /// Render as a KiCAD `global_label` (the off-sheet I/O pentagon) rather than
-    /// a plain local label. Set for ports — board-edge / cross-sheet signals —
-    /// so a single-pin port reads as intentional I/O and ERC does not flag it.
-    pub(super) global: bool,
 }
 
 /// How a [`PinLabel`] is held to the sheet — the one degree of freedom the text
@@ -354,14 +351,10 @@ pub(super) fn field_box(at: impl Into<Point2>, j: Justify, text: &str) -> Rect {
 }
 
 /// Box of a label as the sheet DRAWS it in the pose `at`/`dir` — the label's own
-/// pose, or a candidate the text solver is trying: a port renders as KiCAD's
-/// global-label pentagon, a signal label as plain text floating off its wire.
+/// pose, or a candidate the text solver is trying. Every label the engine lays
+/// down is plain text floating off its wire.
 pub(super) fn label_rect(label: &PinLabel, at: Point2, dir: Dir) -> Rect {
-    if label.global {
-        sch_model::text::global_label_box(at, dir, &label.net)
-    } else {
-        sch_model::text::label_box(at, dir, &label.net)
-    }
+    sch_model::text::label_box(at, dir, &label.net)
 }
 
 /// Justify token for a solved field anchor. `Center` omits the token (KiCAD's

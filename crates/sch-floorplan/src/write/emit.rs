@@ -259,21 +259,6 @@ fn render_label(label: &PinLabel) -> String {
     };
 
     let mut s = String::new();
-    if label.global {
-        // A port: render the off-sheet I/O pentagon. `bidirectional` suits a
-        // generic board-edge signal and KiCAD does not flag a global label as an
-        // isolated single-pin net (it is, by definition, a cross-sheet link).
-        let _ = writeln!(s, "\t(global_label \"{net}\"");
-        let _ = writeln!(s, "\t\t(shape bidirectional)");
-        let _ = writeln!(s, "\t\t(at {x} {y} {angle})");
-        let _ = writeln!(
-            s,
-            "\t\t(effects (font (size 1.27 1.27)) (justify {justify}))"
-        );
-        let _ = writeln!(s, "\t\t(uuid \"{uuid}\")");
-        s.push_str("\t)\n");
-        return s;
-    }
     let _ = writeln!(s, "\t(label \"{net}\"");
     let _ = writeln!(s, "\t\t(at {x} {y} {angle})");
     let _ = writeln!(
@@ -633,7 +618,6 @@ mod tests {
             uuid_key: "k".into(),
             dir,
             anchor: Anchor::Fixed,
-            global: false,
         };
         assert!(render_label(&mk(Dir::East)).contains("(at 0 0 0)"));
         assert!(render_label(&mk(Dir::East)).contains("justify left"));
@@ -697,6 +681,34 @@ mod tests {
             build(true),
             "pre-solving must not change output"
         );
+    }
+
+    #[test]
+    fn one_symbol_sides_stub_labels_share_a_column() {
+        // A header whose pin labels the router seated at four different lengths.
+        // `prepare` re-seats the whole east side on one stub, so the text starts
+        // on a single x — the datasheet column a connector is supposed to read as.
+        let Some(env) = detect_env() else { return };
+        let mut w = SchematicWriter::new();
+        w.add_symbol(&env, "Connector_Generic:Conn_01x04", "J1", "hdr", [127.0, 63.5], 0.0)
+            .unwrap();
+        for (pin, net, stub) in [
+            ("1", "PA0", 3.81),
+            ("2", "PA1", 6.35),
+            ("3", "PA2", 11.43),
+            ("4", "PA3", 8.89),
+        ] {
+            w.add_signal_label_stub(&env, "J1", pin, net, stub).unwrap();
+        }
+
+        w.prepare();
+
+        let xs: std::collections::BTreeSet<i64> = w
+            .labels
+            .iter()
+            .map(|l| (l.at[0] * 100.0).round() as i64)
+            .collect();
+        assert_eq!(xs.len(), 1, "the side's labels sit at {xs:?}, not one column");
     }
 
     #[test]

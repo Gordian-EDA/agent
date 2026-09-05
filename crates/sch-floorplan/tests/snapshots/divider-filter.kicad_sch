@@ -674,14 +674,13 @@
 		(embedded_fonts no)
 	)
 	)
-	(global_label "OUT"
-		(shape bidirectional)
+	(label "OUT"
 		(at 130.81 53.34 0)
 		(effects
 			(font
 				(size 1.27 1.27)
 			)
-			(justify left)
+			(justify left bottom)
 		)
 		(uuid "d2ec9f70-5e07-52d6-8f04-7e9a8b562636")
 	)
@@ -989,21 +988,21 @@
 		(dnp no)
 		(uuid "8fdd845b-ad84-5268-a715-a880690218bf")
 		(property "Reference" "C3"
-			(at 116.84 55.88 0)
+			(at 129.54 55.88 0)
 			(effects
 				(font
 					(size 1.27 1.27)
 				)
-				(justify right)
+				(justify left)
 			)
 		)
 		(property "Value" "47n"
-			(at 116.84 58.42 0)
+			(at 129.54 58.42 0)
 			(effects
 				(font
 					(size 1.27 1.27)
 				)
-				(justify right)
+				(justify left)
 			)
 		)
 		(property "Footprint" ""
