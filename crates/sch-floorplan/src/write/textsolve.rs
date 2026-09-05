@@ -113,6 +113,23 @@ fn most_constrained_first(
     }
 }
 
+/// One candidate seat for a Reference+Value pair: the two anchors the writer
+/// would emit, the box KiCAD then draws there, and how much of the part's own
+/// ink — its pin text, its power glyphs — that box covers.
+#[derive(Clone, Copy)]
+struct FieldSeat {
+    anchors: (TextPos, TextPos),
+    bbox: Rect,
+    hits: usize,
+}
+
+/// The empty space between two boxes — zero where they touch or overlap.
+fn gap(a: &Rect, b: &Rect) -> f64 {
+    let dx = (b.min_x - a.max_x).max(a.min_x - b.max_x).max(0.0);
+    let dy = (b.min_y - a.max_y).max(a.min_y - b.max_y).max(0.0);
+    dx.hypot(dy)
+}
+
 /// A grid-snapped point as an exact map key.
 fn bits(p: Point2) -> (u64, u64) {
     let p = GRID_50_MIL.snap_point(p);
@@ -557,6 +574,48 @@ impl SchematicWriter {
             .unwrap_or_else(|| crate::write::build::ink_box(inst))
     }
 
+    /// Every power symbol's glyph and seated rail name.
+    ///
+    /// A part's power pins hang their rails off one side of it, and an IC's
+    /// field pair prefers a horizontal band — so on the usual part, with GND
+    /// under the body, the conventional band is the one already spoken for.
+    /// Counting these alongside the pin text picks the OTHER band, which is
+    /// what keeps a refdes the nearest text to the part it names rather than
+    /// something stranded past a ground symbol.
+    ///
+    /// Rail names are seated before any field, so their boxes are known here.
+    fn rail_glyphs(&self) -> Vec<Rect> {
+        self.instances
+            .iter()
+            .filter(|inst| inst.refdes.starts_with('#'))
+            .flat_map(|inst| {
+                let name = (!inst.val_hidden).then(|| {
+                    let (_, vp) = field_anchors(inst);
+                    field_box(vp.at, vp.justify, &inst.value)
+                });
+                [Some(crate::write::build::ink_box(inst)), name]
+            })
+            .flatten()
+            .collect()
+    }
+
+    /// The name/number text THIS instance draws — its own unit's pins only.
+    ///
+    /// `sym_pins` holds every unit's pins flattened together, so boxing them
+    /// all at one instance stamps a five-unit part's whole pin list onto each
+    /// of its five placements and walls off the paper around every one.
+    fn unit_pin_text(&self, inst: &super::Instance) -> Vec<Rect> {
+        self.sym_pins
+            .get(&inst.lib_id)
+            .into_iter()
+            .flatten()
+            .filter(|pg| pg.unit.max(1) == inst.unit.max(1))
+            .flat_map(|pg| {
+                sch_model::text::pin_text_boxes(pg, inst.at, inst.angle, inst.mirror)
+            })
+            .collect()
+    }
+
     /// Out to the pin tips: where a field pair may first stand without covering
     /// the part or the pins it hangs on.
     fn symbol_extent(&self, inst: &super::Instance) -> Rect {
@@ -581,7 +640,7 @@ impl SchematicWriter {
     fn definition_box(&self, inst: &super::Instance) -> Option<Rect> {
         thread_local! {
             static LOCAL_BOX: std::cell::RefCell<BTreeMap<(String, u8), Option<Rect>>> =
-                std::cell::RefCell::new(BTreeMap::new());
+                const { std::cell::RefCell::new(BTreeMap::new()) };
         }
         let key = (inst.lib_id.clone(), inst.unit);
         let local = LOCAL_BOX.with(|memo| {
@@ -607,7 +666,7 @@ impl SchematicWriter {
     /// for their own refdes), pin name/number text, wires, no-connect markers,
     /// and fixed (stub-less) labels.
     fn build_obstacles(&self) -> Vec<sch_model::text::Obstacle> {
-        use sch_model::text::{Obstacle, Owner, pin_text_boxes, wire_box};
+        use sch_model::text::{Obstacle, Owner, wire_box};
         let mut obstacles: Vec<Obstacle> = Vec::new();
         for inst in &self.instances {
             obstacles.push(Obstacle {
@@ -616,16 +675,9 @@ impl SchematicWriter {
             });
             // Pin name/number text (skip power/flag graphics — single
             // unnamed pin, no meaningful pin text).
-            if !inst.refdes.starts_with('#')
-                && let Some(pins) = self.sym_pins.get(&inst.lib_id)
-            {
-                for pg in pins {
-                    for b in pin_text_boxes(pg, inst.at, inst.angle, inst.mirror) {
-                        obstacles.push(Obstacle {
-                            bbox: b,
-                            owner: None,
-                        });
-                    }
+            if !inst.refdes.starts_with('#') {
+                for bbox in self.unit_pin_text(inst) {
+                    obstacles.push(Obstacle { bbox, owner: None });
                 }
             }
         }
@@ -647,24 +699,8 @@ impl SchematicWriter {
                 owner: None,
             });
         }
-        // What earlier calls already drew on this sheet. A block is seated beside
-        // finished content, and text that cannot see it lands straight on it —
-        // the neighbouring block's bodies, its labels and its wires are as solid
-        // as this block's own. Its labels carry their net so a tap on the SAME
-        // net (the join this block is being drawn to make) is not treated as a
-        // collision.
-        for solid in &self.beside.solids {
-            obstacles.push(Obstacle {
-                bbox: *solid,
-                owner: None,
-            });
-        }
-        for (bbox, net) in &self.beside.label_solids {
-            obstacles.push(Obstacle {
-                bbox: *bbox,
-                owner: Some(Owner::Net(net.clone())),
-            });
-        }
+        // The wires already on the sheet: a block is drawn beside finished
+        // content, and text that cannot see that content lands straight on it.
         for seg in &self.beside.segments {
             obstacles.push(Obstacle {
                 bbox: wire_box(seg.segment.a, seg.segment.b),
@@ -953,44 +989,61 @@ impl SchematicWriter {
         rings().map(tip).chain(rings().flat_map(side)).collect()
     }
 
-    /// Reference+Value field pair for a non-power instance: right / left / above
-    /// / below of the body, with corner and far-band fallbacks for crowded
-    /// symbols. Wide (rotated passive) bodies prefer above/below; ICs carry the
-    /// pair on the horizontal band least overlapping their own pin text.
+    /// Reference+Value field pair for a non-power instance: every seat around
+    /// the part at every [`FIELD_PAD_RINGS`] remove, nearest to the part's ink
+    /// first.
     fn field_pair_movable(&self, i: usize) -> (sch_model::text::Movable, Apply) {
         let inst = &self.instances[i];
         let extent = self.symbol_extent(inst);
-        let cands: Vec<(TextPos, TextPos, Rect)> = FIELD_PAD_RINGS
+        // Every seat the part offers, NEAREST first: the pair's own gap to the
+        // ink it names, then how much of the part's pin text and hanging power
+        // glyphs it covers, then the conventional order. Ordering ring by ring
+        // instead put a whole ring of far seats ahead of a near one on another
+        // side, which is how a refdes came to stand beyond the ground symbol
+        // under its part with clear paper directly above it.
+        let ink = self.symbol_ink(inst);
+        let mut cands: Vec<(FieldSeat, usize, usize)> = FIELD_PAD_RINGS
             .iter()
-            .flat_map(|&pad| self.field_ring(inst, extent.inflate(pad)))
+            .enumerate()
+            .flat_map(|(ring, &pad)| {
+                self.field_ring(inst, extent.inflate(pad))
+                    .into_iter()
+                    .enumerate()
+                    .map(move |(band, seat)| (seat, ring, band))
+            })
             .collect();
+        // Distance in GRID STEPS, not millimetres: two seats a fraction of a
+        // step apart are equally near to the eye, and deciding between them on
+        // that fraction throws away the KiCAD convention the band order carries
+        // (a tall passive's fields read to its right, not over its head).
+        let steps = |b: &Rect| (gap(b, &ink) / GRID_50_MIL.pitch()).round() as i64;
+        cands.sort_by_key(|(seat, ring, band)| (steps(&seat.bbox), seat.hits, *ring, *band));
         let movable = sch_model::text::Movable {
             owner: Some(sch_model::text::Owner::Symbol(inst.refdes.clone())),
-            candidates: cands.iter().map(|c| c.2).collect(),
+            candidates: cands.iter().map(|(seat, ..)| seat.bbox).collect(),
         };
         (
             movable,
-            Apply::Fields(i, cands.into_iter().map(|c| (c.0, c.1)).collect()),
+            Apply::Fields(i, cands.into_iter().map(|(seat, ..)| seat.anchors).collect()),
         )
     }
 
-    /// One ring of field-pair seats around `body`, in preference order.
+    /// One ring of field-pair seats around `body`, in convention order, each
+    /// carrying how much of the part's own ink it covers.
     ///
     /// Multi-pin parts (ICs) carry refdes+value on a HORIZONTAL band, the
     /// reference convention — a long MPN ("SN74LVC2T45DCUR") on a band clears
     /// the horizontal series neighbours it would smear onto placed to the side,
-    /// and an IC's own sides are the dense pin-name/number band. The bands are
-    /// stable-sorted by how many of the IC's pin-text boxes they hit, so
-    /// MCP1703 (GND exits bottom) takes above and SN74 (VCC top, GND
-    /// bottom-centre) takes below-left/right. Passives keep the KiCAD
-    /// convention: wide (rotated) bodies prefer above/below, tall prefer
-    /// right/left.
+    /// and an IC's own sides are the dense pin-name/number band. The count is
+    /// the IC's own pin text plus the power glyphs hanging off it, which is what
+    /// sends MCP1703's name to the band its ground symbol is not in. Passives
+    /// keep the KiCAD convention: wide (rotated) bodies prefer above/below, tall
+    /// prefer right/left, and nothing of theirs is ever covered.
     fn field_ring(
         &self,
         inst: &super::Instance,
         body: Rect,
-    ) -> Vec<(TextPos, TextPos, Rect)> {
-        use sch_model::text::pin_text_boxes;
+    ) -> Vec<FieldSeat> {
         let r2 = |v: f64| (v * 100.0).round() / 100.0;
         let (cx, cy) = (inst.at[0], inst.at[1]);
         let (minx, miny, maxx, maxy) = (body.min_x, body.min_y, body.max_x, body.max_y);
@@ -1033,31 +1086,34 @@ impl SchematicWriter {
             .get(&inst.lib_id)
             .is_some_and(|p| p.len() >= 3);
         if is_ic {
-            let pin_boxes: Vec<Rect> = self
-                .sym_pins
-                .get(&inst.lib_id)
-                .map(|pins| {
-                    pins.iter()
-                        .flat_map(|pg| pin_text_boxes(pg, inst.at, inst.angle, inst.mirror))
-                        .collect()
-                })
-                .unwrap_or_default();
-            let mut bands = vec![
+            let mut taken = self.unit_pin_text(inst);
+            taken.extend(self.rail_glyphs());
+            [
                 below,
                 above,
                 below_left,
                 below_right,
                 above_left,
                 above_right,
-            ];
-            bands.sort_by_key(|c: &(TextPos, TextPos, Rect)| {
-                pin_boxes.iter().filter(|pb| c.2.overlaps(pb)).count()
-            });
-            bands
-        } else if body.width() > body.height() {
-            vec![above, below, right, left, above_left, above_right, below_left, below_right]
+            ]
+            .map(|c: (TextPos, TextPos, Rect)| FieldSeat {
+                hits: taken.iter().filter(|t| c.2.overlaps(t)).count(),
+                anchors: (c.0, c.1),
+                bbox: c.2,
+            })
+            .to_vec()
         } else {
-            vec![right, left, above, below, above_left, above_right, below_left, below_right]
+            let bands = match body.width() > body.height() {
+                true => [above, below, right, left, above_left, above_right],
+                false => [right, left, above, below, above_left, above_right],
+            };
+            bands
+                .map(|c| FieldSeat {
+                    hits: 0,
+                    anchors: (c.0, c.1),
+                    bbox: c.2,
+                })
+                .to_vec()
         }
     }
 
@@ -1493,33 +1549,17 @@ impl SchematicWriter {
         own_refdes: &str,
         moving: &[usize],
     ) -> bool {
-        use sch_model::text::{label_box, pin_text_boxes};
+        use sch_model::text::label_box;
         let b = label_box(at, dir, net);
         for inst in &self.instances {
             if inst.refdes.starts_with('#') {
                 continue;
             }
-            if inst.refdes != own_refdes {
-                let h = inst.half_extents.rotated_half_extents(inst.angle);
-                let body: Rect = [
-                    inst.at[0] - h[0],
-                    inst.at[1] - h[1],
-                    inst.at[0] + h[0],
-                    inst.at[1] + h[1],
-                ]
-                .into();
-                if body.overlaps(&b) {
-                    return false;
-                }
+            if inst.refdes != own_refdes && self.symbol_ink(inst).overlaps(&b) {
+                return false;
             }
-            if let Some(pins) = self.sym_pins.get(&inst.lib_id) {
-                for pg in pins {
-                    for pb in pin_text_boxes(pg, inst.at, inst.angle, inst.mirror) {
-                        if pb.overlaps(&b) {
-                            return false;
-                        }
-                    }
-                }
+            if self.unit_pin_text(inst).iter().any(|pb| pb.overlaps(&b)) {
+                return false;
             }
         }
         for (i, label) in self.labels.iter().enumerate() {
@@ -1549,7 +1589,6 @@ impl SchematicWriter {
         &self,
         ignore_pairs: &std::collections::BTreeSet<(String, String)>,
     ) -> Vec<String> {
-        use sch_model::text::pin_text_boxes;
 
         /// What an item is, for exemption decisions.
         #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1590,21 +1629,17 @@ impl SchematicWriter {
             }
             items.push((
                 format!("symbol {}", inst.refdes),
-                crate::write::build::ink_box(inst),
+                self.symbol_ink(inst),
                 inst.refdes.clone(),
                 Kind::Body,
             ));
-            if let Some(pins) = self.sym_pins.get(&inst.lib_id) {
-                for pg in pins {
-                    for b in pin_text_boxes(pg, inst.at, inst.angle, inst.mirror) {
-                        items.push((
-                            format!("pin text of {}", inst.refdes),
-                            b,
-                            inst.refdes.clone(),
-                            Kind::PinText,
-                        ));
-                    }
-                }
+            for b in self.unit_pin_text(inst) {
+                items.push((
+                    format!("pin text of {}", inst.refdes),
+                    b,
+                    inst.refdes.clone(),
+                    Kind::PinText,
+                ));
             }
             let (rp, vp) = field_anchors(inst);
             items.push((

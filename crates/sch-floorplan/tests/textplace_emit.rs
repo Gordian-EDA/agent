@@ -98,8 +98,9 @@ fn adjacent_power_rail_values_do_not_merge() {
     );
 }
 
-/// With no neighbors, the first (conventional) candidate is chosen and the
-/// output keeps the fallback right-of-body field placement byte-for-byte.
+/// With no neighbours the first candidate is chosen: the nearest ring, right of
+/// the body, one grid step clear of the pin tips. 101.6 + 1.27 (the body's half
+/// width) + 1.27 (the ring) + 1.27 (the field's own offset) = 105.41.
 #[test]
 fn lone_symbol_keeps_conventional_fields() {
     let Some(env) = detect_env() else { return };
@@ -108,7 +109,7 @@ fn lone_symbol_keeps_conventional_fields() {
         .unwrap();
     let sch = w.finish();
     assert!(
-        sch.contains("(property \"Reference\" \"R1\"\n\t\t\t(at 107.95 100.33 0)"),
+        sch.contains("(property \"Reference\" \"R1\"\n\t\t\t(at 105.41 100.33 0)"),
         "lone symbol keeps conventional field spot:\n{sch}"
     );
 }
