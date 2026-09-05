@@ -16,6 +16,7 @@ pub mod nets;
 pub mod pins;
 pub mod place_parts;
 pub mod reference;
+pub mod twins;
 
 pub use diag::{Diagnostic, Diagnostics, Severity, Span};
 pub use kicad_symbol::{PinDir, PinMeta, PinType, SymbolMeta, SymbolTable, find_pin};
@@ -25,3 +26,4 @@ pub use place_parts::{
     PlacePartsInput, into_design, place_parts_input_schema,
 };
 pub use reference::{Fidelity, MisNettedPin, ReferenceNetlist};
+pub use twins::NearTwin;
