@@ -209,14 +209,10 @@ impl Mirror {
 impl<'de> Deserialize<'de> for Tree {
     fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Tree, D::Error> {
         let wire = Wire::deserialize(d)?;
-        let named = [
-            wire.part.is_some(),
-            wire.row.is_some(),
-            wire.col.is_some(),
-        ]
-        .iter()
-        .filter(|set| **set)
-        .count();
+        let named = [wire.part.is_some(), wire.row.is_some(), wire.col.is_some()]
+            .iter()
+            .filter(|set| **set)
+            .count();
         if named != 1 {
             return Err(de::Error::custom(format!(
                 "a layout node is exactly one of `part`, `row` or `col`{}",

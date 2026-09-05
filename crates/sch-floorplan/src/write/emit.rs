@@ -4,8 +4,8 @@
 
 use std::fmt::Write as _;
 
-use geom::stable_uuid;
 use geom::PAGE_MARGIN;
+use geom::stable_uuid;
 use sch_doc::{STANDARD_PAGES, TITLE_BLOCK_BAND, standard_page};
 
 use super::{
@@ -695,8 +695,15 @@ mod tests {
         // on a single x — the datasheet column a connector is supposed to read as.
         let Some(env) = detect_env() else { return };
         let mut w = SchematicWriter::new();
-        w.add_symbol(&env, "Connector_Generic:Conn_01x04", "J1", "hdr", [127.0, 63.5], 0.0)
-            .unwrap();
+        w.add_symbol(
+            &env,
+            "Connector_Generic:Conn_01x04",
+            "J1",
+            "hdr",
+            [127.0, 63.5],
+            0.0,
+        )
+        .unwrap();
         for (pin, net, stub) in [
             ("1", "PA0", 3.81),
             ("2", "PA1", 6.35),
@@ -713,7 +720,11 @@ mod tests {
             .iter()
             .map(|l| (l.at[0] * 100.0).round() as i64)
             .collect();
-        assert_eq!(xs.len(), 1, "the side's labels sit at {xs:?}, not one column");
+        assert_eq!(
+            xs.len(),
+            1,
+            "the side's labels sit at {xs:?}, not one column"
+        );
     }
 
     #[test]

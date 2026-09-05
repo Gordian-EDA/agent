@@ -81,4 +81,3 @@ fn selection(rest: &[&str]) -> Result<Selection, Box<dyn std::error::Error>> {
         )),
     }
 }
-

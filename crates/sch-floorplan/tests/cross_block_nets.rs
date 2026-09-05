@@ -14,9 +14,9 @@
 use std::collections::BTreeSet;
 
 use kicad::KicadInstallation;
-use tempfile::tempdir;
 use sch_check::place_parts::PlacePartsInput;
 use sch_doc::{SchDoc, connect};
+use tempfile::tempdir;
 
 fn block(json: serde_json::Value) -> PlacePartsInput {
     serde_json::from_value(json).unwrap()

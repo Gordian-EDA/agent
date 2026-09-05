@@ -55,9 +55,9 @@ mod textsolve;
 // resolve unchanged across the split.
 pub use build::{pin_end0, point_key};
 pub use caption::BlockFrame;
-pub use sch_model::geometry::quantize_dir;
-pub use emit::{escape_sexpr_string, fmt_coord};
 pub(crate) use emit::usable_pages;
+pub use emit::{escape_sexpr_string, fmt_coord};
+pub use sch_model::geometry::quantize_dir;
 pub(crate) use textsolve::DEFAULT_STUB_MM;
 
 /// Stable key identifying *this* schematic sheet for root-uuid derivation.

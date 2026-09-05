@@ -273,16 +273,17 @@ fn place_parts_inner(
     input: &PlacePartsInput,
 ) -> Result<PlaceReport> {
     let provider = SymbolTable::from_symbol_dir(env.symbol_dir().to_path_buf());
-    let mut before = live_phase("lower", input.parts.len(), 0, || {
-        connect::extract(doc)
-    });
+    let mut before = live_phase("lower", input.parts.len(), 0, || connect::extract(doc));
     // Every edit from here on is undone by this snapshot, the join included: a payload
     // the audit refuses must not leave a label behind for a net it never draws.
     let snapshot = doc.snapshot();
     let overlaps_before = crate::visual::body_overlaps(doc);
     let promoted = promote_authored_nets(doc, input, &before);
     if !promoted.is_empty() {
-        tracing::info!(?promoted, "named an earlier block's nets so this block can join them");
+        tracing::info!(
+            ?promoted,
+            "named an earlier block's nets so this block can join them"
+        );
         before = connect::extract(doc);
     }
     let existing = ExistingSheet {
@@ -385,42 +386,38 @@ fn place_parts_inner(
     let was_global = global_label_nets(doc);
     // The labels the sheet had settled on before this block was drawn: a seam stitch
     // may take back only the one this call itself added.
-    let settled_labels: BTreeSet<String> =
-        doc.labels().map(|label| label.uuid.clone()).collect();
+    let settled_labels: BTreeSet<String> = doc.labels().map(|label| label.uuid.clone()).collect();
     let typeset_warnings = out.warnings.clone();
-    let warnings = live_phase("realise",
-        placed.len(),
-        inc.len(),
-        || -> Result<_> {
-            let writer = crate::realize::realize_block(
-                env,
-                &design,
-                &placed,
-                &inc,
-                &out.ir,
-                crate::realize::Draw {
-                    title: design.name.as_deref(),
-                    frame: fresh,
-                    driven: &driven_nets(doc, &before),
-                    beside: (!fresh).then(|| beside_scene(doc)).as_ref(),
-                },
-            )?;
-            let mut warnings = typeset_warnings;
-            warnings.extend(writer.layout_warnings());
-            warnings.extend(net_conflict_warnings(env, &writer, &placed, &inc));
-            crate::realize::graft(doc, writer)?;
-            Ok(warnings)
-        },
-    )?;
+    let warnings = live_phase("realise", placed.len(), inc.len(), || -> Result<_> {
+        let writer = crate::realize::realize_block(
+            env,
+            &design,
+            &placed,
+            &inc,
+            &out.ir,
+            crate::realize::Draw {
+                title: design.name.as_deref(),
+                frame: fresh,
+                driven: &driven_nets(doc, &before),
+                beside: (!fresh).then(|| beside_scene(doc)).as_ref(),
+            },
+        )?;
+        let mut warnings = typeset_warnings;
+        warnings.extend(writer.layout_warnings());
+        warnings.extend(net_conflict_warnings(env, &writer, &placed, &inc));
+        crate::realize::graft(doc, writer)?;
+        Ok(warnings)
+    })?;
     let stitched = stitch_short_seams(doc, &seams, &settled_labels);
     if !stitched.is_empty() {
-        tracing::info!(?stitched, "wired the seams that were too short to need a name");
+        tracing::info!(
+            ?stitched,
+            "wired the seams that were too short to need a name"
+        );
     }
     enforce_label_scopes(doc, &was_global);
 
-    let mut mismatch = live_phase("verify", placed.len(), inc.len(), || {
-        verify(doc, &design)
-    });
+    let mut mismatch = live_phase("verify", placed.len(), inc.len(), || verify(doc, &design));
     mismatch.disturbed = disturbed(&before, &connect::extract(doc));
     let committed = mismatch.is_empty();
     if committed {
@@ -590,12 +587,7 @@ fn bench_parts(
 }
 
 /// Run one stage of a live edit inside its own tracing span, timed.
-fn live_phase<T>(
-    phase: &'static str,
-    parts: usize,
-    nets: usize,
-    run: impl FnOnce() -> T,
-) -> T {
+fn live_phase<T>(phase: &'static str, parts: usize, nets: usize, run: impl FnOnce() -> T) -> T {
     let span = tracing::info_span!("sch_floorplan_phase", phase, parts, nets);
     let started = Instant::now();
     let result = span.in_scope(run);
@@ -627,8 +619,7 @@ pub fn rewire(
     let selection = selection.clone();
     panic_isolated_edit(env, doc, move |env, doc| {
         rearrange_inner(&env, doc, &selection, None, None, false)
-        },
-    )
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -679,7 +670,11 @@ fn rearrange_inner(
     let renames: BTreeMap<&str, &str> = boundary
         .iter()
         .filter_map(|net| Some((net.name.as_str(), net.mint.as_deref()?)))
-        .chain(interior.iter().map(|(from, to)| (from.as_str(), to.as_str())))
+        .chain(
+            interior
+                .iter()
+                .map(|(from, to)| (from.as_str(), to.as_str())),
+        )
         .collect();
     let (mut movable, held): (Vec<Item>, Vec<Item>) = seated_items(doc, &before)
         .into_iter()
@@ -752,7 +747,8 @@ fn rearrange_inner(
         (movable, ir, Vec::new())
     };
     ir.ports.extend(boundary_ports);
-    let (mut redrawn, inc, mut warnings, left_bench, mut labelled) = live_phase("realise",
+    let (mut redrawn, inc, mut warnings, left_bench, mut labelled) = live_phase(
+        "realise",
         placed.len(),
         before.nets.len(),
         || -> Result<_> {
@@ -875,8 +871,7 @@ where
     thread::Builder::new()
         .name("schematic-typeset".to_owned())
         .spawn(move || {
-            let reply = match catch_unwind(AssertUnwindSafe(|| run(worker_env, &mut worker_doc)))
-            {
+            let reply = match catch_unwind(AssertUnwindSafe(|| run(worker_env, &mut worker_doc))) {
                 Ok(result) => WorkerReply::Completed(result, worker_doc),
                 Err(panic) => WorkerReply::Panicked(panic),
             };
@@ -1044,7 +1039,6 @@ fn selection_drawing(doc: &SchDoc, owned: &[Rect], held: &[Item]) -> BTreeSet<St
         erase.extend(grown);
     }
 }
-
 
 /// Move `items` onto the poses the typesetter chose, matched by part identity rather
 /// than by position in the list.
@@ -1309,8 +1303,8 @@ fn interior_mints(before: &Netlist, chosen: &BTreeSet<String>) -> BTreeMap<Strin
         .filter_map(|net| {
             let mut real = net.pins.iter().filter(|pin| !pin.refdes.starts_with('#'));
             let lead = real.next()?;
-            let inside = chosen.contains(&lead.refdes)
-                && real.all(|pin| chosen.contains(&pin.refdes));
+            let inside =
+                chosen.contains(&lead.refdes) && real.all(|pin| chosen.contains(&pin.refdes));
             inside.then(|| (net.name.clone(), minted_net_name(&lead.refdes, &lead.pin)))
         })
         .collect()
@@ -1531,7 +1525,10 @@ fn record_authored_nets(doc: &mut SchDoc, placed: &[Item]) {
         .filter_map(|(refdes, mut entries)| {
             entries.sort();
             entries.dedup();
-            Some((hosts.get(refdes)?.clone(), entries.join(&AP_NETS_SEP.to_string())))
+            Some((
+                hosts.get(refdes)?.clone(),
+                entries.join(&AP_NETS_SEP.to_string()),
+            ))
         })
         .collect();
     for (uuid, record) in records {
@@ -1579,10 +1576,7 @@ fn promote_authored_nets(
         let Some(pins) = authored.get(net) else {
             continue;
         };
-        let places: Vec<Point2> = pins
-            .iter()
-            .filter_map(|key| at.get(key).copied())
-            .collect();
+        let places: Vec<Point2> = pins.iter().filter_map(|key| at.get(key).copied()).collect();
         if places.is_empty() {
             continue;
         }

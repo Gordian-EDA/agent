@@ -673,7 +673,12 @@ impl SchematicWriter {
                 continue;
             };
             for pg in pins.iter().filter(|p| p.unit.max(1) == inst.unit) {
-                out.push(Point2::from(pin_endpoint(pg, inst.at, inst.angle, inst.mirror)));
+                out.push(Point2::from(pin_endpoint(
+                    pg,
+                    inst.at,
+                    inst.angle,
+                    inst.mirror,
+                )));
             }
         }
         out
@@ -706,9 +711,7 @@ impl SchematicWriter {
                 scene.points.push((inst.at, inst.value.clone()));
                 // The keepout is the drawn triangle plus a hair, not the symbol's padded
                 // placement box, so it never walls off the channel beside a rail.
-                scene
-                    .label_solids
-                    .push((ink_box(inst), inst.value.clone()));
+                scene.label_solids.push((ink_box(inst), inst.value.clone()));
                 continue;
             }
             scene.solids.push(ink_box(inst));

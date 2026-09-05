@@ -10,7 +10,6 @@
 //! - [`RoutedEvaluator`] — what a placement MEASURES once it is drawn: its truthfulness
 //!   breaks, its readability warnings and its crossings.
 
-
 use geom::{Point2, Rect};
 use kicad::KicadInstallation;
 
@@ -21,8 +20,8 @@ use sch_model::place::Crossings;
 
 use super::emit::{build_writer, compute_needs_flag};
 use super::score::{
-    count_body_crossings, count_collinear_body_crossings, count_crossings, count_foreign_taps, count_ic_body_crossings, count_merges,
-    count_parallel_body_crossings, count_shorts,
+    count_body_crossings, count_collinear_body_crossings, count_crossings, count_foreign_taps,
+    count_ic_body_crossings, count_merges, count_parallel_body_crossings, count_shorts,
 };
 
 /// Builds/routes a candidate placement into a [`SchematicWriter`].

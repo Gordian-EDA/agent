@@ -17,9 +17,9 @@ mod route;
 mod score;
 
 pub use audit::*;
-pub use route::LONG_SIMPLE_LEN_MM;
 pub use emit::*;
 pub use measure::*;
+pub use route::LONG_SIMPLE_LEN_MM;
 pub use score::*;
 // `route` is the orthogonal router — every item is crate-internal (none was `pub`
 // pre-split), so re-export it crate-visibly, not publicly.
@@ -68,7 +68,6 @@ mod grid_tests {
             0
         );
     }
-
 
     #[test]
     fn dir_to_side_inverts_side_dir() {

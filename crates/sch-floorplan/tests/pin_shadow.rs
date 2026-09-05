@@ -136,9 +136,7 @@ fn an_unassigned_pin_name_cannot_shadow_a_physical_number() {
     design.blocks.insert("main".to_owned(), block);
     sch_check::nets::derive_attrs(&mut design);
 
-    let emitted =
-        floorplan::emit_strategy(&env, &design, None)
-            .unwrap();
+    let emitted = floorplan::emit_strategy(&env, &design, None).unwrap();
     let schematic = dir.path().join("raw-design.kicad_sch");
     std::fs::write(&schematic, emitted.sch).unwrap();
     let doc = SchDoc::read(&schematic).unwrap();

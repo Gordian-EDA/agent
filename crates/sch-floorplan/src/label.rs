@@ -39,8 +39,7 @@ impl TextSolver for GreedyText {
         for m in movables {
             let free = |b: &Rect| {
                 obstacles.iter().all(|o| {
-                    (o.owner.is_some() && o.owner == m.owner)
-                        || b.intersection(&o.bbox).is_none()
+                    (o.owner.is_some() && o.owner == m.owner) || b.intersection(&o.bbox).is_none()
                 }) && placed.iter().all(|p| grow(b).intersection(p).is_none())
             };
             let pick = m.candidates.iter().position(free);
@@ -62,7 +61,10 @@ mod tests {
     use sch_model::text::Owner;
 
     fn hard(b: Rect) -> Obstacle {
-        Obstacle { bbox: b, owner: None }
+        Obstacle {
+            bbox: b,
+            owner: None,
+        }
     }
 
     #[test]

@@ -37,9 +37,39 @@ fn bits(p: Point2) -> (u64, u64) {
 /// long enough to read as a wire, short enough to keep the text beside its pin.
 pub(crate) const DEFAULT_STUB_MM: f64 = 3.81;
 
+/// How many rings of candidate seats a power-symbol rail name may try before the
+/// solver falls back to burying it: the tip-and-two-sides ring, repeated at
+/// one-grid-step increments outward from the glyph. Past this the name has
+/// drifted far enough that the reader can no longer tell which glyph it names.
+const RAIL_NAME_RINGS: u8 = 6;
+
+/// The candidate that covers the least foreign ink, for a rail name no tier
+/// could seat clear. Overlap AREA, not a count: clipping the corner of one pin
+/// name still reads, sitting square on three of them does not.
+fn least_buried(seats: &[(TextPos, Rect)], scene: &[sch_model::text::Obstacle]) -> usize {
+    let buried = |b: &Rect| -> f64 {
+        scene
+            .iter()
+            .filter_map(|o| b.intersection(&o.bbox))
+            .map(|hit| hit.width() * hit.height())
+            .sum()
+    };
+    (0..seats.len())
+        .min_by(|&a, &b| buried(&seats[a].1).total_cmp(&buried(&seats[b].1)))
+        .unwrap_or(0)
+}
+
 /// Sentinel "net" for no-connect anchors: a stub on a no-connect pin is still a
 /// wrong attachment, so it counts as a foreign net.
 const NC: &str = "\0no_connect";
+
+/// How much room a symbol claims from solved text: the ink it draws, or the
+/// padded cell `approx_size` reserves around it for placement.
+#[derive(Clone, Copy)]
+enum Bodies {
+    Ink,
+    Cell,
+}
 
 enum Apply {
     /// labels[i]: candidate 1 retracts onto the pin endpoint.
@@ -199,11 +229,8 @@ impl SchematicWriter {
                 .enumerate()
                 .map(|(rank, k)| {
                     let len = k as f64 * pitch;
-                    let seats: Vec<usize> = members
-                        .iter()
-                        .copied()
-                        .filter(|&i| clear(i, len))
-                        .collect();
+                    let seats: Vec<usize> =
+                        members.iter().copied().filter(|&i| clear(i, len)).collect();
                     (rank, len, seats)
                 })
                 // Ties keep the earlier — and therefore more preferred — rung.
@@ -365,8 +392,9 @@ impl SchematicWriter {
         use crate::label::GreedyText;
         use sch_model::text::TextSolver;
 
-        let mut obstacles = self.build_obstacles();
-        obstacles.extend(self.seat_rail_names(&obstacles));
+        let seated = self.seat_rail_names(&self.build_obstacles(Bodies::Ink));
+        let mut obstacles = self.build_obstacles(Bodies::Cell);
+        obstacles.extend(seated);
 
         let (mut movables, mut applies) = self.stub_label_movables();
         for (m, a) in [self.swivel_label_movables(), self.field_movables()] {
@@ -375,8 +403,12 @@ impl SchematicWriter {
         }
 
         let picks = GreedyText.solve(&obstacles, &movables);
-        for (apply, sch_model::text::Pick { candidate: pick, .. }) in
-            applies.into_iter().zip(picks)
+        for (
+            apply,
+            sch_model::text::Pick {
+                candidate: pick, ..
+            },
+        ) in applies.into_iter().zip(picks)
         {
             match apply {
                 Apply::StubLabel(i) => {
@@ -419,12 +451,31 @@ impl SchematicWriter {
     /// Everything solved text must avoid: symbol bodies (angle-aware, exempt
     /// for their own refdes), pin name/number text, wires, no-connect markers,
     /// and fixed (stub-less) labels.
-    fn build_obstacles(&self) -> Vec<sch_model::text::Obstacle> {
+    ///
+    /// `bodies` picks how much room a symbol claims. A rail name belongs in the
+    /// padding beside the part it serves, so it is solved against
+    /// [`Bodies::Ink`] — what the symbol actually draws, and what
+    /// [`crate::visual::measure`] scores. Field pairs and net labels are still
+    /// held out of the whole placement cell ([`Bodies::Cell`]); the cell is a
+    /// placement clearance rather than ink, so that is stricter than it needs to
+    /// be, but relaxing it moves every field on every sheet and belongs to the
+    /// lane that owns them.
+    fn build_obstacles(&self, bodies: Bodies) -> Vec<sch_model::text::Obstacle> {
         use sch_model::text::{Obstacle, Owner, pin_text_boxes, wire_box};
         let mut obstacles: Vec<Obstacle> = Vec::new();
         for inst in &self.instances {
+            let h = inst.half_extents.rotated_half_extents(inst.angle);
             obstacles.push(Obstacle {
-                bbox: crate::write::build::ink_box(inst),
+                bbox: match bodies {
+                    Bodies::Ink => crate::write::build::ink_box(inst),
+                    Bodies::Cell => [
+                        inst.at[0] - h[0],
+                        inst.at[1] - h[1],
+                        inst.at[0] + h[0],
+                        inst.at[1] + h[1],
+                    ]
+                    .into(),
+                },
                 owner: Some(Owner::Symbol(inst.refdes.clone())),
             });
             // Pin name/number text (skip power/flag graphics — single
@@ -524,10 +575,7 @@ impl SchematicWriter {
                 let dirs = swivel_poses(home);
                 let movable = Movable {
                     owner: Some(Owner::Net(l.net.clone())),
-                    candidates: dirs
-                        .iter()
-                        .map(|&dir| label_rect(l, l.at, dir))
-                        .collect(),
+                    candidates: dirs.iter().map(|&dir| label_rect(l, l.at, dir)).collect(),
                 };
                 (movable, Apply::SwivelLabel(i, dirs.to_vec()))
             })
@@ -542,7 +590,10 @@ impl SchematicWriter {
             .filter(|&i| !self.instances[i].refdes.starts_with('#'))
             .collect();
         order.sort_by(|&a, &b| self.instances[a].refdes.cmp(&self.instances[b].refdes));
-        order.into_iter().map(|i| self.field_pair_movable(i)).unzip()
+        order
+            .into_iter()
+            .map(|i| self.field_pair_movable(i))
+            .unzip()
     }
 
     /// Seat every power-symbol rail name, ahead of all other movable text.
@@ -563,7 +614,10 @@ impl SchematicWriter {
     ///    into one unreadable run is the artifact worth avoiding longest.
     ///
     /// A name that clears nothing even then takes its nearest candidate anyway.
-    fn seat_rail_names(&mut self, obstacles: &[sch_model::text::Obstacle]) -> Vec<sch_model::text::Obstacle> {
+    fn seat_rail_names(
+        &mut self,
+        obstacles: &[sch_model::text::Obstacle],
+    ) -> Vec<sch_model::text::Obstacle> {
         use crate::label::GreedyText;
         use sch_model::text::{Obstacle, Owner, TextSolver};
 
@@ -584,13 +638,13 @@ impl SchematicWriter {
         ];
         let mut pending: Vec<usize> = (0..order.len()).collect();
         let mut placed: Vec<Obstacle> = Vec::new();
-        for (tier, keeps) in tiers.iter().enumerate() {
+        for (tier, &keeps) in tiers.iter().enumerate() {
             if pending.is_empty() {
                 break;
             }
             let scene: Vec<Obstacle> = obstacles
                 .iter()
-                .filter(|o| o.owner.as_ref().is_none_or(|w| keeps(w)))
+                .filter(|o| o.owner.as_ref().is_none_or(keeps))
                 .chain(placed.iter())
                 .cloned()
                 .collect();
@@ -609,7 +663,13 @@ impl SchematicWriter {
                     still.push(k);
                     continue;
                 }
-                let (pos, bbox) = seats[k][pick.candidate];
+                // Out of tiers: no candidate clears the remaining ink, so take
+                // the one that hides the least of it rather than the first.
+                let candidate = match pick.fits {
+                    true => pick.candidate,
+                    false => least_buried(&seats[k], &scene),
+                };
+                let (pos, bbox) = seats[k][candidate];
                 self.instances[order[k]].val_pos = Some(pos);
                 placed.push(Obstacle { bbox, owner: None });
             }
@@ -680,7 +740,8 @@ impl SchematicWriter {
             ],
         };
         let mut cands = Vec::new();
-        for step in [0.0, GRID_50_MIL.pitch(), 2.0 * GRID_50_MIL.pitch()] {
+        for ring in 0..RAIL_NAME_RINGS {
+            let step = f64::from(ring) * GRID_50_MIL.pitch();
             cands.push(tip(step));
             cands.extend(side(step));
         }
@@ -942,7 +1003,8 @@ impl SchematicWriter {
             self.wires.remove(j);
             // The recorded tap that split the run here is not a dot and no longer a
             // wire end; leaving it would have the next `prepare` split the run again.
-            self.junctions.retain(|junction| key(junction.at) != key(at));
+            self.junctions
+                .retain(|junction| key(junction.at) != key(at));
         }
     }
 
@@ -975,9 +1037,7 @@ impl SchematicWriter {
                 .enumerate()
                 .filter(|(k, _)| *k != i && *k != j)
                 .any(|(_, w)| Segment::new(w.a, w.b).contains_point(at))
-                || beside
-                    .iter()
-                    .any(|(segment, _)| segment.contains_point(at));
+                || beside.iter().any(|(segment, _)| segment.contains_point(at));
             (straight && !crossed).then_some((i, j, at))
         })
     }
@@ -1361,16 +1421,9 @@ impl SchematicWriter {
                 }
                 continue;
             }
-            let h = inst.half_extents.rotated_half_extents(inst.angle);
             items.push((
                 format!("symbol {}", inst.refdes),
-                [
-                    inst.at[0] - h[0],
-                    inst.at[1] - h[1],
-                    inst.at[0] + h[0],
-                    inst.at[1] + h[1],
-                ]
-                .into(),
+                crate::write::build::ink_box(inst),
                 inst.refdes.clone(),
                 Kind::Body,
             ));
@@ -1632,6 +1685,58 @@ mod tests {
                 .all(|c| c.max_y < 80.1 || c.min_y > 119.9),
             "IC fields should never use side bands over pin text: {:?}",
             movable.candidates
+        );
+    }
+
+    /// A rail name reads on the far side of its glyph, whichever way that glyph
+    /// points — `power:GND` draws below its pin and `power:+3V3` above, both at
+    /// instance angle 0, so the seat cannot be read off the instance angle.
+    #[test]
+    fn rail_names_seat_beyond_the_glyph() {
+        let Some(env) = detect_env() else { return };
+        let mut w = SchematicWriter::new();
+        w.add_symbol(&env, "power:GND", "#PWR_GND_0", "GND", [127.0, 63.5], 0.0)
+            .unwrap();
+        w.add_symbol(&env, "power:+3V3", "#PWR_3V3_0", "+3V3", [190.5, 63.5], 0.0)
+            .unwrap();
+        w.solve_text_positions();
+
+        let gnd = w.instances[0].val_pos.expect("GND name seated");
+        assert!(
+            gnd.at[1] > 63.5,
+            "a ground name reads BELOW the bar: {:?}",
+            gnd.at
+        );
+        let rail = w.instances[1].val_pos.expect("+3V3 name seated");
+        assert!(
+            rail.at[1] < 63.5,
+            "an up-arrow rail name reads ABOVE the glyph: {:?}",
+            rail.at
+        );
+    }
+
+    /// Rail names crowded onto one pitch still ALL get drawn: the seat degrades
+    /// outward, but a glyph is never left unnamed.
+    #[test]
+    fn crowded_rail_names_are_all_seated() {
+        let Some(env) = detect_env() else { return };
+        let mut w = SchematicWriter::new();
+        for i in 0..8 {
+            let x = 127.0 + f64::from(i) * 2.54;
+            w.add_symbol(
+                &env,
+                "power:GND",
+                &format!("#PWR_GND_{i}"),
+                "GND",
+                [x, 63.5],
+                0.0,
+            )
+            .unwrap();
+        }
+        w.solve_text_positions();
+        assert!(
+            w.instances.iter().all(|i| i.val_pos.is_some()),
+            "every crowded rail keeps a seated name"
         );
     }
 

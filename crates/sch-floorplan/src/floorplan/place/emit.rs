@@ -18,8 +18,8 @@ use geom::Dir;
 use sch_model::result::EmitOutput;
 
 use super::*;
-use sch_model::item::{Incidence, Item};
 use sch_model::ir::LayoutIr;
+use sch_model::item::{Incidence, Item};
 
 // ---------------------------------------------------------------------------
 // Compiler internal model.

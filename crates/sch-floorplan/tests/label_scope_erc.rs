@@ -149,7 +149,10 @@ fn a_ported_block_raises_no_same_local_global_label() {
     );
     for port in ["NRST", "SWDIO", "SWCLK", "USB_D+", "USB_D-", "BOOT0"] {
         if let Some(scope) = scopes.get(port) {
-            assert_eq!(*scope, "local", "declared port {port} is drawn as a pennant");
+            assert_eq!(
+                *scope, "local",
+                "declared port {port} is drawn as a pennant"
+            );
         }
     }
     let counts = erc_counts(&env, &path);
@@ -257,7 +260,8 @@ fn no_placed_wire_is_shorter_than_a_grid_step() {
     let mut duplicates = Vec::new();
     for wire in doc.wires() {
         for pair in wire.points.windows(2) {
-            let key = |p: geom::Point2| ((p.x * 100.0).round() as i64, (p.y * 100.0).round() as i64);
+            let key =
+                |p: geom::Point2| ((p.x * 100.0).round() as i64, (p.y * 100.0).round() as i64);
             let (a, b) = (key(pair[0]), key(pair[1]));
             let segment = if a <= b { (a, b) } else { (b, a) };
             if !seen.insert(segment) {
@@ -265,7 +269,10 @@ fn no_placed_wire_is_shorter_than_a_grid_step() {
             }
         }
     }
-    assert!(duplicates.is_empty(), "the writer drew a segment twice: {duplicates:?}");
+    assert!(
+        duplicates.is_empty(),
+        "the writer drew a segment twice: {duplicates:?}"
+    );
 }
 
 /// Re-arranging erases the selection's drawing and draws it again, so it can
