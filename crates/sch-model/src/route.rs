@@ -156,6 +156,34 @@ pub fn path_crossings(path: &[Point2], net: &str, scene: &RouteScene) -> usize {
 }
 
 
+/// A schematic wire ROUTER: the leaf that turns "connect these terminals" into drawn
+/// orthogonal paths.
+///
+/// ## Contract
+/// - **Deterministic.** The same `(scene, terminals)` always yields the same paths.
+/// - **Legal or nothing.** Every returned path satisfies [`path_ok`] for its net; a
+///   router that cannot find a legal path returns `None` and the caller degrades to a
+///   net label rather than drawing a wrong wire.
+/// - **Pure.** No I/O, no KiCAD environment — the scene is the whole world.
+pub trait SchRouter {
+    /// Open provenance: the router's stable name (e.g. `"elbow"`).
+    fn name(&self) -> &'static str;
+
+    /// Which terminal pairs to wire so the net is connected as one tree.
+    fn tree_edges(&self, terminals: &[Point2]) -> Vec<(usize, usize)>;
+
+    /// A legal path for `net` from `a` (leaving its pin in direction `dir_a`) to `b`,
+    /// as corner points inclusive of both ends. `None` when nothing legal fits.
+    fn route_edge(
+        &self,
+        a: Point2,
+        dir_a: Dir,
+        b: Point2,
+        net: &str,
+        scene: &RouteScene,
+    ) -> Option<Vec<Point2>>;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -199,32 +227,4 @@ mod tests {
         ];
         assert!(!path_ok(&back, "SIG", &ink_scene()));
     }
-}
-
-/// A schematic wire ROUTER: the leaf that turns "connect these terminals" into drawn
-/// orthogonal paths.
-///
-/// ## Contract
-/// - **Deterministic.** The same `(scene, terminals)` always yields the same paths.
-/// - **Legal or nothing.** Every returned path satisfies [`path_ok`] for its net; a
-///   router that cannot find a legal path returns `None` and the caller degrades to a
-///   net label rather than drawing a wrong wire.
-/// - **Pure.** No I/O, no KiCAD environment — the scene is the whole world.
-pub trait SchRouter {
-    /// Open provenance: the router's stable name (e.g. `"elbow"`).
-    fn name(&self) -> &'static str;
-
-    /// Which terminal pairs to wire so the net is connected as one tree.
-    fn tree_edges(&self, terminals: &[Point2]) -> Vec<(usize, usize)>;
-
-    /// A legal path for `net` from `a` (leaving its pin in direction `dir_a`) to `b`,
-    /// as corner points inclusive of both ends. `None` when nothing legal fits.
-    fn route_edge(
-        &self,
-        a: Point2,
-        dir_a: Dir,
-        b: Point2,
-        net: &str,
-        scene: &RouteScene,
-    ) -> Option<Vec<Point2>>;
 }

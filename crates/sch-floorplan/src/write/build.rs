@@ -719,7 +719,7 @@ impl SchematicWriter {
     /// Where `inst`'s own unit's pins connect — the points its own wires leave from.
     fn unit_pin_points(&self, inst: &Instance) -> Vec<Point2> {
         self.unit_pins(inst)
-            .map(|pg| Point2::from(pin_endpoint(pg, inst.at, inst.angle, inst.mirror)))
+            .map(|pg| pin_endpoint(pg, inst.at, inst.angle, inst.mirror).into())
             .collect()
     }
 

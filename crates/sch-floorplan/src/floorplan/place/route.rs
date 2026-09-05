@@ -254,11 +254,12 @@ impl LabelPolicy {
     /// budget only decides between two ways of drawing it.
     ///
     /// The wider question — whether the exemption should follow the net's ORIGIN, so a
-    /// readable mint like `D1_K` keeps it too — was measured and answered NO. Widening
-    /// it converts four label pairs per corpus into wires, and every one of them is a
-    /// wire the router draws THROUGH a symbol body or around its perimeter, because
-    /// neither the length gate nor the shape budget can see a body. Re-open it when the
-    /// router treats bodies and pin text as obstacles.
+    /// readable mint like `D1_K` keeps it too — was measured and answered NO: it
+    /// converted four label pairs per corpus into wires drawn THROUGH a symbol body or
+    /// around its perimeter, because neither the length gate nor the shape budget could
+    /// see a body. That reason has since gone: [`sch_model::route::SymbolInk`] states
+    /// the drawn ink and `path_ok` refuses to cross it, so the question is open again
+    /// and unmeasured.
     fn keeps(
         &self,
         net: &str,
