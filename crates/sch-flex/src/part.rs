@@ -100,6 +100,18 @@ impl<'a> Part<'a> {
         self.pins.len() == 2
     }
 
+    /// Whether `pin`'s net ENDS at this pin on the drawing — a label, a rail symbol or
+    /// a ground stub — rather than continuing sideways to another part. It is the
+    /// difference between a leg off a rail (stands) and a series element that happens to
+    /// touch one (lies along its chain); standing the second forces a U-turn around its
+    /// own body.
+    pub fn terminates(&self, pin: &PinGeom) -> bool {
+        self.pins
+            .iter()
+            .position(|p| std::ptr::eq(*p, pin))
+            .is_some_and(|i| self.attach.get(i).is_some_and(|room| *room > 0.0))
+    }
+
     /// Connectors and headers: a human mirrors the symbol to face the circuit rather than
     /// drawing wires around it, and never rotates it.
     pub fn is_connector(&self) -> bool {
