@@ -474,6 +474,21 @@ mod tests {
         );
     }
 
+    /// A label between two blocks belongs to the one whose parts it stands nearer to —
+    /// the rule that stops a frame reaching over its neighbour's rail names. A sheet
+    /// drawn one block at a time has exactly one block, so everything on it is that
+    /// block's.
+    #[test]
+    fn hanging_ink_goes_to_the_block_it_stands_nearest() {
+        let left = Rect::new(0.0, 0.0, 20.0, 20.0);
+        let right = Rect::new(60.0, 0.0, 80.0, 20.0);
+        let cores = [Some(left), Some(right)];
+        assert_eq!(nearest_block(Point2::new(25.0, 10.0), &cores), Some(0));
+        assert_eq!(nearest_block(Point2::new(55.0, 10.0), &cores), Some(1));
+        assert_eq!(nearest_block(Point2::new(500.0, 10.0), &[Some(left)]), Some(0));
+        assert_eq!(nearest_block(Point2::new(0.0, 0.0), &[None]), None);
+    }
+
     #[test]
     fn the_title_prefers_the_frames_top_left() {
         let frame = Rect::new(10.0, 20.0, 60.0, 50.0);

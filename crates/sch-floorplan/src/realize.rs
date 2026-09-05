@@ -307,6 +307,23 @@ mod tests {
         );
     }
 
+    /// A block too small for an outline draws its caption bare. Redrawing it must not
+    /// carry off the frame of the neighbour it happens to sit against.
+    #[test]
+    fn a_bare_caption_leaves_its_neighbours_frame_alone() {
+        let neighbour = geom::Rect::new(25.4, 50.8, 76.2, 101.6);
+        let mut sheet = SchematicWriter::new();
+        captioned(&mut sheet, "regulators", neighbour);
+        sheet.add_text("mcu", [30.48, 106.68], 2.54, true, "mcu:title");
+        let mut doc = to_doc(sheet).unwrap();
+
+        let mut redraw = SchematicWriter::new();
+        redraw.add_text("mcu", [30.48, 152.4], 2.54, true, "mcu:title");
+        replace_frames(&mut doc, &to_doc(redraw).unwrap());
+
+        assert_eq!(frames(&doc), vec![neighbour], "the neighbour's frame went with a bare caption");
+    }
+
     #[cfg(debug_assertions)]
     #[test]
     #[should_panic(expected = "adopted wire segments must have unique unordered endpoint pairs")]
