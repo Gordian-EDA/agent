@@ -14,7 +14,7 @@ mod audit;
 mod emit;
 mod measure;
 mod route;
-mod score;
+pub(crate) mod score;
 
 pub use audit::*;
 pub use route::LONG_SIMPLE_LEN_MM;

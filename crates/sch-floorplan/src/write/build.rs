@@ -666,11 +666,20 @@ impl SchematicWriter {
         if !inst.refdes.starts_with('#') {
             boxes.extend(self.unit_pin_text(inst));
         }
-        SymbolInk {
-            boxes,
-            pins: self.unit_pin_points(inst),
+        let pins = self.unit_pin_points(inst);
+        // A series part reads as its AXIS, not only as the graphics the library draws
+        // beside it: a switch's lever or a crystal's plates sit off the pin line, so a
+        // wire run straight down the part clears every box above and still renders as a
+        // wire through the part. `two_pin_plate` is the shape the visual audit prices
+        // that as, so stating it here is what stops the router drawing one.
+        if let [a, b] = pins[..]
+            && let Some(plate) = crate::floorplan::place::score::two_pin_plate(a.into(), b.into())
+        {
+            boxes.push(plate.rect());
         }
+        SymbolInk { boxes, pins }
     }
+
 
     /// `inst`'s unit box read off its embedded definition and posed onto the sheet,
     /// falling back to [`ink_box`] when the definition does not parse.
