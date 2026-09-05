@@ -94,6 +94,45 @@ pub fn body_rect(doc: &SchDoc, inst: &SymbolInst) -> Option<Rect> {
     Rect::bounding(&sheet)
 }
 
+/// The box one UNIT of a `(symbol …)` DEFINITION draws, in symbol coordinates.
+///
+/// [`body_rect`] split at the point where the shape stops depending on the
+/// placement: a caller holding a library definition but no document — the
+/// schematic writer, seating text against what it is about to draw — parses it
+/// here and poses the result itself. Falling back to the unit's pin points
+/// matches `body_rect`, so the two agree symbol for symbol.
+///
+/// `None` when the text does not parse as one `(symbol …)` block.
+pub fn definition_unit_box(definition: &str, unit: u8) -> Option<Rect> {
+    let cst = kiutils_sexpr::parse_one(definition).ok()?;
+    let def = cst.nodes.first()?;
+    let unit = u32::from(unit.max(1)).min(unit_count(def));
+    let mut local = Vec::new();
+    graphic_points(def, &mut local);
+    for sub in items(def) {
+        if sexpr::head(sub) != Some("symbol") {
+            continue;
+        }
+        let (u, s) = items(sub)
+            .get(1)
+            .and_then(sexpr::text)
+            .map_or((1, 1), unit_and_style);
+        if (u == 0 || u == unit) && s <= 1 {
+            graphic_points(sub, &mut local);
+        }
+    }
+    if local.is_empty() {
+        local.extend(
+            lib_pins(def)
+                .iter()
+                .filter(|p| belongs(p, unit, 1))
+                .map(|p| p.at.point()),
+        );
+        local.push(Point2::new(0.0, 0.0));
+    }
+    Rect::bounding(&local)
+}
+
 /// Every placed symbol's body, paired with its reference designator.
 pub fn body_rects(doc: &SchDoc) -> Vec<(String, Rect)> {
     doc.symbols()

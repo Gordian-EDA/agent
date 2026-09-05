@@ -24,10 +24,15 @@ impl TextSolver for GreedyText {
     }
 
     /// For each movable (in order), the first candidate that collides with no obstacle
-    /// (minus same-owner exemptions) and no previously chosen box. Falls back to candidate
-    /// 0 with `fits: false` when none is free — the caller decides the degradation
-    /// (lint-flagged for fields/labels, hidden for optional text like repeated
-    /// power-rail names).
+    /// (minus same-owner exemptions) and no previously chosen box.
+    ///
+    /// When nothing is free the pick is the candidate burying the LEAST foreign ink,
+    /// reported `fits: false` so the caller can still degrade it (lint-flagged for
+    /// fields/labels, hidden for optional text like repeated power-rail names).
+    /// Falling back to candidate 0 instead put the text at its conventional spot
+    /// *because* that spot was conventional, which on a crowded symbol is squarely
+    /// on the pin names — area, not order, is what decides whether the run still
+    /// reads.
     fn solve(&self, obstacles: &[Obstacle], movables: &[Movable]) -> Vec<Pick> {
         // Two text boxes that merely ABUT (share an edge, 0 gap) pass the strict-inequality
         // overlap test yet render as one run ("10kGND", "3V3GND"). Keep a small gap between
@@ -43,8 +48,23 @@ impl TextSolver for GreedyText {
                         || b.intersection(&o.bbox).is_none()
                 }) && placed.iter().all(|p| grow(b).intersection(p).is_none())
             };
+            let buried = |b: &Rect| -> f64 {
+                let own = |o: &&Obstacle| !(o.owner.is_some() && o.owner == m.owner);
+                obstacles
+                    .iter()
+                    .filter(own)
+                    .map(|o| o.bbox)
+                    .chain(placed.iter().copied())
+                    .filter_map(|o| b.intersection(&o))
+                    .map(|hit| hit.width() * hit.height())
+                    .sum()
+            };
             let pick = m.candidates.iter().position(free);
-            let idx = pick.unwrap_or(0);
+            let idx = pick.unwrap_or_else(|| {
+                (0..m.candidates.len())
+                    .min_by(|&a, &b| buried(&m.candidates[a]).total_cmp(&buried(&m.candidates[b])))
+                    .unwrap_or(0)
+            });
             placed.push(m.candidates[idx]);
             out.push(Pick {
                 candidate: idx,

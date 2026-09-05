@@ -69,7 +69,7 @@ FINAL_JSON:
 {{"score": {score}, "summary": "reads well", "defects": [
   {{"severity": "major", "confidence": "high", "category": "spacing",
    "location": "C1", "description": "C1 sits three columns from U1's VDD pin",
-   "at_mm": [131.5, 88.9], "refs": ["C1", "U1"],
+   "refs": ["C1", "U1"],
    "fix": "move C1 against U1.VDD and drop its stub straight to GND"}}
 ]}}"#
     )
@@ -99,7 +99,6 @@ async fn reports_the_mean_score_and_the_mapped_defects() {
     let defect = &result["defects"][0];
     assert_eq!(defect["kind"], "spacing");
     assert_eq!(defect["severity"], "major");
-    assert_eq!(defect["at_mm"], serde_json::json!([131.5, 88.9]));
     assert_eq!(defect["refs"], serde_json::json!(["C1", "U1"]));
     assert!(defect["what"].as_str().expect("what").contains("C1 sits"));
     assert!(defect["fix"].as_str().expect("fix").contains("move C1"));

@@ -13,6 +13,12 @@
 //! whole from the run whose own score sits nearest that mean. This is exactly
 //! what `tools/schematic_critic.py` does, so the tool the agent calls and the
 //! harness fact it is scored by agree on the number.
+//!
+//! The grader is shown the same two pictures the harness shows it — the clean
+//! sheet and the reference — and nothing else. It used to get a third image, the
+//! millimetre-overlay render, purely so defects could carry `at_mm`; that made
+//! the two critics grade different pictures for a coordinate the model never
+//! needed, since `arrange` takes blocks and refdes, not millimetres.
 
 use anyhow::Result;
 use gordian_llm::{Binary, ChatMessage, ContentPart, MessageContent, Provider, completed_text};
@@ -65,7 +71,6 @@ impl Subject {
 }
 
 /// Render the sheet and load the anchor. Blocking: KiCAD exports the SVG.
-/// `input` accepts `{anchor}` — a path to a different reference PNG.
 pub fn prepare(ctx: &AgentRuntime) -> Result<Result<Subject, Value>> {
     if !ctx.sch_path().is_file() {
         return Ok(Err(json!({
@@ -94,7 +99,6 @@ pub async fn review(client: &dyn Provider, subject: &Subject) -> Result<Value> {
         ContentPart::from_text(user_prompt(&subject.sheet)),
         ContentPart::Binary(png(subject.sheet.clean.clone())),
         ContentPart::Binary(subject.anchor.clone()),
-        ContentPart::Binary(png(subject.sheet.annotated.clone())),
     ]))];
     let graded = futures::future::join_all((0..SAMPLES).map(|_| {
         let messages = messages.clone();
@@ -133,7 +137,7 @@ pub async fn review(client: &dyn Provider, subject: &Subject) -> Result<Value> {
         "note": format!(
             "An independent critic graded the rendered sheet {SAMPLES} times against a {REFERENCE}; \
              `mean` is the mean of the `samples`, `score` is it rounded, and the defects come from \
-             the sample nearest the mean. at_mm is in sheet millimetres, matching read_schematic. \
+             the sample nearest the mean; each names the `refs` to re-lay-out. \
              A single read of one unchanged sheet swings 1-3 points, so judge only by the MEAN: \
              the sheet is DONE when the mean reaches 8. Below that, fix the blocks the defects \
              name and review again; stop when the mean fails to improve on two consecutive reviews."
@@ -145,8 +149,9 @@ pub async fn review(client: &dyn Provider, subject: &Subject) -> Result<Value> {
 
 /// The framing that rides with the images. The rubric's own anchor sentence is
 /// reused verbatim, so the image order it names — sheet first, reference second —
-/// is the order they are attached in; the annotated third image only carries the
-/// coordinates the agent needs to act on a defect.
+/// is the order they are attached in, and it is the whole attachment: the harness
+/// critic sends exactly these two, and a grader given a different picture returns
+/// a different number.
 ///
 /// The engine has already measured this exact geometry, so the answer to the two
 /// classes the rubric spends half its length warning about is stated as ground
@@ -159,11 +164,9 @@ fn user_prompt(sheet: &SheetPngs) -> String {
         "Audit this rendered schematic for layout quality. Reason first (trace every \
          wire-through-body and dangling-pin candidate to its endpoints), then emit the \
          FINAL_JSON verdict. Parts on the sheet: {parts}.\n\n{calibration}\n\n{ground_truth}\n\n\
-         The THIRD attached image is the FIRST sheet again under a millimetre coordinate \
-         overlay; read it only to locate defects. Add three fields to every defect: \
-         \"at_mm\": [x, y] — where it is, in sheet millimetres off that overlay; \
-         \"refs\": the reference designators involved; and \"fix\": the one concrete \
-         re-layout that removes it."
+         Add two fields to every defect: \"refs\" — the reference designators involved, \
+         which is how the sheet is edited — and \"fix\": the one concrete re-layout that \
+         removes it."
     )
 }
 
@@ -255,7 +258,6 @@ fn defects(verdict: &Value) -> Vec<Value> {
             json!({
                 "severity": text("severity"),
                 "kind": text("category"),
-                "at_mm": d.get("at_mm").cloned().unwrap_or(Value::Null),
                 "refs": refs(d),
                 "what": text("description"),
                 "fix": text("fix"),
@@ -370,15 +372,14 @@ mod tests {
     }
 
     #[test]
-    fn defects_carry_coordinates_refs_and_a_fix() {
+    fn defects_carry_the_refs_and_the_fix() {
         let verdict = json!({"defects": [{
             "severity": "major", "confidence": "high", "category": "spacing",
             "location": "C1/U1", "description": "C1 is stranded", "fix": "move C1 beside U1.VDD",
-            "at_mm": [120.0, 90.5], "refs": ["C1", "U1"]
+            "refs": ["C1", "U1"]
         }]});
         let mapped = defects(&verdict);
         assert_eq!(mapped[0]["kind"], "spacing");
-        assert_eq!(mapped[0]["at_mm"], json!([120.0, 90.5]));
         assert_eq!(mapped[0]["refs"], json!(["C1", "U1"]));
         assert_eq!(mapped[0]["what"], "C1 is stranded");
         assert_eq!(mapped[0]["fix"], "move C1 beside U1.VDD");
