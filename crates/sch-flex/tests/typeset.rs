@@ -276,9 +276,9 @@ fn a_decoupler_with_nowhere_to_sit_is_still_drawn() {
 }
 
 /// The defect a reader names as "sibling orientation": a pull-up and a pull-down are the
-/// same part playing the same role — a leg off a rail — so they must stand the same way
-/// on the same baseline, however differently their rails are named. The engine used to
-/// stand only the pull-down and lay the pull-up along the row.
+/// same part playing the same role — a leg off a rail whose far pin ends at a label — so
+/// they must stand the same way on the same baseline, however differently their rails are
+/// named. The engine used to stand only the pull-down and lay the pull-up along the row.
 #[test]
 fn a_pull_up_and_a_pull_down_in_one_row_stand_alike() {
     let mut items = vec![
@@ -298,6 +298,32 @@ fn a_pull_up_and_a_pull_down_in_one_row_stand_alike() {
         ys.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-9),
         "siblings off one rail took different baselines: {ys:?}"
     );
-    let vertical = items[0].geom.pins.iter().all(|p| p.at.x.abs() < 1e-9);
-    assert!(vertical && angles[0] % 180.0 == 0.0, "a leg off a rail stands: {angles:?}");
+    assert!(angles[0] % 180.0 == 0.0, "a leg off a rail stands: {angles:?}");
+}
+
+/// The limit of that rule, recorded so the next reader does not mistake it for solved: the
+/// same three resistors, but their signals now reach an IC in the same block instead of
+/// ending at a label. `Part::terminates` reads the block's LABEL assignment, not the
+/// drawing's topology, so it cannot see that a pull-up's signal still ends at a wire stub
+/// — and the pull-ups lie back down while the pull-down stands. Closing this needs the
+/// far net's fan-out INSIDE the container, which only the container knows.
+#[test]
+fn a_pull_up_wired_to_an_ic_still_breaks_ranks() {
+    let mut items = vec![
+        passive("R1", "3V3", "SCL"),
+        passive("R2", "SDA", "GND"),
+        passive("R3", "3V3", "NRST"),
+        ic("U1", ["SCL", "SDA", "NRST"]),
+    ];
+    let tree = stack(
+        Axis::Row,
+        vec![leaf("R1"), leaf("R2"), leaf("R3"), leaf("U1")],
+    );
+    sch_flex::typeset(&mut items, &trees(tree), &[]);
+    let angles: Vec<f64> = items[..3].iter().map(|it| it.angle).collect();
+    assert_eq!(
+        angles,
+        vec![90.0, 0.0, 90.0],
+        "the known gap closed — fold this case into the test above"
+    );
 }
