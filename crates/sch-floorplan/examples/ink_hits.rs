@@ -24,6 +24,7 @@ enum Class {
     PowerText,
     FieldText,
     Label,
+    PowerCluster,
 }
 
 impl Class {
@@ -34,6 +35,7 @@ impl Class {
             Class::PowerText => "through-power-text",
             Class::FieldText => "through-field-text",
             Class::Label => "through-label",
+            Class::PowerCluster => "through-power-cluster",
         }
     }
 }
@@ -51,7 +53,7 @@ fn main() {
     sheets.retain(|p| p.extension().is_some_and(|e| e == "kicad_sch"));
     sheets.sort();
 
-    let mut totals = [0usize; 5];
+    let mut totals = [0usize; 6];
     for path in &sheets {
         let doc = SchDoc::read(path).unwrap();
         let hits = hits(&doc);
@@ -72,8 +74,8 @@ fn main() {
         }
     }
     println!(
-        "TOTAL through-body={} through-pin-text={} through-power-text={} through-field-text={} through-label={}",
-        totals[0], totals[1], totals[2], totals[3], totals[4]
+        "TOTAL through-body={} through-pin-text={} through-power-text={} through-field-text={} through-label={} through-power-cluster={}",
+        totals[0], totals[1], totals[2], totals[3], totals[4], totals[5]
     );
 }
 
@@ -108,9 +110,45 @@ fn hits(doc: &SchDoc) -> Vec<Hit> {
             .any(|p| p.at.dist(seg.a) < EPS || p.at.dist(seg.b) < EPS)
     };
 
+    // A power symbol reads as ONE object: the glyph and the rail name beside it. A
+    // foreign wire threading the GAP between them is inside neither box and hits no
+    // measure above, but it reads as that rail — so the two are measured as one.
+    let clusters: Vec<(String, Rect)> = doc
+        .symbols()
+        .filter(|s| s.refdes().starts_with('#'))
+        .filter_map(|s| {
+            let glyph = sch_doc::body_rect(doc, s)?;
+            let name = texts
+                .iter()
+                .find(|t| t.owner.as_deref() == Some(s.refdes()) && t.kind == TextKind::Field)?;
+            Some((
+                s.refdes().to_string(),
+                Rect::new(
+                    glyph.min_x.min(name.bbox.min_x),
+                    glyph.min_y.min(name.bbox.min_y),
+                    glyph.max_x.max(name.bbox.max_x),
+                    glyph.max_y.max(name.bbox.max_y),
+                ),
+            ))
+        })
+        .collect();
+
     let mut out = Vec::new();
     for (a, b, net) in sch_doc::connect::scene(doc).segments {
         let seg = Segment::new(a, b);
+        for (refdes, cluster) in &clusters {
+            if owns(&seg, refdes) || !seg.axis_aligned_hits_rect_interior(cluster) {
+                continue;
+            }
+            out.push((
+                Class::PowerCluster,
+                refdes.clone(),
+                "glyph+name".into(),
+                net.clone(),
+                a,
+                b,
+            ));
+        }
         for (refdes, body) in &bodies {
             if refdes.starts_with('#') || owns(&seg, refdes) {
                 continue;

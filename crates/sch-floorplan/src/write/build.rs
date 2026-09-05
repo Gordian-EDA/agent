@@ -761,9 +761,15 @@ impl SchematicWriter {
                 // glyph gets the same keepout the no-connect X gets: tagged with its own
                 // net, which its stub may reach and every other wire detours around.
                 scene.points.push((inst.at, inst.value.clone()));
-                // The keepout is the drawn triangle plus a hair, not the symbol's padded
-                // placement box, so it never walls off the channel beside a rail.
-                scene.label_solids.push((ink_box(inst), inst.value.clone()));
+                // The keepout is the triangle PLUS the ring the rail name sits in. A
+                // power symbol reads as one object — glyph and name — and a foreign
+                // wire threading the gap between them takes the rail's name with it
+                // (a buck's FB run between U2's ground triangle and its "GND"). The
+                // name's seat is not solved until after the wires are drawn, so what
+                // is reserved is the grid step it is seated within, on every side.
+                scene
+                    .label_solids
+                    .push((rail_keepout(inst), inst.value.clone()));
                 continue;
             }
             scene.solids.push(ink_box(inst));
@@ -1163,6 +1169,24 @@ pub fn pin_end0(env: &KicadInstallation, lib_id: &str, pin: &str) -> io::Result<
 /// padding; it is unreadable on top of a body). A power symbol's glyph is a
 /// small triangle at its anchor and never fills the 10 mm cell `approx_size`
 /// floors it to, so it is measured directly.
+/// A power symbol's routing keepout: its glyph plus the step its rail name is seated
+/// within. Foreign wires only — [`SchematicWriter::route_scene`] tags it with the rail's
+/// own net, whose stub still reaches the anchor.
+///
+/// Deliberately not the symbol's padded placement box, which is wide enough to wall off
+/// the channel beside a rail.
+fn rail_keepout(inst: &Instance) -> Rect {
+    /// One line of rail-name text, mm — the gap that must not hold a wire.
+    const NAME_STEP: f64 = 1.27;
+    let r = ink_box(inst);
+    Rect::new(
+        r.min_x - NAME_STEP,
+        r.min_y - NAME_STEP,
+        r.max_x + NAME_STEP,
+        r.max_y + NAME_STEP,
+    )
+}
+
 pub(crate) fn ink_box(inst: &Instance) -> Rect {
     let h = if inst.refdes.starts_with('#') {
         Point2::new(1.27, 3.175).rotated_half_extents(inst.angle)
