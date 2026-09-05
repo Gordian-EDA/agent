@@ -41,8 +41,32 @@ fn swivel_poses(home: Dir) -> [Dir; 4] {
 /// last solve turned it to as home and rotate the whole set again, so the pass
 /// would not be idempotent.
 fn stub_poses(pin_at: Point2, end: Point2, fallback: Dir) -> Vec<(Point2, Dir)> {
-    let (dx, dy) = (end.x - pin_at.x, end.y - pin_at.y);
-    let home = if dx.abs() < EPS && dy.abs() < EPS {
+    let home = outward_dir(pin_at, end, fallback);
+    let (a, b) = match home {
+        Dir::East | Dir::West => (Dir::North, Dir::South),
+        Dir::North | Dir::South => (Dir::East, Dir::West),
+    };
+    vec![(end, home), (pin_at, home), (end, a), (end, b)]
+}
+
+/// The side of its symbol a stub label leaves by, read from the STUB (pin endpoint
+/// to label position) rather than from the label's reading direction.
+///
+/// A solved label may have been turned a quarter turn, and its reading direction is
+/// then no longer the direction its stub points. Grouping or re-seating a column on
+/// `dir` would put such a member in the wrong column and walk it off its own pin, so
+/// a second pass over solved geometry would not reproduce the first.
+fn stub_axis(label: &super::PinLabel) -> Dir {
+    match label.anchor {
+        super::Anchor::Stub(pin_at) => outward_dir(pin_at, label.at.into(), label.dir),
+        _ => label.dir,
+    }
+}
+
+/// The axis-aligned direction from `from` to `to`, `fallback` when they coincide.
+fn outward_dir(from: Point2, to: Point2, fallback: Dir) -> Dir {
+    let (dx, dy) = (to.x - from.x, to.y - from.y);
+    if dx.abs() < EPS && dy.abs() < EPS {
         fallback
     } else if dx.abs() >= dy.abs() {
         if dx > 0.0 { Dir::East } else { Dir::West }
@@ -50,12 +74,7 @@ fn stub_poses(pin_at: Point2, end: Point2, fallback: Dir) -> Vec<(Point2, Dir)> 
         Dir::South
     } else {
         Dir::North
-    };
-    let (a, b) = match home {
-        Dir::East | Dir::West => (Dir::North, Dir::South),
-        Dir::North | Dir::South => (Dir::East, Dir::West),
-    };
-    vec![(end, home), (pin_at, home), (end, a), (end, b)]
+    }
 }
 
 /// How far out from the pin tips a field pair may stand, nearest first.
@@ -264,7 +283,7 @@ impl SchematicWriter {
                 let Anchor::Stub(pin_at) = label.anchor else {
                     unreachable!("grouped on Anchor::Stub")
                 };
-                let v = label.dir.vec();
+                let v = stub_axis(label).vec();
                 let end =
                     GRID_50_MIL.snap_point(Point2::new(pin_at.x + v.x * len, pin_at.y + v.y * len));
                 (pin_at, end)
@@ -359,7 +378,7 @@ impl SchematicWriter {
                 continue;
             };
             groups
-                .entry((refdes.to_string(), side(label.dir)))
+                .entry((refdes.to_string(), side(stub_axis(label))))
                 .or_default()
                 .push(i);
         }
