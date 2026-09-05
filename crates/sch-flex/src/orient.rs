@@ -13,10 +13,18 @@ use crate::part::{Part, Pose, rail_penalty};
 ///
 /// - A connector, or anything with more than four pins, stands as the library drew it.
 /// - A transistor picks the rot/mirror that points its ground pin down and its supply up.
-/// - A 2-pin part touching a rail, or stacked in a column, stands vertical (ground pin at
-///   the bottom); anything else in a row lies along the row, which is what "a row is one
-///   signal path" means geometrically.
-pub fn default_pose(part: &Part, axis: Axis) -> Pose {
+/// - A resistor, capacitor or LED hanging OFF a rail — one pin on a supply, and no part
+///   beside it on the other pin's net — stands vertical, ground pin at the bottom and
+///   supply at the top. That is its role, so every part playing it comes out at the same
+///   angle without any of them consulting the others: a pull-up beside a pull-down no
+///   longer lies down while its sibling stands. `chained` says the container measured the
+///   opposite — another part the signal passes THROUGH reaches the far net, so this one is
+///   a link in a chain and lies along it, because standing a link bends its wire around
+///   its own body.
+/// - Anything else touching ground, and anything stacked in a column, stands too;
+///   anything else in a row lies along the row, which is what "a row is one signal path"
+///   means geometrically.
+pub fn default_pose(part: &Part, axis: Axis, chained: bool) -> Pose {
     if part.is_connector() || part.pins.len() > 4 {
         return Pose::default();
     }
@@ -24,7 +32,9 @@ pub fn default_pose(part: &Part, axis: Axis) -> Pose {
         return upright(part);
     }
     let rails = part.rails();
-    let on_rail = rails.iter().any(|net| circuit_graph::netclass::is_ground(net)) || rails.len() == 2;
+    let on_rail = rails.iter().any(|net| circuit_graph::netclass::is_ground(net))
+        || rails.len() == 2
+        || (!chained && hangs_off_a_rail(part));
     if on_rail || axis == Axis::Col {
         return standing(part);
     }
@@ -32,6 +42,21 @@ pub fn default_pose(part: &Part, axis: Axis) -> Pose {
         angle: part.rotations_along(true).first().copied().unwrap_or(0.0),
         mirror: false,
     }
+}
+
+/// A leg off a rail: a resistor, capacitor or LED with one pin on a supply and one on a
+/// signal. An inductor, fuse or power diode is never a leg — it threads the current path.
+fn hangs_off_a_rail(part: &Part) -> bool {
+    let symbol = part.item.part.rsplit(':').next().unwrap_or_default();
+    if !matches!(symbol.split('_').next(), Some("R" | "C" | "LED")) {
+        return false;
+    }
+    let rails = part
+        .pins
+        .iter()
+        .filter(|pin| part.net(pin).is_some_and(circuit_graph::netclass::is_power_net))
+        .count();
+    rails == 1 && part.nets().len() == 2
 }
 
 /// A multi-pin part (transistor, small regulator) turned so its rails point the way a

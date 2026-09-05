@@ -113,16 +113,12 @@ impl<'a> Part<'a> {
         self.pins.len() == 2
     }
 
-    /// Whether `pin`'s net ENDS at this pin on the drawing — a label, a rail symbol or
-    /// a ground stub — rather than continuing sideways to another part. It is the
-    /// difference between a leg off a rail (stands) and a series element that happens to
-    /// touch one (lies along its chain); standing the second forces a U-turn around its
-    /// own body.
-    pub fn terminates(&self, pin: &PinGeom) -> bool {
-        self.pins
-            .iter()
-            .position(|p| std::ptr::eq(*p, pin))
-            .is_some_and(|i| self.attach.get(i).is_some_and(Option::is_some))
+    /// A part the signal simply passes THROUGH: two terminals, or a potentiometer's two
+    /// ends and its wiper. These are the links a chain is made of. A pin on anything else —
+    /// an IC, a regulator, an amplifier — is where a chain ENDS, however many parts hang
+    /// off the net there.
+    pub fn links_a_chain(&self) -> bool {
+        self.two_pin() || (self.pins.len() == 3 && self.item.part.starts_with("Device:"))
     }
 
     /// Connectors and headers: a human mirrors the symbol to face the circuit rather than
