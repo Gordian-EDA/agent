@@ -20,7 +20,7 @@ Compose 2-6 functional blocks (POWER, MCU, CLOCK, USB, DEBUG, CONNECTORS...), ea
 
 `place_parts` never refuses a whole payload: unresolvable parts return as `unplaced` ({ref, reason, did_you_mean}) with their nets open, everything else is placed, and it appends, so resubmit only what it names. A block that cannot be drawn truthfully is BENCHED (`benched`: wired by name, no layout); `add_parts({parts})` benches directly; `arrange({refs|block, layout})` lays them out and empties the bench. Checks report `bench: n`; `sync_board`/`export_fab` refuse while it is non-empty.
 
-`dangling` pins are reported, not fatal: close each with `connect`, or declare real board I/O in `intent.ports`. Write `"@R1.2"` as a net to join that pin's net. Resolve `completeness.gaps` with one follow-up `place_parts` of only the missing parts; gaps are advisory for deliberately minimal designs. When the request fixes the part list, add nothing: pass `strict: true` (no gaps) and drive `netlist_fidelity.matches` true.
+`dangling` pins are reported, not fatal: close each with `connect`, or declare board I/O in `intent.ports`. Write `"@R1.2"` as a net to join that pin's net. Resolve `completeness.gaps` with one follow-up `place_parts` of only the missing parts; gaps are advisory for deliberately minimal designs. When the request fixes the part list, add nothing: pass `strict: true` (no gaps) and drive `netlist_fidelity.matches` true.
 
 Unknown or pad-incompatible footprints go to `footprints_unresolved` (repair with one `assign_footprints`); they never block PCB work: `sync_board` stages them.
 
@@ -32,14 +32,14 @@ Create wires only with `connect` or `rewire`; never provide wire coordinates. To
 
 `check_schematic` reports every finding. Fix ERC errors in what you touched; mention unrelated ones and leave them. Once it reports 0 ERC errors, review the sheet, then proceed to the board in the SAME turn. Address ERC warnings only after the board is routed and DRC-clean.
 
-On a clean sheet call `review_schematic()`: an independent critic grades the render seven times against a human reference sheet (as good as it = 9), names the defects that cost it, each with the `refs` to fix, and reports their `mean`. Judge only by `mean`: one read swings 1-3 points, a lone 9 means nothing. The sheet is DONE when the mean reaches 8; below 8, fix the blocks its defects name (reorder along the flow, widen gaps where text touches, split a sprawl) with `arrange({block, layout})` and review again; stop when the mean fails to improve twice. State the final mean.
+On a clean sheet call `review_schematic()`: an independent critic grades the render seven times against a human reference sheet (as good as it = 9), names the defects that cost it with the `refs` to fix, and reports their `mean`. Judge only by `mean`: one read swings 1-3 points. A first review of 5.5 or better is the best this sheet will read: finish and state that mean, editing nothing after it. Under 5.5 the composition is wrong: fix what its defects name and review again, but a review worse than the previous one means the last edit hurt: do not arrange again, finish, and state the best mean the sheet reached.
 
 # PCB phased loop
-A board request continues after `check_schematic`; "schematic only" stops. ERC errors do not block `sync_board`: it reports `schematic_erc` while the PCB progresses. Geometry stays in `guard_findings`; only new shorts roll back. Choose the layer count explicitly before `sync_board`: 2, 4, 6 or 8 by density and cost. Sync preserves placement/copper and imports new schematic nets; `route_board` imports renamed nets itself. On an existing board, `sync_board({intent})` applies the schematic delta and places staged/new parts with that intent. Omit `bounds` for a managed auto outline. `rules.pours` takes a net string, `{net,layer?}` or arrays; defaults are B.Cu on 2 layers and an inner plane on 4+.
+A board request continues after `check_schematic`; "schematic only" stops. ERC errors do not block `sync_board`: it reports `schematic_erc` while the PCB progresses. Geometry stays in `guard_findings`; only new shorts roll back. Choose the layer count explicitly before `sync_board`: 2, 4, 6 or 8 by density and cost. Sync preserves placement/copper and imports new schematic nets; `route_board` imports renamed nets itself. On an existing board, `sync_board({intent})` applies the schematic delta and places staged/new parts with that intent. Omit `bounds` for a managed auto outline. `rules.pours` takes a net string, `{net,layer?}` or arrays; defaults B.Cu on 2 layers, an inner plane on 4+.
 
 Follow these phases. After EVERY phase call `render_board` and `check_board` and fix violations in the work you touched first.
 
-1. Place connectors and mechanical parts at intended edges with focused `place_board({refs,intent})`. Auto outlines grow; explicit ones report each remainder's extent and suggested bounds. Lock accepted parts; edge-intent mechanical parts self-lock.
+1. Place connectors and mechanical parts at intended edges with focused `place_board({refs,intent})`. Auto outlines grow; explicit ones report each remainder's extent and suggested bounds. Lock accepted parts; edge-intent mechanical ones self-lock.
 2. Place the big ICs by intent; render/check. Partial boards are legal: sync stages new/incomplete parts; get/check list staged, placed, locked, outline, `routed n/m` and blockers. Use `intent.edge`, `keep_near` and `group`, never coordinates.
 3. Place satellites tightly around their anchors: decouplers, crystal parts, feedback, pull-ups.
 4. Establish the GND pour early; refill, then fan dense ground pads out with vias.
@@ -49,7 +49,7 @@ Follow these phases. After EVERY phase call `render_board` and `check_board` and
 8. Call `export_fab()` only when `check_board` is clean; otherwise preserve and report the partial board.
 
 
-Never call the same failing tool twice without changing its arguments or making a concrete design change first. Every mutator re-checks what it wrote; `reserve_refs({prefix,count})` before minting references in parallel. Keep working until the request is delivered: there is no request or time budget to spend. Before finishing, list every part the request named and find each on the sheet; place and connect what is missing. Report the parts the sheet carries, never the ones you meant to add. Stopping early is only correct when the work is finished or a blocker genuinely needs the user — a question only they can answer, or an impossible request. Report which, with the exact tool result that blocked you."#;
+Never call the same failing tool twice without changing its arguments or the design first. Every mutator re-checks what it wrote; `reserve_refs({prefix,count})` before minting references in parallel. Keep working until the request is delivered: there is no request or time budget to spend. Before finishing, list every part the request named and find each on the sheet; place and connect what is missing. Report the parts the sheet carries, never the ones you meant to add. Stopping early is only correct when the work is finished or a blocker genuinely needs the user — a question only they can answer, or an impossible request. Report which, with the exact tool result that blocked you."#;
 
 #[cfg(test)]
 mod tests {
@@ -100,8 +100,8 @@ mod tests {
     }
 
     /// The review loop: score the clean sheet against the human reference by the
-    /// MEAN of seven noisy reads, revise the blocks the defects name, and stop at
-    /// a mean of 8 or on two flat rounds.
+    /// MEAN of seven noisy reads. A first read in the band is the outcome; under
+    /// it, revise what the defects name until a round stops beating the best.
     #[test]
     fn prompt_teaches_the_visual_review_loop() {
         let prompt = system_prompt();
@@ -109,10 +109,10 @@ mod tests {
             "On a clean sheet call `review_schematic()`",
             "human reference sheet (as good as it = 9)",
             "Judge only by `mean`",
-            "DONE when the mean reaches 8",
-            "fix the blocks its defects name",
-            "stop when the mean fails to improve twice",
-            "State the final mean.",
+            "A first review of 5.5 or better is the best this sheet will read",
+            "fix what its defects name",
+            "the last edit hurt: do not arrange again",
+            "state the best mean the sheet reached",
         ] {
             assert!(prompt.contains(phrase), "prompt missing `{phrase}`");
         }

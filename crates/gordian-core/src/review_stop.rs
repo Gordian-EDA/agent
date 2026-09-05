@@ -1,22 +1,29 @@
 //! Closes the visual-review loop when it stops paying, and refuses the reviews
 //! that ask the same question twice.
 //!
-//! Measured over one full suite: the loop wins when it wins fast (current-sense
-//! read 4.00, one `arrange`, 8.71) and otherwise wanders. `current-sense#1` spent
-//! 16 reviews and 17 `arrange`s to finish at 5.86; `stm32#0` spent 12 reviews to
-//! finish at 6.00 having peaked at 6.29 on its third. The prompt already said to
-//! stop when the mean stops improving; nothing enforced it, and each wasted review
-//! is seven vision calls.
+//! Two suites measured the loop itself, and the operator it runs on — "review,
+//! then re-arrange the block the defects name" — is net-negative except on sheets
+//! that are still failing. By the first review's mean, over 25 run-v7 trajectories:
 //!
-//! Two rules, both in-band like the thrash guard:
+//! | first review | runs | best after it | last review | improved |
+//! |--------------|------|---------------|-------------|----------|
+//! | under 5.5    |  10  | +2.07         | +0.93       | 10/10    |
+//! | 5.5 to 7     |  10  | −0.99         | −1.06       | 0/10     |
+//! | 7 and over   |   5  | −0.69         | −1.83       | 0/5      |
 //!
-//! - **stop rule** — a review that does not beat the best mean of the turn by
-//!   [`IMPROVEMENT`] is flat. Two flat reviews in a row close the loop: the review
-//!   result says so, and `arrange` / `move_symbols` / `rewire` are refused for the
-//!   rest of the subturn. A sheet still under [`CONVERGED`] has not converged, it
-//!   is failing, so flat reads there do not close it — replayed over the suite that
-//!   exemption costs 3 of 57 saved reviews and keeps the one run that read 4.00
-//!   three times running to the 6.71 it eventually reached.
+//! Above [`BAND`] the first review IS the outcome, so the rules follow the table
+//! rather than a stopping heuristic. All three are in-band like the thrash guard:
+//!
+//! - **at its best** — a FIRST review of [`BAND`] or better closes the loop then
+//!   and there: `arrange` / `move_symbols` / `rewire` are refused for the rest of
+//!   the subturn and the result says to finish and report that mean. Not even one
+//!   targeted fix: none of the five runs that tried above 7 came out ahead.
+//! - **still failing** — under [`BAND`] the loop iterates, since that is where
+//!   re-composing pays, 10 times out of 10. It closes on the first review that
+//!   fails to beat the best by [`IMPROVEMENT`] once the best has reached the band,
+//!   and on [`FLAT_LIMIT`] consecutive flat reads below it — `ecg#1` oscillated
+//!   3.0-5.3 for 24 reviews and 258 requests, which is the burn this exists to
+//!   stop.
 //! - **no-op rule** — a review with no successful layout edit since the last one
 //!   grades an unchanged picture, so it is refused with the standing mean.
 
@@ -27,12 +34,15 @@ use serde_json::{Value, json};
 /// under that is noise, not a better drawing.
 const IMPROVEMENT: f64 = 0.3;
 
-/// Flat reviews in a row that close the loop.
-const FLAT_LIMIT: usize = 2;
+/// The measured edge between a sheet that is failing and one that is finished:
+/// every run whose first review read under this improved on it, and not one at
+/// or above it did.
+const BAND: f64 = 5.5;
 
-/// The mean below which flat reviews mean the composition is wrong rather than
-/// finished, so the loop stays open.
-const CONVERGED: f64 = 5.0;
+/// Consecutive flat reads a sheet under [`BAND`] may spend before the loop closes
+/// anyway. Below the band a flat read means that edit missed, not that the sheet
+/// is done — but three in a row is a loop, not a search.
+const FLAT_LIMIT: usize = 3;
 
 /// The layout edits that only make sense while the review loop is open.
 fn is_layout_edit(tool: &str) -> bool {
@@ -93,23 +103,48 @@ impl ReviewProgress {
             .and_then(Value::as_f64)?;
         self.edited_since_review = false;
         self.last = Some(mean);
-        if self.best.is_none_or(|best| mean >= best + IMPROVEMENT) {
-            self.best = Some(self.best.map_or(mean, |best| best.max(mean)));
+        let first = self.best.is_none();
+        let improved = self.best.is_none_or(|best| mean >= best + IMPROVEMENT);
+        self.best = Some(self.best.map_or(mean, |best| best.max(mean)));
+        let best = self.best.unwrap_or(mean);
+        if improved {
             self.flat = 0;
+        } else {
+            self.flat += 1;
+        }
+        if self.stopped {
             return None;
         }
-        self.best = Some(self.best.map_or(mean, |best| best.max(mean)));
-        self.flat += 1;
-        let best = self.best.unwrap_or(mean);
-        if self.flat < FLAT_LIMIT || self.stopped || best < CONVERGED {
+        if first && mean >= BAND {
+            self.stopped = true;
+            return Some(format!(
+                "The sheet is at its best: it reads {mean} on its first review, and in the last \
+                 suite no sheet that read {BAND} or better improved on its first read — every one \
+                 that was edited again ended lower. Finish and report {mean}. Do not arrange, \
+                 move or rewire anything: those calls will be refused."
+            ));
+        }
+        if improved {
+            return None;
+        }
+        if best >= BAND {
+            self.stopped = true;
+            return Some(format!(
+                "This review did not beat the best mean of {best} this turn (it read {mean}), \
+                 which means the last edit hurt: do not arrange again, finish. Report {best} as \
+                 the final mean and do not edit the sheet after the review you finish on. Further \
+                 arrange, move_symbols and rewire calls will be refused."
+            ));
+        }
+        if self.flat < FLAT_LIMIT {
             return None;
         }
         self.stopped = true;
         Some(format!(
-            "The sheet stopped improving: {FLAT_LIMIT} reviews in a row failed to beat the best \
-             mean of {best} this turn (this one read {mean}). Finish now — report {best} as the \
-             final mean and do not edit the sheet after the review you finish on. Further \
-             arrange, move_symbols and rewire calls will be refused."
+            "{FLAT_LIMIT} reviews in a row have failed to beat {best} and the sheet is still \
+             under {BAND}: re-arranging is not finding the composition this circuit wants. \
+             Finish and report {best}; further arrange, move_symbols and rewire calls will be \
+             refused."
         ))
     }
 
@@ -149,60 +184,75 @@ mod tests {
         json!({"mean": mean, "score": mean.round()})
     }
 
-    /// The trajectory `stm32#0` actually ran: it peaked on its third review and
-    /// spent nine more getting nowhere.
+    /// Ten runs read 5.5 or better first and not one of them improved on it, so
+    /// that read is the outcome: the loop closes on the spot.
     #[test]
-    fn two_flat_reviews_in_a_row_close_the_loop() {
+    fn a_first_review_in_the_band_closes_the_loop_at_once() {
         let mut progress = ReviewProgress::default();
-        for mean in [3.57, 3.86, 6.29, 6.00] {
-            assert!(progress.observe(&review(mean)).is_none(), "{mean}");
-            progress.note_edit();
-        }
-        let notice = progress.observe(&review(6.00)).expect("the fifth closes it");
-        assert!(notice.contains("6.29"), "{notice}");
+        let notice = progress.observe(&review(6.86)).expect("closes at once");
+        assert!(notice.contains("at its best"), "{notice}");
+        assert!(notice.contains("6.86"), "{notice}");
         assert!(progress.refusal("arrange").is_some());
         assert!(progress.refusal("move_symbols").is_some());
         assert!(progress.refusal("rewire").is_some());
         assert!(progress.refusal("place_parts").is_none(), "new work is free");
     }
 
-    /// A real gain resets the count: a loop that is still paying stays open.
+    /// Not even one targeted fix above 7: none of the five runs that tried came
+    /// out ahead.
     #[test]
-    fn an_improvement_reopens_the_count() {
+    fn a_high_first_review_gets_no_targeted_fix_either() {
         let mut progress = ReviewProgress::default();
-        for mean in [6.29, 6.00, 7.00, 5.71] {
-            assert!(progress.observe(&review(mean)).is_none(), "{mean}");
-            progress.note_edit();
-        }
-        assert!(progress.observe(&review(5.71)).is_some());
+        assert!(progress.observe(&review(8.43)).is_some());
+        assert!(progress.refusal("move_symbols").is_some());
     }
 
-    /// Half a point of grader noise is not an improvement worth another round.
+    /// Under the band the loop iterates, and closes on the first read that fails
+    /// to beat a best that has climbed into the band.
     #[test]
-    fn a_gain_under_the_noise_floor_is_flat() {
+    fn a_climbing_sheet_closes_on_the_first_flat_read_in_the_band() {
         let mut progress = ReviewProgress::default();
-        progress.observe(&review(6.00));
+        assert!(progress.observe(&review(3.71)).is_none(), "still failing");
         progress.note_edit();
-        assert!(progress.observe(&review(6.29)).is_none(), "one flat is fine");
+        assert!(progress.observe(&review(4.00)).is_none(), "flat but low");
         progress.note_edit();
-        assert!(progress.observe(&review(6.20)).is_some(), "two is not");
+        assert!(progress.observe(&review(6.14)).is_none(), "a real gain");
+        progress.note_edit();
+        let notice = progress.observe(&review(5.86)).expect("the flat read");
+        assert!(notice.contains("the last edit hurt"), "{notice}");
+        assert!(progress.refusal("arrange").is_some());
     }
 
     /// `rp2040#0` read 4.00 three times and then found 6.71: a sheet that bad is
     /// mis-composed, not converged, so the loop stays open for it.
     #[test]
-    fn a_failing_sheet_is_not_treated_as_converged() {
+    fn a_failing_sheet_keeps_re_composing() {
         let mut progress = ReviewProgress::default();
-        for mean in [4.0, 4.0, 4.0, 4.0] {
+        for mean in [4.0, 4.0, 4.0] {
             assert!(progress.observe(&review(mean)).is_none(), "{mean}");
             progress.note_edit();
         }
         assert!(progress.refusal("arrange").is_none());
         assert!(progress.observe(&review(6.71)).is_none(), "a real gain");
         progress.note_edit();
-        progress.observe(&review(6.5));
+        assert!(progress.observe(&review(6.5)).is_some(), "now it may close");
+    }
+
+    /// `ecg#1` oscillated 3.0-5.3 for 24 reviews and 258 requests. Three flat
+    /// reads under the band is a loop, not a search.
+    #[test]
+    fn three_flat_reads_under_the_band_close_it_anyway() {
+        let mut progress = ReviewProgress::default();
+        for mean in [3.29, 3.43, 4.57] {
+            assert!(progress.observe(&review(mean)).is_none(), "{mean}");
+            progress.note_edit();
+        }
+        assert!(progress.observe(&review(4.29)).is_none(), "one flat");
         progress.note_edit();
-        assert!(progress.observe(&review(6.6)).is_some(), "now it may close");
+        assert!(progress.observe(&review(4.43)).is_none(), "two flat");
+        progress.note_edit();
+        let notice = progress.observe(&review(4.71)).expect("three closes it");
+        assert!(notice.contains("not finding the composition"), "{notice}");
     }
 
     /// Only `arrange` empties the bench, so a closed loop still allows it while
@@ -210,10 +260,7 @@ mod tests {
     #[test]
     fn benched_parts_keep_the_layout_tools_open() {
         let mut progress = ReviewProgress::default();
-        for mean in [6.0, 6.0, 6.0] {
-            progress.observe(&review(mean));
-            progress.note_edit();
-        }
+        progress.observe(&review(6.0));
         assert!(progress.refusal("arrange").is_some());
         progress.note_bench(2);
         assert!(progress.refusal("arrange").is_none());

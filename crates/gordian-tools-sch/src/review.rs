@@ -138,9 +138,11 @@ pub async fn review(client: &dyn Provider, subject: &Subject) -> Result<Value> {
             "An independent critic graded the rendered sheet {SAMPLES} times against a {REFERENCE}; \
              `mean` is the mean of the `samples`, `score` is it rounded, and the defects come from \
              the sample nearest the mean; each names the `refs` to re-lay-out. \
-             A single read of one unchanged sheet swings 1-3 points, so judge only by the MEAN: \
-             the sheet is DONE when the mean reaches 8. Below that, fix the blocks the defects \
-             name and review again; stop when the mean fails to improve on two consecutive reviews."
+             A single read of one unchanged sheet swings 1-3 points, so judge only by the MEAN. \
+             A first review of 5.5 or better is the best this sheet will read — finish and report \
+             it. Under 5.5 the composition is wrong: fix what the defects name and review again, \
+             but a review worse than the previous one means the last edit hurt, so do not arrange \
+             again, finish, and report the best mean this sheet reached."
         ),
     });
     result[IMAGE_PATH_KEY] = json!(subject.annotated_path());
