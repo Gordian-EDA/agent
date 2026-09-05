@@ -11,7 +11,7 @@
 
 use geom::Dir;
 use geom::{EPS, Point2, Polyline, RouteShape};
-use sch_model::route::{RouteScene, SchRouter, path_crossings, path_ok};
+use sch_model::route::{RouteScene, SchRouter, path_crossings, path_hugs, path_ok};
 
 /// Minimum lead length out of a pin before the first turn, mm.
 const LEAD_MM: f64 = 2.54;
@@ -137,7 +137,9 @@ pub fn route_edge(
         Dir::South => y1 >= a.y + LEAD_MM - EPS,
     };
 
-    type Ranked = (f64, f64, usize, Vec<Point2>);
+    // Shape decides; among candidates of equal shape the one that stands off the ink
+    // wins, then the shorter, then the simpler (deterministic).
+    type Ranked = (f64, usize, f64, usize, Vec<Point2>);
     let mut best: Option<Ranked> = None;
     let consider = |raw: Vec<Point2>, best: &mut Option<Ranked>| {
         let p = Polyline::new(raw).simplify().into_points();
@@ -145,10 +147,15 @@ pub fn route_edge(
             return;
         }
         let shape = RouteShape::of(&p, path_crossings(&p, net, scene));
-        let key = (shape.cost(), path_len(&p), p.len());
+        let key = (
+            shape.cost(),
+            path_hugs(&p, net, scene),
+            path_len(&p),
+            p.len(),
+        );
         match best {
-            Some((c, l, n, _)) if (*c, *l, *n) <= key => {}
-            _ => *best = Some((key.0, key.1, key.2, p)),
+            Some((c, h, l, n, _)) if (*c, *h, *l, *n) <= key => {}
+            _ => *best = Some((key.0, key.1, key.2, key.3, p)),
         }
     };
     consider(quick, &mut best);
@@ -201,7 +208,7 @@ pub fn route_edge(
             }
         }
     }
-    best.map(|(_, _, _, p)| p)
+    best.map(|(_, _, _, _, p)| p)
 }
 
 /// Minimum-spanning-tree edges over terminals by Manhattan distance (Prim's,

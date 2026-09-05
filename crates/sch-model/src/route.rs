@@ -55,7 +55,7 @@ pub struct SymbolInk {
 impl SymbolInk {
     /// Whether `seg` may cross this symbol's ink: only as the stub leaving one of its
     /// own pins.
-    fn own_stub(&self, seg: Segment) -> bool {
+    pub(crate) fn own_stub(&self, seg: Segment) -> bool {
         self.pins
             .iter()
             .any(|p| p.dist(seg.a) < EPS || p.dist(seg.b) < EPS)
@@ -156,6 +156,51 @@ pub fn path_crossings(path: &[Point2], net: &str, scene: &RouteScene) -> usize {
 }
 
 
+/// How many of `path`'s segments run flush against something they do not belong to —
+/// within [`HUG_MM`] of a symbol's ink, a foreign net's keepout, or a foreign net's
+/// wire, without entering or touching it.
+///
+/// [`path_ok`] answers whether a wire may be drawn; this answers how well it reads once
+/// it is. A run half a millimetre off a capacitor's plates is legal and looks like it
+/// touches them; two unrelated verticals half a grid apart are legal and read as one
+/// thick line. The shape budget sees neither — so the router ranks a standing-off lane
+/// ahead of a flush one. A preference, never a veto: it orders candidates that are
+/// already legal and already equal on shape.
+pub fn path_hugs(path: &[Point2], net: &str, scene: &RouteScene) -> usize {
+    let mut n = 0;
+    for w in path.windows(2) {
+        let seg = Segment::new(w[0], w[1]);
+        let boxes = scene
+            .ink
+            .iter()
+            .filter(|ink| !ink.own_stub(seg))
+            .flat_map(|ink| ink.boxes.iter())
+            .chain(
+                scene
+                    .label_solids
+                    .iter()
+                    .filter(|(_, n)| n != net)
+                    .map(|(r, _)| r),
+            )
+            .any(|r| {
+                seg.dist_to_rect(r) < HUG_MM && !seg.axis_aligned_hits_rect_interior(r)
+            });
+        let wires = scene
+            .segments
+            .iter()
+            .filter(|existing| existing.net != net)
+            .any(|existing| {
+                seg.dist_to_segment(existing.segment) < HUG_MM
+                    && !seg.axis_aligned_crosses_interior(existing.segment)
+            });
+        n += usize::from(boxes || wires);
+    }
+    n
+}
+
+/// How close a wire may pass to ink before it reads as touching it, mm.
+const HUG_MM: f64 = 2.54;
+
 /// A schematic wire ROUTER: the leaf that turns "connect these terminals" into drawn
 /// orthogonal paths.
 ///
@@ -214,6 +259,29 @@ mod tests {
     fn the_symbols_own_stub_leaves_through_its_own_ink() {
         let stub = [Point2::new(10.0, 5.0), Point2::new(0.0, 5.0)];
         assert!(path_ok(&stub, "SIG", &ink_scene()));
+    }
+
+    #[test]
+    fn a_lane_that_stands_off_the_ink_hugs_less_than_a_flush_one() {
+        let scene = ink_scene();
+        let flush = [Point2::new(0.0, -0.5), Point2::new(30.0, -0.5)];
+        let clear = [Point2::new(0.0, -8.0), Point2::new(30.0, -8.0)];
+        assert!(path_ok(&flush, "SIG", &scene) && path_ok(&clear, "SIG", &scene));
+        assert!(path_hugs(&flush, "SIG", &scene) > path_hugs(&clear, "SIG", &scene));
+    }
+
+    #[test]
+    fn a_run_beside_a_foreign_wire_hugs_it() {
+        let mut scene = RouteScene::default();
+        scene.segments.push(NetSegment::new(
+            Point2::new(0.0, 0.0),
+            Point2::new(30.0, 0.0),
+            "OTHER",
+        ));
+        let beside = [Point2::new(0.0, 1.27), Point2::new(30.0, 1.27)];
+        let apart = [Point2::new(0.0, 10.0), Point2::new(30.0, 10.0)];
+        assert_eq!(path_hugs(&beside, "SIG", &scene), 1);
+        assert_eq!(path_hugs(&apart, "SIG", &scene), 0);
     }
 
     #[test]
