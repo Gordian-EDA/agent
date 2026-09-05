@@ -1900,6 +1900,7 @@ fn beside_scene(doc: &SchDoc) -> sch_model::route::RouteScene {
             .map(|(a, b, net)| sch_model::route::NetSegment::new(a, b, net))
             .collect(),
         label_solids: Vec::new(),
+        ink: Vec::new(),
     }
 }
 

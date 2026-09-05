@@ -11,7 +11,7 @@
 
 use geom::Dir;
 use geom::{EPS, Point2, Polyline, RouteShape};
-use sch_model::route::{RouteScene, SchRouter, path_crossings, path_ok};
+use sch_model::route::{RouteScene, SchRouter, path_crossings, path_hugs, path_ok};
 
 /// Minimum lead length out of a pin before the first turn, mm.
 const LEAD_MM: f64 = 2.54;
@@ -104,6 +104,16 @@ pub fn route_edge(
         ys.push(grid.snap_down(r.min_y - CLEAR_MM));
         ys.push(grid.snap_up(r.max_y + CLEAR_MM));
     }
+    // And around drawn ink — bodies and pin text — for the same reason: without a
+    // lane past it the only answer to a body in the way is a net label.
+    for ink in &scene.ink {
+        for r in &ink.boxes {
+            xs.push(grid.snap_down(r.min_x - CLEAR_MM));
+            xs.push(grid.snap_up(r.max_x + CLEAR_MM));
+            ys.push(grid.snap_down(r.min_y - CLEAR_MM));
+            ys.push(grid.snap_up(r.max_y + CLEAR_MM));
+        }
+    }
     xs.push(grid.snap((a.x + b.x) / 2.0));
     ys.push(grid.snap((a.y + b.y) / 2.0));
     xs.push(a.x + LEAD_MM);
@@ -127,7 +137,9 @@ pub fn route_edge(
         Dir::South => y1 >= a.y + LEAD_MM - EPS,
     };
 
-    type Ranked = (f64, f64, usize, Vec<Point2>);
+    // Shape decides; among candidates of equal shape the one that stands off the ink
+    // wins, then the shorter, then the simpler (deterministic).
+    type Ranked = (f64, usize, f64, usize, Vec<Point2>);
     let mut best: Option<Ranked> = None;
     let consider = |raw: Vec<Point2>, best: &mut Option<Ranked>| {
         let p = Polyline::new(raw).simplify().into_points();
@@ -135,10 +147,15 @@ pub fn route_edge(
             return;
         }
         let shape = RouteShape::of(&p, path_crossings(&p, net, scene));
-        let key = (shape.cost(), path_len(&p), p.len());
+        let key = (
+            shape.cost(),
+            path_hugs(&p, net, scene),
+            path_len(&p),
+            p.len(),
+        );
         match best {
-            Some((c, l, n, _)) if (*c, *l, *n) <= key => {}
-            _ => *best = Some((key.0, key.1, key.2, p)),
+            Some((c, h, l, n, _)) if (*c, *h, *l, *n) <= key => {}
+            _ => *best = Some((key.0, key.1, key.2, key.3, p)),
         }
     };
     consider(quick, &mut best);
@@ -191,7 +208,7 @@ pub fn route_edge(
             }
         }
     }
-    best.map(|(_, _, _, p)| p)
+    best.map(|(_, _, _, _, p)| p)
 }
 
 /// Minimum-spanning-tree edges over terminals by Manhattan distance (Prim's,
@@ -318,7 +335,28 @@ mod tests {
                 .collect(),
             segments,
             label_solids: Vec::new(),
+            ink: Vec::new(),
         }
+    }
+
+    #[test]
+    fn a_route_detours_around_drawn_ink() {
+        use sch_model::route::SymbolInk;
+        let mut s = scene(Vec::new(), Vec::new(), Vec::new());
+        s.ink.push(SymbolInk {
+            boxes: vec![Rect::new(5.0, -3.0, 15.0, 3.0)],
+            pins: Vec::new(),
+        });
+        let p = route_edge(
+            Point2::new(0.0, 0.0),
+            Dir::East,
+            Point2::new(25.0, 0.0),
+            "SIG",
+            &s,
+        )
+        .expect("a lane past the ink exists");
+        assert!(path_ok(&p, "SIG", &s));
+        assert!(p.len() > 2, "a straight run would cross the ink: {p:?}");
     }
 
     fn net_segment(a: Point2, b: Point2, net: &str) -> NetSegment {

@@ -107,6 +107,7 @@ mod grid_tests {
             points: Vec::new(),
             segments: Vec::new(),
             label_solids: Vec::new(),
+            ink: Vec::new(),
         };
         assert!(safe_forced_single_port_stub(
             [10.0, 10.0].into(),
@@ -126,6 +127,7 @@ mod grid_tests {
             points: Vec::new(),
             segments: Vec::new(),
             label_solids: Vec::new(),
+            ink: Vec::new(),
         };
         assert!(!safe_forced_single_port_stub(
             [10.0, 10.0].into(),

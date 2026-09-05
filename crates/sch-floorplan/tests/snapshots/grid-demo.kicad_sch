@@ -1481,43 +1481,23 @@
 	)
 	(wire
 		(pts
-			(xy 74.93 30.48) (xy 74.93 63.5)
+			(xy 76.2 30.48) (xy 76.2 63.5)
 		)
 		(stroke
 			(width 0)
 			(type default)
 		)
-		(uuid "645cc1b2-70c2-5ad1-9a92-3c9fa0497609")
+		(uuid "c2cd211a-028b-55c0-806c-ad6331340b6b")
 	)
 	(wire
 		(pts
-			(xy 74.93 63.5) (xy 71.12 63.5)
+			(xy 76.2 63.5) (xy 71.12 63.5)
 		)
 		(stroke
 			(width 0)
 			(type default)
 		)
-		(uuid "c2cbe7f9-e159-52d4-aada-807b568475c8")
-	)
-	(wire
-		(pts
-			(xy 77.47 38.1) (xy 77.47 71.12)
-		)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "cd6cd9c5-dd00-5bb2-ab69-282fd93017d1")
-	)
-	(wire
-		(pts
-			(xy 77.47 71.12) (xy 71.12 71.12)
-		)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "f8f4f747-33d0-55db-a2fd-24a556f44fc4")
+		(uuid "bb64dbea-73b1-5d0e-a606-86c418263318")
 	)
 	(wire
 		(pts
@@ -1541,16 +1521,6 @@
 	)
 	(wire
 		(pts
-			(xy 81.28 38.1) (xy 77.47 38.1)
-		)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "bf08c25a-a257-57c2-af8a-478ecfc0c39b")
-	)
-	(wire
-		(pts
 			(xy 81.28 38.1) (xy 81.28 35.56)
 		)
 		(stroke
@@ -1558,6 +1528,26 @@
 			(type default)
 		)
 		(uuid "b745397f-3dbf-5800-a021-4a7f0a8f48bf")
+	)
+	(wire
+		(pts
+			(xy 81.28 38.1) (xy 81.28 71.12)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "a927d872-e3b2-5862-ab9c-c99840c46369")
+	)
+	(wire
+		(pts
+			(xy 81.28 71.12) (xy 71.12 71.12)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "dfae48d4-9a74-5115-8e30-b5f25eeed78b")
 	)
 	(wire
 		(pts
@@ -1571,13 +1561,13 @@
 	)
 	(wire
 		(pts
-			(xy 83.82 30.48) (xy 74.93 30.48)
+			(xy 83.82 30.48) (xy 76.2 30.48)
 		)
 		(stroke
 			(width 0)
 			(type default)
 		)
-		(uuid "275ba7fe-71c9-57f4-bcb3-a7abedd5dbaa")
+		(uuid "0f91aa14-ea50-554b-8833-e0bd1d1628fa")
 	)
 	(wire
 		(pts
@@ -2674,21 +2664,21 @@
 		(dnp no)
 		(uuid "b3dd6d17-53c7-5317-b70e-df8fbd669a34")
 		(property "Reference" "R2"
-			(at 67.31 66.04 0)
+			(at 74.93 66.04 0)
 			(effects
 				(font
 					(size 1.27 1.27)
 				)
-				(justify right)
+				(justify left)
 			)
 		)
 		(property "Value" "10k"
-			(at 67.31 68.58 0)
+			(at 74.93 68.58 0)
 			(effects
 				(font
 					(size 1.27 1.27)
 				)
-				(justify right)
+				(justify left)
 			)
 		)
 		(property "Footprint" ""
