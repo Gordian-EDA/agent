@@ -209,10 +209,9 @@ fn compose(
 ///
 /// A part left out falls into two kinds, and they are not the same omission. A part that
 /// SERVES another — a `decouple` cap the sugar expanded, a pull-up nobody named — is
-/// seated in a column beside the pin it serves, which is where a human draws it, and
-/// nobody is told off for a cap the author never saw. Anything else is the author's own
-/// gap: it goes in a trailing row with a note saying so, because a bare row is not a
-/// composition.
+/// seated beside what it serves, which is where a human draws it, and nobody is told off
+/// for a cap the author never saw. Anything else is the author's own gap: it goes in a
+/// trailing row with a note saying so, because a bare row is not a composition.
 ///
 /// This only ever INSERTS. An authored leaf never changes place or order, so a tree that
 /// already reads as a signal path still does.
@@ -238,13 +237,8 @@ fn complete(
     let serving = serve::serving(items, members);
     let mut beside: BTreeMap<String, Flanks> = BTreeMap::new();
     let mut orphans: Vec<(String, u8)> = Vec::new();
-    let order = in_pin_order(&serving);
-    let missing: Vec<usize> = order
-        .iter()
-        .map(|(i, _)| *i)
-        .filter(|i| missing.contains(i))
-        .chain(missing.iter().copied().filter(|i| !serving.contains_key(i)))
-        .collect();
+    let mut missing = missing;
+    missing.sort_by_key(|i| in_pin_order(&serving).iter().position(|(j, _)| j == i));
     for i in missing {
         let seat = serving
             .get(&i)
@@ -305,9 +299,9 @@ fn in_pin_order(serving: &BTreeMap<usize, serve::Serves>) -> Vec<(usize, &serve:
 
 /// Add one support part to a device's flanks.
 ///
-/// A pin on the TOP or BOTTOM edge of a symbol belongs to neither column, so it joins the
-/// shorter one: a device whose supports all hang off its edges gets two short columns
-/// rather than one tower down one side.
+/// Only the two side columns are a choice. A pin on the TOP or BOTTOM edge of a symbol
+/// belongs to neither, so it joins the shorter one: a device whose supports all hang off
+/// its edges gets two short columns rather than one tower down one side.
 fn seat_in(flanks: &mut Flanks, seat: Seat, part: (String, u8)) {
     let len = |dir| flanks.get(&Seat::Beside(dir)).map_or(0, Vec::len);
     let seat = match seat {
@@ -353,11 +347,11 @@ fn bare_row(items: &[Item], members: &[usize]) -> Tree {
     })
 }
 
-/// Put each of a device's `flanks` in a COLUMN beside the leaf drawing it, wherever in the
-/// tree that leaf sits — the caps a human stacks against the edge of the device they
-/// serve, each on the line of its own pin.
+/// Seat a device's `flanks` beside the leaf drawing it, wherever in the tree that leaf
+/// sits — the caps a human stacks against the edge of the device they serve, each on the
+/// line of its own pin.
 ///
-/// The leaf keeps its place and its order: it is only wrapped in a row with its columns,
+/// The leaf keeps its place and its order: it is only wrapped in a row with them,
 /// so a tree that already reads as a signal path still does. A row spliced in as a SIBLING
 /// instead — what this did while it only ever seated `decouple` caps — pushes whatever the
 /// author composed on that side a hand's width away from the pins it was composed for.
@@ -379,7 +373,9 @@ fn seat_beside(tree: &Tree, device: &str, flanks: &Flanks) -> Tree {
 }
 
 /// A device and the parts serving it, as ONE drawing: a group the typesetter seats on the
-/// device's pin lines, and the packer folds as a unit rather than through.
+/// device's pin lines, and the packer folds as a unit rather than through. A support with
+/// a pin line of its own goes in the column against that side; a leg off a two-pin node
+/// takes the next seat; a rail-only bank stays one row.
 ///
 /// Neither column ever folds. A column's length is set by the pins it reaches — each child
 /// is seated on the line of its own pin, inside the device's own height — and a fold turns
