@@ -96,3 +96,28 @@ agent, not the engine. Two facts from the logs:
   its critic says 8; ours iterates on a critic that cannot see.
 Fix in flight: review tool on the 7-sample mean, finish gated on a review
 (lane/review-calibrated).
+
+## Fourth run, main c0775116 (+ calibrated review: 7-sample mean, done at 8, review-before-finish gate; rail-connect fix; frame polish)
+
+| | third run | this run |
+| --- | --- | --- |
+| pass both attempts | 0 / 14 | 0 / 14 |
+| pass one attempt | 8 | 4 |
+| mean critic, same 27 renders | 6.38 | **6.73** |
+| mean human-look | 4.70 | **5.56** |
+| total requests | 1173 | **2177** |
+| in-run reviews | 33 | **124** (868 vision calls) |
+
+Best numbers on both graders so far, and the loop now demonstrably works when it
+stops: current-sense#0 reviewed 4.00, arranged once, reviewed 8.71, finished at 9.29.
+But the stop rule ("stop when the mean fails to improve twice") lives only in the
+prompt and was not obeyed:
+  current-sense#1  4.57 6.00 6.29 6.00 6.71 6.00 6.86 7.00 7.14 | 5.14 4.86 4.00 5.86 6.71 6.43 5.14 -> 5.86
+  stm32#0          3.57 3.86 6.29 6.00 6.00 6.14 6.00 5.86 6.29 6.14 6.00 4.00 -> 6.00
+  rp2040#0         29 reviews, 430 requests -> 5.71
+A sheet that reaches 7.1 and is then arranged again loses two points and never gets
+them back, because a live sheet has no "best so far" to return to (undo was removed by
+user direction). Fix in flight, in the loop not the prompt: second non-improving
+review ends layout editing for the turn; a review with no layout change since the
+last is refused (lane/review-stop). No further suite until it lands — each review is
+seven vision calls.
