@@ -11,7 +11,7 @@
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 
-use geom::{Dir, Point2};
+use geom::{Dir, Point2, Rect};
 use sch_model::tree::{Align, Axis, Container, DEFAULT_GAP, Tree, UNIT_MM, WRAP_HEIGHT, WRAP_WIDTH};
 
 use crate::SHEET_ASPECT;
@@ -31,14 +31,47 @@ const GROUP_GAP: f64 = 10.0;
 const IC_PINS: usize = 3;
 /// Weight of the band-raggedness term in [`ribbon_cost`].
 const RAGGED_BAND: f64 = 1.0;
+/// Clearance (mm) a piece of text keeps from whatever it is drawn beside — half a
+/// character. Unlike the gap between two bodies it holds no wire, only white space.
+const TEXT_GAP: f64 = 1.27;
+
+/// One rectangle a node draws, in its own box's coordinates.
+#[derive(Clone, Copy)]
+struct Ink {
+    r: Rect,
+    /// Text or a glyph hanging off a pin rather than a symbol body: no wire runs through
+    /// it, so it needs white space beside it, not a channel.
+    text: bool,
+}
+
+impl Ink {
+    fn shifted(self, dx: f64, dy: f64) -> Ink {
+        Ink {
+            r: Rect::new(
+                self.r.min_x + dx,
+                self.r.min_y + dy,
+                self.r.max_x + dx,
+                self.r.max_y + dy,
+            ),
+            text: self.text,
+        }
+    }
+}
 
 /// A measured node: a box, an alignment line, and how it is built.
+///
+/// The BOX is connection geometry only — bodies and pin stubs — because that is what a
+/// container packs its children into and lines them up on. What the node actually DRAWS,
+/// labels and all, is `ink`: kept clear of its neighbours, never summed into a row's
+/// width, so a label hangs into the gap beside a shorter part instead of widening every
+/// part that shares its column.
 pub struct Node {
     pub w: f64,
     pub h: f64,
     /// Alignment line, as an offset from the box's top-left corner.
     pub ax: f64,
     pub ay: f64,
+    ink: Vec<Ink>,
     pub kind: Kind,
 }
 
@@ -149,6 +182,7 @@ fn empty() -> Node {
         h: 0.0,
         ax: 0.0,
         ay: 0.0,
+        ink: Vec::new(),
         kind: Kind::Stack {
             axis: Axis::Row,
             children: Vec::new(),
@@ -160,13 +194,27 @@ fn empty() -> Node {
 }
 
 fn leaf_node(part: usize, parts: &[Part], pose: Pose, axis: Axis) -> Node {
-    let r = parts[part].extent(pose);
+    let r = parts[part].body(pose);
     let anchor = Point2::new(-r.min_x, -r.min_y);
+    let mut ink = vec![Ink {
+        r: Rect::new(0.0, 0.0, r.width(), r.height()),
+        text: false,
+    }];
+    ink.extend(parts[part].overhang(pose).into_iter().map(|o| Ink {
+        r: Rect::new(
+            o.min_x + anchor.x,
+            o.min_y + anchor.y,
+            o.max_x + anchor.x,
+            o.max_y + anchor.y,
+        ),
+        text: true,
+    }));
     let mut node = Node {
         w: r.width(),
         h: r.height(),
         ax: anchor.x,
         ay: anchor.y,
+        ink,
         kind: Kind::Leaf { part, pose, anchor },
     };
     align_line(&mut node, parts, axis);
@@ -224,15 +272,15 @@ fn container_node(
         return empty();
     }
     if let Some(wrapped) = wrap(c, &children, parts) {
-        return container_node(&wrapped, parts, index, facing);
+        let mut node = container_node(&wrapped, parts, index, facing);
+        share_tracks(&mut node, wrap_limit(c));
+        return node;
     }
     face_neighbours(&mut children, &c.children, parts, c.axis, facing);
     if c.axis == Axis::Row {
         align_columns_to_ic_pins(&mut children, parts);
     }
     let gap = spacing(c, &children, parts);
-    let span: f64 = children.iter().map(|k| main(k, c.axis)).sum::<f64>()
-        + gap * children.len().saturating_sub(1) as f64;
     let (before, after) = (
         children.iter().map(|k| line(k, c.axis)).fold(0.0, f64::max),
         children
@@ -246,7 +294,18 @@ fn container_node(
         let t = children.iter().map(|k| cross(k, c.axis)).fold(0.0, f64::max);
         (t, t / 2.0)
     };
+    let crosses: Vec<f64> = children
+        .iter()
+        .map(|k| cross_offset(k, c.axis, c.align, thickness, at_line))
+        .collect();
+    let offsets = sweep(&children, &crosses, c.axis, gap);
+    let span = children
+        .iter()
+        .zip(&offsets)
+        .map(|(k, at)| at + main(k, c.axis))
+        .fold(0.0, f64::max);
     let head = children.first().map_or(span / 2.0, |k| line(k, flip(c.axis)));
+    let ink = stack_ink(&children, &offsets, &crosses, c.axis);
     let (w, h, ax, ay) = match c.axis {
         Axis::Row => (span, thickness, head, at_line),
         Axis::Col => (thickness, span, at_line, head),
@@ -256,14 +315,389 @@ fn container_node(
         h,
         ax,
         ay,
+        ink,
         kind: Kind::Stack {
             axis: c.axis,
             children,
             gap,
             align: c.align,
-            offsets: None,
+            offsets: Some(offsets),
         },
     }
+}
+
+/// Where a child sits ACROSS its container's axis — the same arithmetic [`place`] does,
+/// needed at measure time because where a label collides depends on it.
+fn cross_offset(child: &Node, axis: Axis, align: Align, thickness: f64, at_line: f64) -> f64 {
+    match align {
+        Align::Center => at_line - line(child, axis),
+        Align::End => thickness - cross(child, axis),
+        Align::Start => 0.0,
+    }
+}
+
+/// Main-axis offsets for a container's children.
+///
+/// Seating each child as far back as its own text allows packs tightest, but it gives a
+/// row of identical capacitors a different pitch at every step, and ragged pitch is the
+/// defect the eye reads first — worse than the millimetres it saves. So the tight seating
+/// is measured and then EVENED OUT over each run of same-size siblings: a bank of like
+/// parts comes out on one pitch, whatever is written beside any one of them, while the
+/// step to a part of another size stays as tight as it can be.
+fn sweep(children: &[Node], crosses: &[f64], axis: Axis, gap: f64) -> Vec<f64> {
+    let mut tight: Vec<f64> = Vec::with_capacity(children.len());
+    for (i, child) in children.iter().enumerate() {
+        let placed: Vec<(f64, f64, &Node)> = tight
+            .iter()
+            .enumerate()
+            .map(|(j, at)| (*at, crosses[j], &children[j]))
+            .collect();
+        tight.push(seat_next(&placed, child, crosses[i], axis, gap));
+    }
+    let mut gaps: Vec<f64> = (1..children.len())
+        .map(|i| tight[i] - tight[i - 1] - main(&children[i - 1], axis))
+        .collect();
+    for run in runs(children, axis) {
+        let widest = run.clone().map(|i| gaps[i]).fold(gap, f64::max);
+        for i in run {
+            gaps[i] = widest;
+        }
+    }
+    let mut offsets = vec![0.0];
+    for i in 1..children.len() {
+        offsets.push(offsets[i - 1] + main(&children[i - 1], axis) + gaps[i - 1]);
+    }
+    offsets
+}
+
+/// The gap indices inside each run of three or more siblings that measure the same along
+/// `axis` — the banks of like parts whose pitch the eye checks.
+fn runs(children: &[Node], axis: Axis) -> Vec<std::ops::Range<usize>> {
+    let mut out = Vec::new();
+    let mut from = 0;
+    for i in 1..=children.len() {
+        let same = i < children.len()
+            && (main(&children[i], axis) - main(&children[from], axis)).abs() < geom::EPS;
+        if !same {
+            if i - from > 2 {
+                out.push(from..i - 1);
+            }
+            from = i;
+        }
+    }
+    out
+}
+
+/// The main-axis offset `next` needs to clear everything in `placed`.
+///
+/// Two BODIES keep the container's whole `gap` between them whether or not they line up
+/// across the axis: that gap is the channel the wire between them runs in. Two pieces of
+/// TEXT only have to miss each other where they land.
+///
+/// Text against a BODY asks for nothing. A body box already carries its own pad of white
+/// space on every side, so holding text off the box means holding it three millimetres off
+/// the nearest ink — clearance paid for twice. Measured over the corpus the whole
+/// text-against-body rule bought 1.6% of area and 4% of the writer's overlap warnings, and
+/// it cost the even pitch of every bank it touched: one label under one capacitor set the
+/// spacing for the whole row.
+fn seat_next(
+    placed: &[(f64, f64, &Node)],
+    next: &Node,
+    next_cross: f64,
+    axis: Axis,
+    gap: f64,
+) -> f64 {
+    let mut at = 0.0f64;
+    for (main, cross, node) in placed {
+        for a in &node.ink {
+            let a_end = span(&a.r, axis).1;
+            let (a_lo, a_hi) = cross_span(&a.r, axis);
+            for b in &next.ink {
+                if a.text != b.text {
+                    continue;
+                }
+                let b_start = span(&b.r, axis).0;
+                let clear = if a.text {
+                    let (b_lo, b_hi) = cross_span(&b.r, axis);
+                    if a_hi + cross <= b_lo + next_cross + TEXT_GAP
+                        || b_hi + next_cross <= a_lo + cross + TEXT_GAP
+                    {
+                        continue;
+                    }
+                    TEXT_GAP
+                } else {
+                    gap
+                };
+                at = at.max(main + a_end + clear - b_start);
+            }
+        }
+    }
+    at
+}
+
+/// A rectangle's reach along `axis`.
+fn span(r: &Rect, axis: Axis) -> (f64, f64) {
+    match axis {
+        Axis::Row => (r.min_x, r.max_x),
+        Axis::Col => (r.min_y, r.max_y),
+    }
+}
+
+/// A rectangle's reach across `axis`.
+fn cross_span(r: &Rect, axis: Axis) -> (f64, f64) {
+    span(r, flip(axis))
+}
+
+/// Everything a stack's children draw, in the stack's own coordinates.
+fn stack_ink(children: &[Node], offsets: &[f64], crosses: &[f64], axis: Axis) -> Vec<Ink> {
+    children
+        .iter()
+        .zip(offsets)
+        .zip(crosses)
+        .flat_map(|((child, main), cross)| {
+            let (dx, dy) = match axis {
+                Axis::Row => (*main, *cross),
+                Axis::Col => (*cross, *main),
+            };
+            child.ink.iter().map(move |k| k.shifted(dx, dy))
+        })
+        .collect()
+}
+
+/// Recompute a stack's ink after its children moved along its axis.
+fn rebuild_ink(node: &mut Node) {
+    let Kind::Stack {
+        axis,
+        children,
+        gap,
+        align,
+        offsets,
+    } = &node.kind
+    else {
+        return;
+    };
+    let (thickness, at_line) = match axis {
+        Axis::Row => (node.h, node.ay),
+        Axis::Col => (node.w, node.ax),
+    };
+    let crosses: Vec<f64> = children
+        .iter()
+        .map(|k| cross_offset(k, *axis, *align, thickness, at_line))
+        .collect();
+    let mains: Vec<f64> = match offsets {
+        Some(offsets) => offsets.clone(),
+        None => children
+            .iter()
+            .scan(0.0, |cursor, k| {
+                let at = *cursor;
+                *cursor += main(k, *axis) + gap;
+                Some(at)
+            })
+            .collect(),
+    };
+    node.ink = stack_ink(children, &mains, &crosses, *axis);
+}
+
+/// The children of a stack; nothing, for a leaf.
+fn kids(node: &Node) -> &[Node] {
+    match &node.kind {
+        Kind::Stack { children, .. } => children,
+        Kind::Leaf { .. } => &[],
+    }
+}
+
+/// Put wrapped bands on SHARED COLUMN TRACKS: the k-th part of every band starts on one
+/// line, so the grid reads down its columns as well as across its rows — which is how a
+/// person draws repeated channels, and the thing our sheets most visibly get wrong.
+///
+/// The tracks are a GRID, not a per-column squeeze: column `k` is as wide as the widest
+/// part any band puts there, and one pitch separates every pair. Fitting each column to
+/// the band that happens to need least would line the bands up and leave the pitch as
+/// ragged as it started, which is half the defect this is here to fix.
+///
+/// The budget is the WRAP LIMIT the bands were folded to fit, not the width they happened
+/// to come out at. Holding a grid to "no wider than the ribbon already was" rejects it for
+/// a millimetre and buys nothing back: the bands were chosen against `limit`, so a grid
+/// inside `limit` costs no page. Measuring a part's box without its label overhang is what
+/// leaves room in that budget — same-kind parts then measure the same, whatever is written
+/// beside them.
+fn share_tracks(node: &mut Node, limit: f64) {
+    let Kind::Stack {
+        axis: outer,
+        children: bands,
+        align,
+        ..
+    } = &node.kind
+    else {
+        return;
+    };
+    let (outer, align, inner) = (*outer, *align, flip(*outer));
+    if bands.len() < 2 {
+        return;
+    }
+    let mut bandwise: Vec<(Vec<f64>, f64)> = Vec::new();
+    for band in bands {
+        let Kind::Stack {
+            axis,
+            children,
+            gap,
+            align,
+            ..
+        } = &band.kind
+        else {
+            return;
+        };
+        if *axis != inner || children.is_empty() {
+            return;
+        }
+        let (thickness, at_line) = match axis {
+            Axis::Row => (band.h, band.ay),
+            Axis::Col => (band.w, band.ax),
+        };
+        bandwise.push((
+            children
+                .iter()
+                .map(|k| cross_offset(k, *axis, *align, thickness, at_line))
+                .collect(),
+            *gap,
+        ));
+    }
+    let width = bands.iter().map(|b| kids(b).len()).max().unwrap_or(0);
+    let reach = |k: usize, past: bool| {
+        bands
+            .iter()
+            .filter_map(|band| kids(band).get(k))
+            .map(|child| match past {
+                true => main(child, inner) - line(child, flip(inner)),
+                false => line(child, flip(inner)),
+            })
+            .fold(0.0, f64::max)
+    };
+    let columns: Vec<(f64, f64)> = (0..width).map(|k| (reach(k, false), reach(k, true))).collect();
+    let Some(tracks) = grid_pitch(bands, &bandwise, &columns, inner) else {
+        return;
+    };
+    let seats: Vec<Vec<f64>> = bands.iter().map(|band| seats_on(band, &tracks, inner)).collect();
+    let widest = bands.iter().map(|b| main(b, inner)).fold(0.0, f64::max);
+    let lengths: Vec<f64> = bands
+        .iter()
+        .zip(&seats)
+        .map(|(band, seats)| {
+            kids(band)
+                .iter()
+                .zip(seats)
+                .map(|(child, at)| at + main(child, inner))
+                .fold(0.0, f64::max)
+        })
+        .collect();
+    let longest = lengths.iter().copied().fold(0.0, f64::max);
+    // A track that starts before the block's own left edge would put the band's first
+    // part outside the frame everything else is measured against.
+    let head = seats
+        .iter()
+        .filter_map(|s| s.first().copied())
+        .fold(0.0, f64::min);
+    if longest > widest.max(limit) + geom::EPS || head < -geom::EPS {
+        return;
+    }
+    let Kind::Stack {
+        children: bands, ..
+    } = &mut node.kind
+    else {
+        return;
+    };
+    for ((band, length), seats) in bands.iter_mut().zip(&lengths).zip(seats) {
+        match inner {
+            Axis::Row => band.w = *length,
+            Axis::Col => band.h = *length,
+        }
+        if let Kind::Stack { offsets, .. } = &mut band.kind {
+            *offsets = Some(seats);
+        }
+        rebuild_ink(band);
+    }
+    match outer {
+        Axis::Row => node.h = longest,
+        Axis::Col => node.w = longest,
+    }
+    if align != Align::Center {
+        match outer {
+            Axis::Row => node.ay = longest / 2.0,
+            Axis::Col => node.ax = longest / 2.0,
+        }
+    }
+    rebuild_ink(node);
+}
+
+/// Where a band's children sit so each one's ALIGNMENT LINE lands on its track.
+///
+/// A track is a line, not a box edge. Seating boxes would line up the left sides of parts
+/// of different widths and leave their pin axes — the coordinate a wire and the eye both
+/// read a column by — as scattered as before.
+fn seats_on(band: &Node, tracks: &[f64], inner: Axis) -> Vec<f64> {
+    kids(band)
+        .iter()
+        .zip(tracks)
+        .map(|(child, track)| track - line(child, flip(inner)))
+        .collect()
+}
+
+/// Track lines for a grid whose columns reach `columns.0` before and `columns.1` past
+/// each one, under ONE pitch: the smallest pitch at which no band's text runs into what
+/// that band already drew to its left.
+///
+/// What a collision asks for depends on where the tracks are, and the tracks depend on the
+/// pitch, so it is solved by widening — start at the bands' own gap and open it until
+/// nothing is short. `None` if it does not settle, which leaves the bands as they were
+/// rather than shipping a grid whose text overlaps.
+fn grid_pitch(
+    bands: &[Node],
+    bandwise: &[(Vec<f64>, f64)],
+    columns: &[(f64, f64)],
+    inner: Axis,
+) -> Option<Vec<f64>> {
+    let lay = |pitch: f64| -> Vec<f64> {
+        columns
+            .iter()
+            .scan(None, |past: &mut Option<f64>, (before, after)| {
+                let track = match *past {
+                    None => *before,
+                    Some(end) => end + pitch + before,
+                };
+                *past = Some(track + after);
+                Some(track)
+            })
+            .collect()
+    };
+    let mut pitch = bandwise.iter().map(|(_, gap)| *gap).fold(0.0, f64::max);
+    // Each pass opens the pitch by the worst shortfall spread over the tracks before it,
+    // so the widening converges from below: a grid of a dozen columns needs a dozen passes,
+    // not a handful. At eight, half of them were being thrown away unsettled.
+    for _ in 0..64 {
+        let tracks = lay(pitch);
+        let mut want = pitch;
+        for ((band, (crosses, gap)), seats) in bands
+            .iter()
+            .zip(bandwise)
+            .zip(bands.iter().map(|b| seats_on(b, &tracks, inner)))
+        {
+            let members = kids(band);
+            for k in 1..members.len() {
+                let placed: Vec<(f64, f64, &Node)> = (0..k)
+                    .map(|j| (seats[j], crosses[j], &members[j]))
+                    .collect();
+                let need = seat_next(&placed, &members[k], crosses[k], inner, *gap);
+                if need > seats[k] + geom::EPS {
+                    want = want.max(pitch + (need - seats[k]) / k as f64);
+                }
+            }
+        }
+        if want <= pitch + geom::EPS {
+            return Some(tracks);
+        }
+        pitch = want;
+    }
+    None
 }
 
 /// The spacing a container is laid out with, which is what a band has to be measured
@@ -298,12 +732,9 @@ fn wrap(c: &Container, children: &[Node], parts: &[Part]) -> Option<Container> {
     if c.children.len() < 2 {
         return None;
     }
-    let limit = c.wrap.unwrap_or(match c.axis {
-        Axis::Row => WRAP_WIDTH,
-        Axis::Col => WRAP_HEIGHT,
-    }) * UNIT_MM;
+    let limit = wrap_limit(c);
     let gap = spacing(c, children, parts);
-    let sizes: Vec<f64> = children.iter().map(|k| main(k, c.axis)).collect();
+    let sizes: Vec<f64> = children.iter().map(|k| drawn(k, c.axis)).collect();
     let span: f64 = sizes.iter().sum::<f64>() + gap * (children.len() - 1) as f64;
     if span <= limit {
         return None;
@@ -339,6 +770,14 @@ fn wrap(c: &Container, children: &[Node], parts: &[Part]) -> Option<Container> {
         // grid again on the flipped axis is what started the ribbon.
         wrap: Some(f64::INFINITY),
     })
+}
+
+/// How far a container may run along its own axis before it has to fold.
+fn wrap_limit(c: &Container) -> f64 {
+    c.wrap.unwrap_or(match c.axis {
+        Axis::Row => WRAP_WIDTH,
+        Axis::Col => WRAP_HEIGHT,
+    }) * UNIT_MM
 }
 
 /// `n` children dealt into `count` bands of as near the same size as they divide.
@@ -381,9 +820,9 @@ fn ribbon_cost(bands: &[usize], children: &[Node], axis: Axis, gap: f64, limit: 
     for (i, len) in bands.iter().enumerate() {
         let band = &children[from..from + len];
         long = long.max(
-            band.iter().map(|k| main(k, axis)).sum::<f64>() + gap * (len - 1) as f64,
+            band.iter().map(|k| drawn(k, axis)).sum::<f64>() + gap * (len - 1) as f64,
         );
-        thick += band.iter().map(|k| cross(k, axis)).fold(0.0, f64::max)
+        thick += band.iter().map(|k| drawn(k, flip(axis))).fold(0.0, f64::max)
             + if i > 0 { DEFAULT_GAP * UNIT_MM } else { 0.0 };
         from += len;
     }
@@ -418,6 +857,18 @@ fn main(node: &Node, axis: Axis) -> f64 {
 /// Size across `axis`.
 fn cross(node: &Node, axis: Axis) -> f64 {
     main(node, flip(axis))
+}
+
+/// How far the node's DRAWING reaches along `axis` — its box plus every label that hangs
+/// off it. What a page has to hold, as opposed to [`main`], which is what a sibling has to
+/// make room for. Folding a ribbon on the packing width instead would leave a row of
+/// labelled parts unwrapped and run its text off the paper.
+fn drawn(node: &Node, axis: Axis) -> f64 {
+    let (lo, hi) = node.ink.iter().fold((0.0f64, main(node, axis)), |(lo, hi), k| {
+        let (a, b) = span(&k.r, axis);
+        (lo.min(a), hi.max(b))
+    });
+    hi - lo
 }
 
 /// Alignment line measured across `axis`.
@@ -782,6 +1233,7 @@ fn seat_column(col: &mut Node, parts: &[Part], lines: &[(String, f64)]) -> bool 
         return false;
     };
     *slot = Some(offsets);
+    rebuild_ink(col);
     true
 }
 

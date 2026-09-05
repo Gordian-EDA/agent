@@ -20,9 +20,17 @@ const BODY_MIN: f64 = 5.08;
 const POWER_STUB: f64 = 7.62;
 const LABEL_STUB: f64 = 3.81;
 
-/// Room a net label's text takes beyond its stub.
-fn label_room(net: &str) -> f64 {
-    sch_model::text::text_width(net)
+/// What the writer will hang off a pin beyond its tip.
+///
+/// Room for it is kept clear of whatever is drawn nearby, but it is NOT part of the box
+/// the typesetter packs and aligns on: a label reaches into whatever gap its neighbour
+/// leaves, the way a person writes one into the white space beside a part.
+struct Attach {
+    net: String,
+    /// A power symbol rather than a net label — a glyph on the stub, not a line of text.
+    power: bool,
+    /// How far past the tip the stub runs before the glyph or the text starts.
+    stub: f64,
 }
 
 /// One leaf of the tree, resolved against the item it draws.
@@ -32,9 +40,8 @@ pub struct Part<'a> {
     pub item: &'a Item,
     /// This unit's pins, in symbol order.
     pub pins: Vec<&'a PinGeom>,
-    /// Room (mm) each pin needs beyond its tip for the power symbol or net label that will
-    /// hang there, in `pins` order.
-    attach: Vec<f64>,
+    /// The power symbol or net label that will hang off each pin, in `pins` order.
+    attach: Vec<Option<Attach>>,
 }
 
 impl<'a> Part<'a> {
@@ -64,11 +71,17 @@ impl<'a> Part<'a> {
             .pins
             .iter()
             .map(|pin| match part.net(pin) {
-                Some(net) if is_power_net(net) => POWER_STUB,
-                Some(net) if labelled.contains(&(index, pin.number.clone())) => {
-                    LABEL_STUB + label_room(net)
-                }
-                _ => 0.0,
+                Some(net) if is_power_net(net) => Some(Attach {
+                    net: net.to_owned(),
+                    power: true,
+                    stub: POWER_STUB,
+                }),
+                Some(net) if labelled.contains(&(index, pin.number.clone())) => Some(Attach {
+                    net: net.to_owned(),
+                    power: false,
+                    stub: LABEL_STUB,
+                }),
+                _ => None,
             })
             .collect();
         part
@@ -128,26 +141,16 @@ impl<'a> Part<'a> {
         quantize_dir(pin.angle, pose.angle, pose.mirror)
     }
 
-    /// The drawing's claim on the sheet under `pose`, relative to the instance origin:
-    /// the body the pins bound, plus the band the writer seats the reference/value pair in.
-    pub fn extent(&self, pose: Pose) -> Rect {
+    /// The box the typesetter PACKS: the body its pins bound, plus the band the writer
+    /// seats the reference/value pair in. Text that hangs off a pin is [`Part::overhang`]
+    /// — measured, kept clear, never summed into a row's width.
+    pub fn body(&self, pose: Pose) -> Rect {
         let mut points: Vec<Point2> = self
             .pins
             .iter()
             .map(|p| self.pin_offset(p, pose))
             .collect();
         points.push(Point2::new(0.0, 0.0));
-        let attachments: Vec<Point2> = self
-            .pins
-            .iter()
-            .zip(&self.attach)
-            .filter(|(_, reach)| **reach > 0.0)
-            .map(|(pin, reach)| {
-                let tip = self.pin_offset(pin, pose);
-                let d = self.pin_dir(pin, pose).vec();
-                Point2::new(tip.x + d.x * reach, tip.y + d.y * reach)
-            })
-            .collect();
         let bounds = Rect::bounding(&points).unwrap_or_else(|| Rect::new(0.0, 0.0, 0.0, 0.0));
         let (w, h) = (
             bounds.width().max(BODY_MIN) + 2.0 * BODY_PAD,
@@ -168,28 +171,65 @@ impl<'a> Part<'a> {
         r.max_x += right;
         r.min_y -= top;
         r.max_y += bottom;
+        r
+    }
+
+    /// The text and glyphs this part draws OUTSIDE its body: one box per net label or
+    /// power symbol on a pin, plus a connector's fields, which go beside the symbol
+    /// rather than under it. Each is checked for collision where it lands; none of them
+    /// widens the part.
+    pub fn overhang(&self, pose: Pose) -> Vec<Rect> {
+        let mut out: Vec<Rect> = Vec::new();
+        for (pin, attach) in self.pins.iter().zip(&self.attach) {
+            let Some(attach) = attach else { continue };
+            let tip = self.pin_offset(pin, pose);
+            let dir = self.pin_dir(pin, pose);
+            let d = dir.vec();
+            let at = Point2::new(tip.x + d.x * attach.stub, tip.y + d.y * attach.stub);
+            let glyph = if attach.power {
+                // A rail glyph says its own name, centred on the stub it stands on.
+                let half = (sch_model::text::text_width(&attach.net) / 2.0).max(BODY_PAD);
+                Rect::from_center_half(at, (half, half))
+            } else {
+                sch_model::text::label_box(at, dir, &attach.net)
+            };
+            out.push(
+                Rect::bounding(&[
+                    tip,
+                    Point2::new(glyph.min_x, glyph.min_y),
+                    Point2::new(glyph.max_x, glyph.max_y),
+                ])
+                .expect("three points bound a box"),
+            );
+        }
         if self.is_connector() {
-            // A connector's fields go beside it, on the side its pins leave free — and a
-            // jack's value ("OUTPUT 3.5mm") is far wider than the symbol, so half of it
-            // (what `field_pad` reserves) is not the room the solver takes. Reserving that
-            // room on BOTH sides is what leaves a header block with a band of dead sheet
-            // between two connectors that face the same way.
+            // A connector's fields go beside it, on the side its pins leave free — a
+            // jack's value ("OUTPUT 3.5mm") is far wider than the symbol.
             let text = sch_model::text::text_width(&self.item.value)
                 .max(sch_model::text::text_width(&self.item.refdes));
+            let r = self.body(pose);
+            let beside = |min_x: f64, max_x: f64| Rect::new(min_x, r.min_y, max_x, r.max_y);
             match self.pins_face_west(pose) {
-                Some(true) => r.max_x += text,
-                Some(false) => r.min_x -= text,
+                Some(true) => out.push(beside(r.max_x, r.max_x + text)),
+                Some(false) => out.push(beside(r.min_x - text, r.min_x)),
                 None => {
-                    r.min_x -= text;
-                    r.max_x += text;
+                    out.push(beside(r.min_x - text, r.min_x));
+                    out.push(beside(r.max_x, r.max_x + text));
                 }
             }
         }
-        for a in attachments {
-            r.min_x = r.min_x.min(a.x);
-            r.max_x = r.max_x.max(a.x);
-            r.min_y = r.min_y.min(a.y);
-            r.max_y = r.max_y.max(a.y);
+        out
+    }
+
+    /// Everything this part draws: its body and every overhang. What a block's frame has
+    /// to enclose — not what its neighbours have to make room for.
+    pub fn extent(&self, pose: Pose) -> Rect {
+        let mut r = self.body(pose);
+        for o in self.overhang(pose) {
+            r.min_x = r.min_x.min(o.min_x);
+            r.max_x = r.max_x.max(o.max_x);
+            r.min_y = r.min_y.min(o.min_y);
+            r.max_y = r.max_y.max(o.max_y);
         }
         r
     }

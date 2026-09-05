@@ -274,3 +274,59 @@ fn a_decoupler_with_nowhere_to_sit_is_still_drawn() {
     sch_flex::typeset(&mut items, &trees(leaf("R1")), &[]);
     assert_ne!(items[0].at, items[1].at, "C1 was never placed");
 }
+
+/// A label is TEXT, not width. The pitch of a bank of like parts is set by their bodies,
+/// so writing a long net name beside one of them must not push its neighbours apart —
+/// the label hangs into the white space that was already there.
+///
+/// This is the whole point of measuring a part's box without its overhang: a column that
+/// pairs a bare capacitor with a labelled one used to inflate to the label's width, and
+/// every alignment the typesetter bought was paid for in ragged pitch and a bigger page.
+#[test]
+fn a_long_label_beside_one_part_does_not_widen_the_bank() {
+    let row = || stack(Axis::Row, vec![leaf("R1"), leaf("R2"), leaf("R3")]);
+    let pitch = |nets: [&str; 3]| {
+        let mut items: Vec<Item> = ["R1", "R2", "R3"]
+            .iter()
+            .zip(nets)
+            .map(|(refdes, net)| passive(refdes, net, "GND"))
+            .collect();
+        // A second pin somewhere else makes each net leave the block, so it is labelled.
+        items.push(passive("R4", nets[0], nets[1]));
+        items.push(passive("R5", nets[2], "GND"));
+        sch_flex::typeset(&mut items, &trees(row()), &[]);
+        [items[1].at.x - items[0].at.x, items[2].at.x - items[1].at.x]
+    };
+    assert_eq!(
+        pitch(["A", "B", "C"]),
+        pitch(["A", "A_VERY_LONG_SIGNAL_NAME_INDEED", "C"]),
+        "the middle part's label set the bank's pitch"
+    );
+}
+
+/// A row too long for its page folds into stacked bands, and the k-th part of every band
+/// then stands on ONE vertical line — the column alignment a person draws repeated
+/// channels with, and the thing our sheets most visibly lacked.
+#[test]
+fn wrapped_bands_stand_on_shared_column_lines() {
+    let parts: Vec<String> = (1..=8).map(|i| format!("R{i}")).collect();
+    let mut items: Vec<Item> = parts
+        .iter()
+        .map(|refdes| passive(refdes, "VCC", "GND"))
+        .collect();
+    let tree = Tree::Container(Container {
+        axis: Axis::Row,
+        children: parts.iter().map(|p| leaf(p)).collect(),
+        gap: None,
+        align: Align::Center,
+        // Four of these to a band, so the fold is two bands of four.
+        wrap: Some(22.0),
+    });
+    sch_flex::typeset(&mut items, &trees(tree), &[]);
+    let x = |i: usize| items[i].at.x;
+    let y = |i: usize| items[i].at.y;
+    assert!(y(0) < y(4), "expected two bands, got one row");
+    for k in 0..4 {
+        assert_eq!(x(k), x(k + 4), "column {k} is not one line");
+    }
+}
