@@ -8,7 +8,8 @@
 //! rather than boxes is what makes a wire leave one pin and arrive at the next without a
 //! bend.
 
-use std::collections::BTreeSet;
+use std::cell::RefCell;
+use std::collections::{BTreeMap, BTreeSet};
 
 use geom::{Dir, Point2};
 use sch_model::tree::{Align, Axis, Container, DEFAULT_GAP, Tree, UNIT_MM, WRAP_HEIGHT, WRAP_WIDTH};
@@ -91,9 +92,23 @@ pub struct Placed {
     pub pose: Pose,
 }
 
+/// Which connector kinds a block turns.
+///
+/// The facing is decided once for the whole block and then applied, because the rule
+/// that decides it is positional (see [`face_connectors`]) and a bank of identical
+/// headers spread over several rows would otherwise disagree row by row.
+enum Facing<'a> {
+    /// Measuring to learn: each container decides for itself and records the kind.
+    Probe(&'a RefCell<BTreeSet<String>>),
+    /// Measuring to draw: exactly these kinds are turned, wherever they sit.
+    Fixed(&'a BTreeSet<String>),
+}
+
 /// Measure `tree` and lay it out with its top-left at the origin.
 pub fn typeset_block(tree: &Tree, parts: &[Part], index: &dyn Fn(&str, u8) -> Option<usize>) -> Vec<Placed> {
-    let node = measure(tree, parts, index, Axis::Row);
+    let probe = RefCell::new(BTreeSet::new());
+    measure(tree, parts, index, Axis::Row, &Facing::Probe(&probe));
+    let node = measure(tree, parts, index, Axis::Row, &Facing::Fixed(&probe.into_inner()));
     let mut out = Vec::new();
     place(&node, 0.0, 0.0, &mut out);
     out
@@ -104,6 +119,7 @@ fn measure(
     parts: &[Part],
     index: &dyn Fn(&str, u8) -> Option<usize>,
     axis: Axis,
+    facing: &Facing,
 ) -> Node {
     match tree {
         Tree::Leaf(leaf) => {
@@ -123,7 +139,7 @@ fn measure(
                 axis,
             )
         }
-        Tree::Container(c) => container_node(c, parts, index),
+        Tree::Container(c) => container_node(c, parts, index, facing),
     }
 }
 
@@ -181,7 +197,12 @@ fn align_line(node: &mut Node, parts: &[Part], axis: Axis) {
     }
 }
 
-fn container_node(c: &Container, parts: &[Part], index: &dyn Fn(&str, u8) -> Option<usize>) -> Node {
+fn container_node(
+    c: &Container,
+    parts: &[Part],
+    index: &dyn Fn(&str, u8) -> Option<usize>,
+    facing: &Facing,
+) -> Node {
     // A leaf naming a part this call is not placing — one already on the sheet, or one the
     // payload could not resolve — is dropped outright rather than measured as an empty
     // box, which would leave a gap where nothing is drawn.
@@ -197,15 +218,15 @@ fn container_node(c: &Container, parts: &[Part], index: &dyn Fn(&str, u8) -> Opt
     let mut children: Vec<Node> = c
         .children
         .iter()
-        .map(|child| measure(child, parts, index, c.axis))
+        .map(|child| measure(child, parts, index, c.axis, facing))
         .collect();
     if children.is_empty() {
         return empty();
     }
     if let Some(wrapped) = wrap(c, &children, parts) {
-        return container_node(&wrapped, parts, index);
+        return container_node(&wrapped, parts, index, facing);
     }
-    face_neighbours(&mut children, &c.children, parts, c.axis);
+    face_neighbours(&mut children, &c.children, parts, c.axis, facing);
     if c.axis == Axis::Row {
         align_columns_to_ic_pins(&mut children, parts);
     }
@@ -423,7 +444,14 @@ fn ic_leaf(node: &Node, parts: &[Part]) -> bool {
 /// multi-pin part is aligned on the pin its neighbour connects to (a series resistor feeds
 /// straight into an op-amp input, not into the symbol's centre line); and a 2-pin part is
 /// flipped end-for-end when the pin sharing the neighbour's net is on the far side.
-fn face_neighbours(children: &mut [Node], authored: &[Tree], parts: &[Part], axis: Axis) {
+fn face_neighbours(
+    children: &mut [Node],
+    authored: &[Tree],
+    parts: &[Part],
+    axis: Axis,
+    facing: &Facing,
+) {
+    face_connectors(children, authored, parts, axis, facing);
     for i in 0..children.len() {
         let Kind::Leaf { part, pose, .. } = children[i].kind else {
             continue;
@@ -434,21 +462,6 @@ fn face_neighbours(children: &mut [Node], authored: &[Tree], parts: &[Part], axi
         let (before, after) = neighbour_nets(children, parts, i);
         let part_ref = &parts[part];
         if part_ref.is_connector() {
-            if connector_faces_away(part_ref, pose, axis, i, children.len()) {
-                // A column flips the symbol top-to-bottom, which KiCAD has no flag for:
-                // mirror-x is a half turn composed with the mirror-y it does have.
-                let turned = match axis {
-                    Axis::Row => Pose {
-                        mirror: !pose.mirror,
-                        ..pose
-                    },
-                    Axis::Col => Pose {
-                        angle: (pose.angle + 180.0) % 360.0,
-                        mirror: !pose.mirror,
-                    },
-                };
-                children[i] = leaf_node(part, parts, turned, axis);
-            }
             continue;
         }
         if !part_ref.two_pin() {
@@ -468,6 +481,73 @@ fn face_neighbours(children: &mut [Node], authored: &[Tree], parts: &[Part], axi
             if !upside_down(part_ref, flipped) {
                 children[i] = leaf_node(part, parts, flipped, axis);
             }
+        }
+    }
+}
+
+/// One facing for every connector of the same kind in a container.
+///
+/// The rule for one connector is that the end of a row points its pins INTO the circuit
+/// rather than off the sheet. Applied per child it splits a bank of identical headers —
+/// only the one at the end is at an end — and J3's labels come out on the right while
+/// J4's come out on the left, which no drawn-by-hand sheet does. So the decision is taken
+/// once per kind: if any sibling of that kind faces away, they all turn.
+fn face_connectors(
+    children: &mut [Node],
+    authored: &[Tree],
+    parts: &[Part],
+    axis: Axis,
+    facing: &Facing,
+) {
+    let len = children.len();
+    let mut siblings: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
+    for (i, child) in children.iter().enumerate() {
+        let Kind::Leaf { part, .. } = child.kind else {
+            continue;
+        };
+        if !parts[part].is_connector() {
+            continue;
+        }
+        if matches!(&authored[i], Tree::Leaf(l) if l.rot.is_some() || l.mirror) {
+            continue;
+        }
+        siblings
+            .entry(parts[part].item.part.as_str())
+            .or_default()
+            .push(i);
+    }
+    for (name, kind) in siblings {
+        let faces_away = |&i: &usize| match children[i].kind {
+            Kind::Leaf { part, pose, .. } => connector_faces_away(&parts[part], pose, axis, i, len),
+            Kind::Stack { .. } => false,
+        };
+        match facing {
+            Facing::Probe(seen) => {
+                if kind.iter().any(faces_away) {
+                    seen.borrow_mut().insert(name.to_string());
+                }
+                continue;
+            }
+            Facing::Fixed(turn) if !turn.contains(name) => continue,
+            Facing::Fixed(_) => {}
+        }
+        for i in kind {
+            let Kind::Leaf { part, pose, .. } = children[i].kind else {
+                continue;
+            };
+            // A column flips the symbol top-to-bottom, which KiCAD has no flag for:
+            // mirror-x is a half turn composed with the mirror-y it does have.
+            let turned = match axis {
+                Axis::Row => Pose {
+                    mirror: !pose.mirror,
+                    ..pose
+                },
+                Axis::Col => Pose {
+                    angle: (pose.angle + 180.0) % 360.0,
+                    mirror: !pose.mirror,
+                },
+            };
+            children[i] = leaf_node(part, parts, turned, axis);
         }
     }
 }
