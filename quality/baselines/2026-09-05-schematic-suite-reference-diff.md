@@ -150,3 +150,27 @@ model a worse review means the last edit hurt. Not built, by direction: keeping 
 best-reviewed sheet and restoring it at finish — that is the checkpoint mechanism the
 user removed on 2026-09-02, and it is the only thing that would let a bad edit cost
 nothing. That decision is the user's.
+
+## Sixth run, main a4cff34d (+ band review rule, promoted labels read outward, readable net names, text seated on drawn ink, multi-unit hardening)
+
+| | fifth run | fourth run (best before) | this run |
+| --- | --- | --- | --- |
+| pass both attempts | 0 / 14 | 0 / 14 | **1 / 14** (555) |
+| pass one attempt | 2 | 4 | 4 |
+| renders scoring >= 8 | 3 | 8 | **10** |
+| mean critic, all 28 | 6.24 | 6.73 | **6.96** |
+| mean human-look | 4.93 | 5.56 | **5.86** |
+| total requests | 1910 | 2177 | **1505** |
+
+First run over 7 on the same-case comparison (6.70 -> 6.96 against the fourth run), on a
+third fewer requests. The review rule that did it, measured on the fifth run's
+trajectories before it shipped: when the first review reads under 5.5, 10 of 10 runs
+improve (+2.07 mean); at 5.5 or above, 0 of 15 improve. So above the band the first
+review is the finish; below it the loop iterates with a three-flat cap. Fifteen runs
+now stop on their first review.
+
+The blocker has moved: three renders at 8.14-8.71 (rp2040#0, ecg#0, blue-pill#1) fail
+ONLY on ERC — `pin_to_pin` power-output conflicts (the finding demoted to stop the
+thrash), `label_dangling`, and bare rail pins. Deterministic block-replay state: text
+collisions 214 -> 7 today, frames 51 with 0 overlaps, 0 unnamed rails, 22 machine-shaped
+labels (from 71), scattered/shorted/body-overlaps 0 on all 24.
