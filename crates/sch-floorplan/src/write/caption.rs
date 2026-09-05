@@ -50,10 +50,12 @@ impl SchematicWriter {
     /// put them; `prepare` is idempotent and re-running it reframes the sheet with
     /// the decoration included.
     pub fn add_block_frames(&mut self, blocks: &[BlockFrame<'_>]) {
+        let cores: Vec<Option<Rect>> =
+            blocks.iter().map(|b| self.member_bbox(b.members)).collect();
         let framed: Vec<(usize, Rect)> = blocks
             .iter()
             .enumerate()
-            .filter_map(|(i, b)| Some((i, self.block_frame(b.members)?)))
+            .filter_map(|(i, b)| Some((i, self.block_frame(b.members, i, &cores)?)))
             .collect();
         for (i, frame) in &framed {
             self.add_rect(
@@ -114,12 +116,12 @@ impl SchematicWriter {
     ///
     /// One block at a time is all an incremental call holds, so on that path there are no
     /// foreign parts to test and the reach is taken on trust.
-    fn block_frame(&self, members: &[String]) -> Option<Rect> {
+    fn block_frame(&self, members: &[String], mine: usize, cores: &[Option<Rect>]) -> Option<Rect> {
         let tight = self.member_bbox(members)?.inflate(FRAME_PAD);
-        let Some(labels) = self.member_label_bbox(members) else {
+        let Some(hanging) = self.member_hanging_ink(members, mine, cores) else {
             return Some(tight);
         };
-        let want = labels.inflate(FRAME_PAD);
+        let want = hanging.inflate(FRAME_PAD);
         let foreign = self.foreign_part_ink(members);
         let mut frame = tight;
         for side in 0..4 {
@@ -184,26 +186,48 @@ impl SchematicWriter {
         bbox
     }
 
-    /// The box around the net labels a block's parts carry — the ink a frame drawn to
-    /// the bodies alone cuts through, which is what a mirrored connector's label column
-    /// runs into. A pin label's uuid key names the part it hangs off.
-    fn member_label_bbox(&self, members: &[String]) -> Option<Rect> {
-        self.labels
+    /// The box around everything that hangs off a block's parts without being one: the
+    /// net labels on their pins, the port labels on the nets that leave, and the rail
+    /// symbols standing on their supply pins — glyph AND the name KiCAD prints beside it.
+    ///
+    /// This is the ink a frame drawn to the bodies alone cuts through. Only a pin
+    /// label's uuid key names the part it hangs off; a port label is keyed on its tap
+    /// point and a rail symbol carries no member at all, so both are claimed by
+    /// PROXIMITY — the block whose parts they stand nearest to, and only when that block
+    /// is `mine`. `cores` is every block's parts-only box, in the caller's order.
+    fn member_hanging_ink(
+        &self,
+        members: &[String],
+        mine: usize,
+        cores: &[Option<Rect>],
+    ) -> Option<Rect> {
+        let owned = |at: Point2| nearest_block(at, cores) == Some(mine);
+        let labels = self.labels.iter().filter_map(|label| {
+            let named = members
+                .iter()
+                .any(|refdes| label.uuid_key.starts_with(&format!("{refdes}:")));
+            (named || owned(label.at)).then(|| label_rect(label, label.at, label.dir))
+        });
+        let rails = self
+            .instances
             .iter()
-            .filter(|label| {
-                members
-                    .iter()
-                    .any(|refdes| label.uuid_key.starts_with(&format!("{refdes}:")))
+            .filter(|inst| inst.refdes.starts_with('#') && owned(inst.at))
+            .flat_map(|inst| {
+                let glyph = super::build::ink_box(inst);
+                let (_, v) = field_anchors(inst);
+                let name = (!inst.val_hidden && !inst.value.is_empty())
+                    .then(|| field_box(v.at, v.justify, &inst.value));
+                [Some(glyph), name]
             })
-            .map(|label| super::label_rect(label, label.at, label.dir))
-            .reduce(|a, b| {
-                Rect::new(
-                    a.min_x.min(b.min_x),
-                    a.min_y.min(b.min_y),
-                    a.max_x.max(b.max_x),
-                    a.max_y.max(b.max_y),
-                )
-            })
+            .flatten();
+        labels.chain(rails).reduce(|a, b| {
+            Rect::new(
+                a.min_x.min(b.min_x),
+                a.min_y.min(b.min_y),
+                a.max_x.max(b.max_x),
+                a.max_y.max(b.max_y),
+            )
+        })
     }
 
     /// Ink drawn by a real part this block does not hold: its body and field text.
@@ -271,6 +295,23 @@ impl SchematicWriter {
         }
         ink
     }
+}
+
+/// Which of `cores` a piece of unowned ink at `at` belongs to: the block whose parts it
+/// stands nearest to. A sheet drawn one block at a time has exactly one, which is why an
+/// incremental frame can claim everything hanging off it.
+fn nearest_block(at: Point2, cores: &[Option<Rect>]) -> Option<usize> {
+    let reach = |r: &Rect| {
+        let dx = (r.min_x - at.x).max(at.x - r.max_x).max(0.0);
+        let dy = (r.min_y - at.y).max(at.y - r.max_y).max(0.0);
+        dx.hypot(dy)
+    };
+    cores
+        .iter()
+        .enumerate()
+        .filter_map(|(i, core)| core.as_ref().map(|r| (i, reach(r))))
+        .min_by(|a, b| a.1.total_cmp(&b.1))
+        .map(|(i, _)| i)
 }
 
 /// The least-fouled seat for `text` among `corners`, as (fouled area, anchor,
