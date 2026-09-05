@@ -393,7 +393,17 @@ impl SchDoc {
         // visual critic names on every under-filled page. The page is already chosen, so
         // centring cannot buy a bigger one.
         if frozen.is_empty() && standard && let Some(bbox) = self.content_bbox() {
-            let middle = |lo: f64, hi: f64| GRID_50_MIL.snap((hi - lo) / 2.0).clamp(-lo, hi);
+            // The slack is bounded by TEXT extents, which are not grid multiples, so the
+            // bounds are snapped INWARD before the centre is clamped to them. Clamping to
+            // the raw bounds lands the whole sheet a fraction of a millimetre off the
+            // 1.27 mm grid, and KiCAD then ERCs every endpoint on it.
+            let middle = |lo: f64, hi: f64| {
+                let (floor, ceiling) = (GRID_50_MIL.snap_up(-lo), GRID_50_MIL.snap_down(hi));
+                if floor > ceiling {
+                    return 0.0;
+                }
+                GRID_50_MIL.snap((hi - lo) / 2.0).clamp(floor, ceiling)
+            };
             let centre = [
                 middle(bbox.min_x - PAGE_MARGIN, page[0] - PAGE_MARGIN - bbox.max_x),
                 middle(bbox.min_y - PAGE_MARGIN, page[1] - PAGE_MARGIN - band - bbox.max_y),

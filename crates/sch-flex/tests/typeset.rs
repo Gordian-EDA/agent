@@ -77,6 +77,21 @@ fn ic(refdes: &str, nets: [&str; 3]) -> Item {
     )
 }
 
+/// A three-terminal `Device:` discrete — a potentiometer's two ends and its wiper.
+fn pot(refdes: &str, nets: [&str; 3]) -> Item {
+    let mut it = item(
+        refdes,
+        vec![
+            pin("1", "1", 0.0, 3.81, 270.0),
+            pin("2", "W", -3.81, 0.0, 0.0),
+            pin("3", "3", 0.0, -3.81, 90.0),
+        ],
+        &[("1", nets[0]), ("2", nets[1]), ("3", nets[2])],
+    );
+    it.part = "Device:R_Potentiometer".into();
+    it
+}
+
 fn leaf(part: &str) -> Tree {
     Tree::Leaf(Leaf {
         part: part.into(),
@@ -329,4 +344,76 @@ fn wrapped_bands_stand_on_shared_column_lines() {
     for k in 0..4 {
         assert_eq!(x(k), x(k + 4), "column {k} is not one line");
     }
+}
+
+/// The defect a reader names as "sibling orientation": a pull-up and a pull-down are the
+/// same part playing the same role — a leg off a rail — so they must stand the same way on
+/// the same baseline, however differently their rails are named. The engine used to stand
+/// only the pull-down and lay the pull-up along the row.
+#[test]
+fn a_pull_up_and_a_pull_down_in_one_row_stand_alike() {
+    let mut items = vec![
+        passive("R1", "3V3", "SCL"),
+        passive("R2", "SDA", "GND"),
+        passive("R3", "3V3", "NRST"),
+    ];
+    let tree = stack(Axis::Row, vec![leaf("R1"), leaf("R2"), leaf("R3")]);
+    sch_flex::typeset(&mut items, &trees(tree), &[]);
+    let angles: Vec<f64> = items.iter().map(|it| it.angle).collect();
+    let ys: Vec<f64> = items.iter().map(|it| it.at.y).collect();
+    assert!(
+        angles.windows(2).all(|w| w[0] == w[1]),
+        "siblings off one rail took different angles: {angles:?}"
+    );
+    assert!(
+        ys.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-9),
+        "siblings off one rail took different baselines: {ys:?}"
+    );
+    assert!(angles[0] % 180.0 == 0.0, "a leg off a rail stands: {angles:?}");
+}
+
+/// The same three, with their signals now reaching an IC in the same row. An IC pin is
+/// where a leg ENDS, so the row still stands as one. Reading the block's LABEL assignment
+/// instead of its topology gets this wrong: a pull-up wired to the MCU beside it carries
+/// no label, and used to lie back down while its pull-down sibling stood.
+#[test]
+fn a_pull_up_wired_to_an_ic_keeps_ranks() {
+    let mut items = vec![
+        passive("R1", "3V3", "SCL"),
+        passive("R2", "SDA", "GND"),
+        passive("R3", "3V3", "NRST"),
+        ic("U1", ["SCL", "SDA", "NRST"]),
+    ];
+    let tree = stack(
+        Axis::Row,
+        vec![leaf("R1"), leaf("R2"), leaf("R3"), leaf("U1")],
+    );
+    sch_flex::typeset(&mut items, &trees(tree), &[]);
+    let angles: Vec<f64> = items[..3].iter().map(|it| it.angle).collect();
+    assert!(
+        angles.iter().all(|a| a % 180.0 == 0.0),
+        "an IC pin is a leg's far end, not a chain: {angles:?}"
+    );
+}
+
+/// The limit of the rule, and why it is not "everything touching a rail stands": a
+/// divider's top resistor also touches a rail, but its far pin CONTINUES to the resistor
+/// beside it. Standing it would bend that wire back around its own body, so it lies along
+/// the chain it is a link of.
+#[test]
+fn a_series_element_that_touches_a_rail_lies_along_its_chain() {
+    let mut items = vec![passive("R1", "VCC", "OUT"), passive("R2", "OUT", "GND")];
+    let tree = stack(Axis::Row, vec![leaf("R1"), leaf("R2")]);
+    sch_flex::typeset(&mut items, &trees(tree), &[]);
+    assert_eq!(items[0].angle % 180.0, 90.0, "the top of a divider stood up");
+}
+
+/// A potentiometer has three pins and is still a link of the chain, not a place a leg
+/// ends: the resistor feeding its top from a rail lies along the divider it is half of.
+#[test]
+fn a_resistor_in_series_with_a_potentiometer_lies_along_it() {
+    let mut items = vec![passive("R2", "VCC", "ADJ"), pot("RV1", ["ADJ", "OUT", "GND"])];
+    let tree = stack(Axis::Row, vec![leaf("R2"), leaf("RV1")]);
+    sch_flex::typeset(&mut items, &trees(tree), &[]);
+    assert_eq!(items[0].angle % 180.0, 90.0, "a resistor feeding a pot stood up");
 }

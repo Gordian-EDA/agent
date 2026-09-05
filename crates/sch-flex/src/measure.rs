@@ -103,16 +103,27 @@ impl Node {
 
     /// Signal (non-rail) nets somewhere in this subtree.
     fn signal_nets(&self, parts: &[Part]) -> BTreeSet<String> {
+        self.nets_of(parts, |_| true)
+    }
+
+    /// The subset carried by parts a chain runs THROUGH, as opposed to one that ends at
+    /// an IC pin.
+    fn chain_nets(&self, parts: &[Part]) -> BTreeSet<String> {
+        self.nets_of(parts, |p| p.links_a_chain())
+    }
+
+    fn nets_of(&self, parts: &[Part], keep: fn(&Part) -> bool) -> BTreeSet<String> {
         match &self.kind {
             Kind::Leaf { part, .. } => parts[*part]
                 .nets()
                 .into_iter()
                 .filter(|net| !circuit_graph::netclass::is_power_net(net))
+                .filter(|_| keep(&parts[*part]))
                 .map(str::to_owned)
                 .collect(),
             Kind::Stack { children, .. } => children
                 .iter()
-                .flat_map(|c| c.signal_nets(parts))
+                .flat_map(|c| c.nets_of(parts, keep))
                 .collect(),
         }
     }
@@ -166,7 +177,7 @@ fn measure(
                     Some(rot) => authored_pose(&parts[i], rot, leaf.mirror),
                     None => Pose {
                         mirror: leaf.mirror,
-                        ..default_pose(&parts[i], axis)
+                        ..default_pose(&parts[i], axis, false)
                     },
                 },
                 axis,
@@ -245,6 +256,41 @@ fn align_line(node: &mut Node, parts: &[Part], axis: Axis) {
     }
 }
 
+/// Re-pose the container's own two-pin leaves now that their siblings are known.
+///
+/// A resistor off a rail is a LEG — it stands — only when no other part the signal passes
+/// THROUGH reaches the net on its far pin. When one does, the two are links of one chain
+/// drawn inside this container, and standing a link bends its wire around its own body: a
+/// divider's top resistor, a 555's timing resistor, an LED's series resistor. A net that
+/// instead ends at an IC pin is a leg's far end, however many parts hang off it there.
+///
+/// Only the container knows its siblings, and only once they are measured, so the leaves
+/// are measured first and the ones this verdict changes are measured again.
+fn stand_the_legs(children: &mut [Node], trees: &[Tree], parts: &[Part], axis: Axis) {
+    let reach: Vec<BTreeSet<String>> = children.iter().map(|k| k.chain_nets(parts)).collect();
+    for (i, (node, tree)) in children.iter_mut().zip(trees).enumerate() {
+        let Tree::Leaf(leaf) = tree else { continue };
+        if leaf.rot.is_some() {
+            continue;
+        }
+        let Kind::Leaf { part, .. } = node.kind else {
+            continue;
+        };
+        let chained = parts[part].nets().into_iter().any(|net| {
+            !circuit_graph::netclass::is_power_net(net)
+                && reach
+                    .iter()
+                    .enumerate()
+                    .any(|(j, nets)| j != i && nets.contains(net))
+        });
+        let pose = Pose {
+            mirror: leaf.mirror,
+            ..default_pose(&parts[part], axis, chained)
+        };
+        *node = leaf_node(part, parts, pose, axis);
+    }
+}
+
 fn container_node(
     c: &Container,
     parts: &[Part],
@@ -271,6 +317,7 @@ fn container_node(
     if children.is_empty() {
         return empty();
     }
+    stand_the_legs(&mut children, &c.children, parts, c.axis);
     if let Some(wrapped) = wrap(c, &children, parts) {
         let mut node = container_node(&wrapped, parts, index, facing);
         share_tracks(&mut node, wrap_limit(c));
