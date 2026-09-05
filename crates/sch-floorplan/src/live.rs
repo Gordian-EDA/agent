@@ -60,16 +60,18 @@ const AP_NETS_SEP: char = '|';
 
 /// Whether `net` is a name a later block could ask to join.
 ///
-/// A name the author WROTE is a contract; one a tool derived (`Net-(D1-A)`,
-/// `unconnected-(…)`, `N$7`) is recomputed from the net's own pins, so writing it
-/// down forks the net the moment a pin moves. A power net is left out too: its rail
-/// symbols already carry the name everywhere it is needed.
+/// A name the payload carries is a contract — `N$7` included: a netlist's numbered
+/// net names nothing but the net, and a later call spelling the same number means
+/// the same net. One KiCAD derived (`Net-(D1-A)`, `unconnected-(…)`) is recomputed
+/// from the net's own pins, so writing it down forks the net the moment a pin moves.
+/// A power net is left out too: its rail symbols already carry the name everywhere
+/// it is needed.
 fn joinable_net_name(net: &str) -> bool {
     !net.is_empty()
         && !net.starts_with('@')
         && !net.contains(AP_NETS_SEP)
         && !net.contains('=')
-        && !crate::floorplan::place::is_unnamed(net)
+        && !sch_doc::netname::is_kicad_derivation(net)
         && !circuit_graph::netclass::is_power_net(net)
         && !sch_check::place_parts::is_no_connect_name(net)
 }
