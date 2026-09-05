@@ -220,11 +220,11 @@ pub struct FootprintMismatch {
 impl PayloadAudit {
     /// Whether the payload may proceed to placement.
     ///
-    /// Dangling pins do not block it. A net with one pin is unfinished work, not a
-    /// malformed payload: the placement commits and [`crate::lint`]'s
-    /// `single-pin-net` error — which `place_parts` returns in the same response —
-    /// is what holds the board back until it is closed. Refusing a whole 50-part
-    /// payload for it only forces the caller to resend everything.
+    /// Dangling pins do not block it. A net with one pin is a port or unfinished
+    /// work, not a malformed payload: the placement commits and [`crate::lint`]'s
+    /// `single-pin-net` warning — which `place_parts` returns in the same
+    /// response — points at it. Refusing a whole 50-part payload for it only
+    /// forces the caller to resend everything.
     pub fn is_valid(&self) -> bool {
         self.input_errors.is_empty()
             && self.duplicate_refs.is_empty()

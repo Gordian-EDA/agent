@@ -281,18 +281,20 @@ pub fn lint(d: &Design, provider: &SymbolTable) -> Diagnostics {
     if !allow("single-pin-net") {
         for (net, pins) in &net_pins {
             // A power rail legitimately has one pin: the power symbol IS the
-            // connection. Everything else with a single pin — a port label
-            // included — names a node nothing else reaches, which no board can
-            // build. The design covers every sheet, so an off-sheet consumer
-            // would already be counted here.
+            // connection. Any other net with one pin is a port: the sheet in
+            // hand may be one of several, and a named pin whose other end is
+            // elsewhere is drawn exactly as a label, which KiCAD does not fault.
+            // It is worth a look — a typo'd net forks this way too — but never
+            // a block: the only repair the drawing offers is to strip the
+            // label, which turns a port into a bare pin.
             let attrs = d.nets.get(*net);
             if pins.len() == 1 && !attrs.map(|a| a.power).unwrap_or(false) {
                 diags.push(
-                    Diagnostic::error(
+                    Diagnostic::warning(
                         "single-pin-net",
                         format!(
-                            "net `{net}` reaches only {} — connect it to its other end, \
-                         or mark the pin no-connect",
+                            "net `{net}` reaches only {} — a port to another sheet, \
+                         unless its other end here was meant to share the name",
                             pins[0]
                         ),
                     )

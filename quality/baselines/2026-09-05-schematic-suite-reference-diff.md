@@ -174,3 +174,18 @@ ONLY on ERC — `pin_to_pin` power-output conflicts (the finding demoted to stop
 thrash), `label_dangling`, and bare rail pins. Deterministic block-replay state: text
 collisions 214 -> 7 today, frames 51 with 0 overlaps, 0 unnamed rails, 22 machine-shaped
 labels (from 71), scattered/shorted/body-overlaps 0 on all 24.
+
+## Suite 9 — main 226d32d3 (lane/erc-blockers merged), 28 renders, 7-sample mean
+
+critic 6.96 → 6.96 (flat), human-look 5.86 → 6.07, requests 1505 → 1009.
+Pass both attempts: prompt-bjt-preamp. Pass one attempt: 555-blinker-ldo, rp2040,
+stm32-microcontroller, ibm-m122, ecg-sensor. Renders passing all checks: 7 of 28;
+renders ≥ 8: 5. No ERC-only failures remain except one new one:
+
+- **ddr-memory#1: 42 ERC errors (reference 13), critic 6.** The given netlist has 32
+  single-pin nets (`DDR_DQ0_A` …), the DRAM's bus to another sheet of the source
+  project. `check_schematic` reported each as a blocking `single-pin-net` error with
+  `fix: null`; the model no-connected all 32 (stripping the labels), re-named them one
+  `connect` call at a time (33 calls), was told the same thing again, and deleted the
+  labels. Attempt 0 never touched them and passed ERC with 10. Fix: the lint is a
+  warning phrased as a port; nothing in the drawing can "repair" a port but stripping it.
