@@ -34,6 +34,7 @@ use gordian_llm::{
 };
 
 use crate::AgentRuntime;
+use crate::review_stop::ReviewProgress;
 use crate::thrash::ThrashGuard;
 use crate::tools::{run_tool, tool_defs};
 use gordian_runtime::tool::IMAGE_PATH_KEY;
@@ -283,9 +284,10 @@ const MAX_PCB_COMPLETION_NUDGES: usize = 1;
 /// visual critic see the sheet.
 ///
 /// The review loop is what the drawing is actually judged by, and half the runs
-/// that produce a sheet never call it: the prompt asks, and nothing enforces it.
-/// Like the coverage check it is asked once and never re-armed — the answer is a
-/// loop the model then owns, not a question to repeat after every `arrange`.
+/// that produce a sheet never call it; ten of 26 that did went on editing after
+/// the review they then reported. Both are the same gap: the sheet the turn ends
+/// with was never graded. Like the coverage check it is asked once and never
+/// re-armed — the answer is a loop the model then owns.
 const MAX_REVIEW_NUDGES: usize = 1;
 
 /// Events the agent loop emits as it runs, for a live UI. Headless paths pass
@@ -956,7 +958,6 @@ impl<P: Provider> Agent<P> {
         let mut schematic_check_complete = false;
         let mut successful_place_parts = 0usize;
         let mut parts_drawn_or_moved = false;
-        let mut sheet_reviewed = false;
         let mut check_nudges_left = MAX_ERC_CLEANUP_NUDGES;
         let mut pcb_completion_nudges_left = MAX_PCB_COMPLETION_NUDGES;
         let mut coverage_nudges_left = MAX_COVERAGE_NUDGES;
@@ -971,6 +972,7 @@ impl<P: Provider> Agent<P> {
         let mut pcb_recovery = PcbRecoveryState::default();
         let mut pcb_quality = PcbQualityState::default();
         let mut thrash = ThrashGuard::default();
+        let mut reviews = ReviewProgress::default();
         loop {
             if let Some(cap) = self.max_requests
                 && provider_requests >= cap
@@ -1122,7 +1124,7 @@ impl<P: Provider> Agent<P> {
                     )));
                     continue;
                 }
-                if parts_drawn_or_moved && !sheet_reviewed && review_nudges_left > 0 {
+                if parts_drawn_or_moved && reviews.needs_review() && review_nudges_left > 0 {
                     review_nudges_left -= 1;
                     self.history.push(ChatMessage::user(REVIEW_SCHEMATIC_NUDGE));
                     continue;
@@ -1187,6 +1189,8 @@ impl<P: Provider> Agent<P> {
 
                 let (mut content, images, image_path, dispatched) = if let Some(refusal) = edit_loop
                 {
+                    (refusal.to_string(), Vec::new(), None, false)
+                } else if let Some(refusal) = reviews.refusal(&call.fn_name) {
                     (refusal.to_string(), Vec::new(), None, false)
                 } else if discovery_duplicate {
                     (
@@ -1280,15 +1284,20 @@ impl<P: Provider> Agent<P> {
                         call.fn_name.as_str(),
                         "place_parts" | "add_parts" | "arrange"
                     );
+                    reviews.note_edit();
                     schematic_check_complete = successful_place_parts > 1
                         && parsed
                             .get("check_schematic")
                             .is_some_and(check_schematic_is_complete);
                 }
-                // Any dispatched review counts: the gate enforces that the critic
-                // was consulted, and a model whose critic is unavailable (no vision,
-                // a timeout) gains nothing from being told to consult it again.
-                sheet_reviewed |= dispatched && call.fn_name == "review_schematic";
+                if let Some(bench) = bench_count(&parsed) {
+                    reviews.note_bench(bench);
+                }
+                if dispatched && call.fn_name == "review_schematic"
+                    && let Some(notice) = reviews.observe(&parsed)
+                {
+                    content = add_agent_guidance(&content, json!({"stop": notice}));
+                }
                 if dispatched && call.fn_name == "check_schematic" {
                     let complete = check_schematic_is_complete(&parsed);
                     if schematic_mutated {
@@ -1472,6 +1481,15 @@ fn max_requests_message(cap: usize, tool_calls_made: usize) -> String {
 
 fn schematic_mutation_succeeded(name: &str, value: &Value) -> bool {
     is_schematic_mutator(name) && value.get("error").is_none() && value.get("changed").is_some()
+}
+
+/// How many parts a tool result reports on the bench, wherever it reports it:
+/// the checks put it at the top level, the mutators under their own check.
+fn bench_count(value: &Value) -> Option<u64> {
+    value
+        .get("bench")
+        .or_else(|| value.pointer("/check_schematic/bench"))
+        .and_then(Value::as_u64)
 }
 
 fn check_schematic_is_clean(value: &Value) -> bool {
@@ -1815,15 +1833,18 @@ fn add_route_retry_guidance(
     failed_route_attempts: usize,
     note: &'static str,
 ) -> String {
+    add_agent_guidance(
+        content,
+        json!({"failed_route_attempts": failed_route_attempts, "note": note}),
+    )
+}
+
+/// Ride a note back on a tool's own result, where the model reads it in the same
+/// breath as the number it is about.
+fn add_agent_guidance(content: &str, guidance: Value) -> String {
     let mut value = parse_or_null(content);
     if let Value::Object(obj) = &mut value {
-        obj.insert(
-            "agent_guidance".to_string(),
-            json!({
-                "failed_route_attempts": failed_route_attempts,
-                "note": note
-            }),
-        );
+        obj.insert("agent_guidance".to_string(), guidance);
         value.to_string()
     } else {
         content.to_string()
@@ -2036,10 +2057,10 @@ fn coverage_nudge(drawn: &[String], floor: Option<usize>) -> String {
 /// the result. It hands over the loop rather than one more instruction: the
 /// stopping rule is the tool's own mean, not this message.
 const REVIEW_SCHEMATIC_NUDGE: &str =
-    "Before you finish: this turn drew or re-arranged parts and never reviewed the sheet. \
-     Call review_schematic now. If the `mean` is below 8, fix the blocks its defects name \
-     with arrange and review again; finish only when the mean reaches 8 or has stopped \
-     improving. State the final mean in your summary.";
+    "Before you finish: the sheet has changed since the critic last saw it, so any mean you \
+     report is stale. Call review_schematic now. If the `mean` is below 8, fix the blocks its \
+     defects name with arrange and review again; finish only when the mean reaches 8 or has \
+     stopped improving, and do not edit after the review you finish on. State the final mean.";
 
 fn pcb_completion_nudge(missing: &[&str]) -> String {
     format!(
@@ -2993,9 +3014,41 @@ mod tests {
 
         assert_eq!(outcome.stop_reason, StopReason::Completed);
         let asked = asked_of_the_model(&seen);
-        let nudges = asked.matches("never reviewed the sheet").count();
+        let nudges = asked.matches("changed since the critic last saw it").count();
         assert_eq!(nudges, 1, "the review gate fired {nudges} times: {asked}");
         assert!(asked.contains("mean` is below 8"), "{asked}");
+    }
+
+    /// The other half of the same gap: ten of 26 suite runs went on editing after
+    /// the review whose mean they then reported. The gate reads "changed since the
+    /// critic saw it", not "never reviewed".
+    #[tokio::test]
+    async fn a_turn_that_edits_after_its_last_review_is_asked_to_review_again() {
+        let Some(ctx) = AgentRuntime::detect_for_test() else {
+            eprintln!("SKIP: no KiCAD detected");
+            return;
+        };
+        let mut script = vec![
+            two_resistors(),
+            crate::testing::tool_call("review", "review_schematic", json!({})),
+        ];
+        script.extend(scripted_review(7.0));
+        script.push(nudge("R1"));
+        script.extend((0..6).map(|_| crate::testing::final_text("Done at mean 7.")));
+        let (client, seen) = ScriptedClient::recording(script);
+        let mut agent = Agent::new(client, ctx, system_prompt());
+
+        agent
+            .run_turn("Draw a two-resistor divider.", None)
+            .await
+            .unwrap();
+
+        let asked = asked_of_the_model(&seen);
+        assert_eq!(
+            asked.matches("changed since the critic last saw it").count(),
+            1,
+            "{asked}"
+        );
     }
 
     /// ...and only of a turn that did not review. One call is the whole gate; the
@@ -3040,8 +3093,139 @@ mod tests {
         assert_eq!(outcome.stop_reason, StopReason::Completed);
         let asked = asked_of_the_model(&seen);
         assert!(
-            !asked.contains("never reviewed the sheet"),
+            !asked.contains("changed since the critic last saw it"),
             "the review gate fired on a turn that reviewed: {asked}"
+        );
+    }
+
+    /// One scripted grader verdict per sample of one review.
+    fn scripted_review(mean: f64) -> Vec<StreamEnd> {
+        (0..gordian_tools_sch::review::SAMPLES)
+            .map(|_| {
+                crate::testing::final_text(&format!(
+                    r#"FINAL_JSON: {{"score": {mean}, "summary": "reads well", "defects": []}}"#
+                ))
+            })
+            .collect()
+    }
+
+    fn nudge(refs: &str) -> StreamEnd {
+        crate::testing::tool_call(
+            "move",
+            "move_symbols",
+            json!({"moves": [{"ref": refs, "by": [0.0, 2.54]}]}),
+        )
+    }
+
+    fn two_resistors() -> StreamEnd {
+        crate::testing::tool_call(
+            "place",
+            "place_parts",
+            json!({"parts": [
+                {"ref": "R1", "part": "Device:R", "pins": {"1": "IN", "2": "MID"}},
+                {"ref": "R2", "part": "Device:R", "pins": {"1": "MID", "2": "GND"}}
+            ]}),
+        )
+    }
+
+    /// Every tool result the turn produced, in order.
+    async fn run_recording_tools(
+        ctx: AgentRuntime,
+        script: Vec<StreamEnd>,
+    ) -> Vec<(String, Value)> {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut agent = Agent::new(ScriptedClient::new(script), ctx, system_prompt());
+        agent.run_turn("Draw a two-resistor divider.", Some(&tx)).await.unwrap();
+        drop(agent);
+        let mut calls = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            if let AgentEvent::ToolFinished { name, result, .. } = event {
+                calls.push((name, result));
+            }
+        }
+        calls
+    }
+
+    /// stm32#0 spent twelve reviews and seventeen arranges to finish below the
+    /// mean it reached on its third. Two reviews that fail to beat the best close
+    /// the loop, and the layout edits that would reopen it are refused.
+    #[tokio::test]
+    async fn two_flat_reviews_close_the_loop_and_refuse_further_layout_edits() {
+        let Some(ctx) = AgentRuntime::detect_for_test() else {
+            eprintln!("SKIP: no KiCAD detected");
+            return;
+        };
+        let review = || crate::testing::tool_call("review", "review_schematic", json!({}));
+        let mut script = vec![two_resistors(), review()];
+        script.extend(scripted_review(6.0));
+        script.push(nudge("R1"));
+        script.push(review());
+        script.extend(scripted_review(6.0));
+        script.push(nudge("R2"));
+        script.push(review());
+        script.extend(scripted_review(6.0));
+        script.push(nudge("R1"));
+        script.extend((0..6).map(|_| crate::testing::final_text("done")));
+
+        let calls = run_recording_tools(ctx, script).await;
+
+        let reviews: Vec<_> = calls
+            .iter()
+            .filter(|(name, _)| name == "review_schematic")
+            .collect();
+        assert_eq!(reviews.len(), 3, "{calls:?}");
+        assert!(reviews[0].1["agent_guidance"].is_null());
+        assert!(reviews[1].1["agent_guidance"].is_null());
+        let stop = reviews[2].1["agent_guidance"]["stop"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned();
+        assert!(stop.contains("stopped improving"), "{stop}");
+        let moves: Vec<_> = calls
+            .iter()
+            .filter(|(name, _)| name == "move_symbols")
+            .collect();
+        assert_eq!(moves.len(), 3, "{calls:?}");
+        assert!(moves[0].1.get("error").is_none());
+        assert!(moves[1].1.get("error").is_none());
+        assert_eq!(moves[2].1["error"], "review loop closed");
+    }
+
+    /// A review with nothing changed since the last one grades the same picture
+    /// for seven more vision calls, so it is refused with the standing mean.
+    #[tokio::test]
+    async fn a_review_of_an_unchanged_sheet_is_refused() {
+        let Some(ctx) = AgentRuntime::detect_for_test() else {
+            eprintln!("SKIP: no KiCAD detected");
+            return;
+        };
+        let review = || crate::testing::tool_call("review", "review_schematic", json!({}));
+        let mut script = vec![two_resistors(), review()];
+        script.extend(scripted_review(7.0));
+        script.push(review());
+        script.push(nudge("R1"));
+        script.push(review());
+        script.extend(scripted_review(7.0));
+        script.extend((0..6).map(|_| crate::testing::final_text("done")));
+
+        let calls = run_recording_tools(ctx, script).await;
+
+        let reviews: Vec<_> = calls
+            .iter()
+            .filter(|(name, _)| name == "review_schematic")
+            .collect();
+        assert_eq!(reviews.len(), 3, "{calls:?}");
+        assert!(reviews[0].1.get("error").is_none());
+        assert_eq!(reviews[1].1["error"], "nothing changed since the last review");
+        assert!(
+            reviews[1].1["note"].as_str().expect("note").contains("7"),
+            "the standing mean is quoted back: {:?}",
+            reviews[1].1
+        );
+        assert!(
+            reviews[2].1.get("error").is_none(),
+            "an edit reopens the review: {:?}",
+            reviews[2].1
         );
     }
 
