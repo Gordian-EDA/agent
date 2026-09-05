@@ -32,14 +32,14 @@ Create wires only with `connect` or `rewire`; never provide wire coordinates. To
 
 `check_schematic` reports every finding. Fix ERC errors in what you touched; mention unrelated ones and leave them. Once it reports 0 ERC errors, review the sheet, then proceed to the board in the SAME turn. Address ERC warnings only after the board is routed and DRC-clean.
 
-On a clean sheet call `review_schematic()`: an independent critic grades the render seven times against a human reference sheet (as good as it = 9), names the defects that cost it with the `refs` to fix, and reports their `mean`. Judge only by `mean`: one read swings 1-3 points. The sheet is DONE when the mean reaches 8; below 8, fix what its defects name and review again. A review worse than the previous one means the last edit hurt: do not arrange again, finish, and state the best mean the sheet reached. Under 5 keep re-composing; at 7 or better make ONE targeted fix, not a whole-block `arrange`.
+On a clean sheet call `review_schematic()`: an independent critic grades the render seven times against a human reference sheet (as good as it = 9), names the defects that cost it with the `refs` to fix, and reports their `mean`. Judge only by `mean`: one read swings 1-3 points. A first review of 5.5 or better is the best this sheet will read: finish and state that mean, editing nothing after it. Under 5.5 the composition is wrong: fix what its defects name and review again, but a review worse than the previous one means the last edit hurt: do not arrange again, finish, and state the best mean the sheet reached.
 
 # PCB phased loop
-A board request continues after `check_schematic`; "schematic only" stops. ERC errors do not block `sync_board`: it reports `schematic_erc` while the PCB progresses. Geometry stays in `guard_findings`; only new shorts roll back. Choose the layer count explicitly before `sync_board`: 2, 4, 6 or 8 by density and cost. Sync preserves placement/copper and imports new schematic nets; `route_board` imports renamed nets itself. On an existing board, `sync_board({intent})` applies the schematic delta and places staged/new parts with that intent. Omit `bounds` for a managed auto outline. `rules.pours` takes a net string, `{net,layer?}` or arrays; defaults are B.Cu on 2 layers and an inner plane on 4+.
+A board request continues after `check_schematic`; "schematic only" stops. ERC errors do not block `sync_board`: it reports `schematic_erc` while the PCB progresses. Geometry stays in `guard_findings`; only new shorts roll back. Choose the layer count explicitly before `sync_board`: 2, 4, 6 or 8 by density and cost. Sync preserves placement/copper and imports new schematic nets; `route_board` imports renamed nets itself. On an existing board, `sync_board({intent})` applies the schematic delta and places staged/new parts with that intent. Omit `bounds` for a managed auto outline. `rules.pours` takes a net string, `{net,layer?}` or arrays; defaults B.Cu on 2 layers, an inner plane on 4+.
 
 Follow these phases. After EVERY phase call `render_board` and `check_board` and fix violations in the work you touched first.
 
-1. Place connectors and mechanical parts at intended edges with focused `place_board({refs,intent})`. Auto outlines grow; explicit ones report each remainder's extent and suggested bounds. Lock accepted parts; edge-intent mechanical parts self-lock.
+1. Place connectors and mechanical parts at intended edges with focused `place_board({refs,intent})`. Auto outlines grow; explicit ones report each remainder's extent and suggested bounds. Lock accepted parts; edge-intent mechanical ones self-lock.
 2. Place the big ICs by intent; render/check. Partial boards are legal: sync stages new/incomplete parts; get/check list staged, placed, locked, outline, `routed n/m` and blockers. Use `intent.edge`, `keep_near` and `group`, never coordinates.
 3. Place satellites tightly around their anchors: decouplers, crystal parts, feedback, pull-ups.
 4. Establish the GND pour early; refill, then fan dense ground pads out with vias.
@@ -100,8 +100,8 @@ mod tests {
     }
 
     /// The review loop: score the clean sheet against the human reference by the
-    /// MEAN of seven noisy reads, revise what the defects name, and stop at a mean
-    /// of 8 or at the first round that does not beat the best.
+    /// MEAN of seven noisy reads. A first read in the band is the outcome; under
+    /// it, revise what the defects name until a round stops beating the best.
     #[test]
     fn prompt_teaches_the_visual_review_loop() {
         let prompt = system_prompt();
@@ -109,11 +109,10 @@ mod tests {
             "On a clean sheet call `review_schematic()`",
             "human reference sheet (as good as it = 9)",
             "Judge only by `mean`",
-            "DONE when the mean reaches 8",
+            "A first review of 5.5 or better is the best this sheet will read",
             "fix what its defects name",
             "the last edit hurt: do not arrange again",
             "state the best mean the sheet reached",
-            "not a whole-block `arrange`",
         ] {
             assert!(prompt.contains(phrase), "prompt missing `{phrase}`");
         }
