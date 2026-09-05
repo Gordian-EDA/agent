@@ -47,3 +47,25 @@ rule forces a label pair across blocks even when the pins are adjacent, and the 
 labels every piece. With `ap_nets` now recording the authored net on the earlier block's
 pin, a later block can wire a close partner and label only what is far. That is one
 change that cuts labels and matches the human sheets. lane/cross-block-nets has it.
+
+## Second run, main 93c27034 (+ net-join minimal/stitch, thrash guard, cleanups, column tracks)
+
+22 of 28 scored by the harness; the other 6 timed out in the critic (300 s cap not
+scaled with 7 samples — fixed 5ffffe2a) and were rescored by hand with the same tool.
+
+| | previous main (5e70ebbc) | this main |
+| --- | --- | --- |
+| pass both attempts | 3 / 14 | **0 / 14** |
+| pass one attempt | 1 | 3 (555, current-sense 8.71, ibm 8.86) |
+| mean critic, same renders | 6.41 | 6.52 |
+| Blue Pill | 8.43 / 7.86 | 5.86 / 7.71 |
+
+Blue Pill attempt 0 is attributable, not noise: the thrash guard fired 7 times and
+held the LED-polarity loop, but the model — still told to clear a `fix: null`
+finding — escalated around it: removed the LED twice, purged four GND symbols, five
+power symbols, three capacitors and a flag (each a fresh ref set), and finished with
+28 labels (was 96), a 159 mm wire and 5 wires through bodies. The cause is the
+unrepairable blocking finding, not the guard; follow-up is with the loop lane.
+
+The DDR and ECG drops (9.00→7.00, 7.57→5.86) are within one run's swing on those
+cases; deterministic facts are checked below before blaming the typesetter.
