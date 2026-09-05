@@ -9,7 +9,13 @@ mod corpus;
 use geom::Point2;
 use sch_doc::{LabelKind, Mirror, Pose, SchDoc, SymbolSource, connect};
 
-const FIXTURE: &str = "crates/sch-floorplan/tests/snapshots/divider-filter.kicad_sch";
+/// The document crate's own copy of a drawn sheet. It used to point at the layout
+/// crate's snapshot of the same circuit, and that snapshot is re-baselined whenever the
+/// typesetter changes how it draws — one such change turned the `OUT` label from global
+/// to plain, which is a correct drawing decision and silently changed what this crate's
+/// naming tests were asserting about. A test about KiCAD's label ranking needs a sheet
+/// whose labels do not move under it.
+const FIXTURE: &str = "crates/sch-doc/tests/fixtures/divider-filter.kicad_sch";
 
 fn fixture() -> (std::path::PathBuf, String) {
     let path = corpus::repo_roots()
