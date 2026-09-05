@@ -32,15 +32,28 @@ fn corpus() -> PathBuf {
 
 /// The fixture's blocks in the order its parts first mention them — the order the model
 /// would place them in, which is the order that decides what each seating can see.
+///
+/// A part that names no block joins the payload's own, exactly as `place_parts` reads it.
+/// Deriving the name from the part alone dropped every payload-level block on the floor,
+/// and with it the authored tree keyed by that name: two thirds of the corpus replayed as
+/// untreed bare rows.
 fn blocks(value: &serde_json::Value) -> Vec<String> {
     let mut seen = Vec::new();
     for part in value["parts"].as_array().into_iter().flatten() {
-        let block = part["block"].as_str().unwrap_or_default().to_string();
+        let block = block_of(value, part);
         if !seen.contains(&block) {
             seen.push(block);
         }
     }
     seen
+}
+
+fn block_of(value: &serde_json::Value, part: &serde_json::Value) -> String {
+    part["block"]
+        .as_str()
+        .or_else(|| value["block"].as_str())
+        .unwrap_or(sch_check::DEFAULT_BLOCK)
+        .to_string()
 }
 
 /// One call's payload: the fixture narrowed to `block`, carrying that block's layout tree
@@ -50,11 +63,12 @@ fn payload(value: &serde_json::Value, block: &str, first: bool) -> serde_json::V
         .as_array()
         .into_iter()
         .flatten()
-        .filter(|part| part["block"].as_str().unwrap_or_default() == block)
+        .filter(|part| block_of(value, part) == block)
         .cloned()
         .collect();
     let mut out = serde_json::json!({
         "name": value["name"].as_str().unwrap_or("replay"),
+        "block": block,
         "parts": parts,
     });
     if let Some(tree) = value["layout"].get(block) {
