@@ -1,6 +1,6 @@
 //! Rendering the live schematic to PNG.
 //!
-//! One KiCAD SVG export feeds two consumers: the `render_schematic` tool result
+//! One KiCAD PDF export feeds two consumers: the `render_schematic` tool result
 //! the model looks at (a millimetre-annotated overview, plus quadrant details on
 //! a dense sheet), and [`sheet_pngs`], the clean/annotated pair the visual
 //! [`crate::review`] critic grades.
@@ -9,7 +9,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use gordian_runtime::AgentRuntime;
-use gordian_runtime::render::{RenderBounds, RenderPlan};
+use gordian_runtime::render::{Raster, RenderBounds, RenderPlan, SchematicSheet};
 use gordian_runtime::tool::IMAGE_PATH_KEY;
 use serde_json::{Value, json};
 
@@ -27,11 +27,11 @@ pub struct SheetPngs {
     pub parts: String,
 }
 
-/// One SVG export plus the geometry every render of it shares.
+/// One PDF export plus the geometry every render of it shares.
 struct Sheet {
     doc: sch_doc::SchDoc,
     visual: sch_floorplan::visual::VisualFacts,
-    svg: String,
+    pdf: SchematicSheet,
     content: RenderBounds,
     overview: RenderBounds,
     plan: RenderPlan,
@@ -47,7 +47,7 @@ fn read_sheet(ctx: &AgentRuntime) -> Result<Sheet> {
         ctx.config().tools.render_max_px,
     );
     Ok(Sheet {
-        svg: gordian_runtime::render::schematic_svg(ctx.env(), ctx.sch_path())?,
+        pdf: gordian_runtime::render::schematic_sheet(ctx.env(), ctx.sch_path())?,
         doc,
         visual,
         content,
@@ -70,13 +70,10 @@ fn real_parts(doc: &sch_doc::SchDoc) -> impl Iterator<Item = &sch_doc::SymbolIns
 /// same crop carrying millimetre axes.
 pub fn sheet_pngs(ctx: &AgentRuntime) -> Result<SheetPngs> {
     let sheet = read_sheet(ctx)?;
-    let cropped = gordian_runtime::render::crop_svg(&sheet.svg, sheet.overview);
-    let clean = gordian_runtime::render::svg_to_png(&cropped, sheet.plan.overview_px)?;
-    let annotated = gordian_runtime::render::svg_to_png(
-        &schematic_overlay(&sheet.svg, sheet.overview),
-        sheet.plan.overview_px,
-    )?;
+    let overview = sheet.pdf.raster(sheet.overview, sheet.plan.overview_px)?;
+    let annotated = annotate(&overview, sheet.plan.overview_px)?;
     let annotated_path = ctx.workspace().write_render(&annotated)?;
+    let clean = overview.png;
     let parts = real_parts(&sheet.doc)
         .map(|symbol| match symbol.value() {
             "" => symbol.refdes().to_string(),
@@ -100,16 +97,14 @@ pub fn render_schematic(ctx: &AgentRuntime) -> Result<Value> {
     let sheet = read_sheet(ctx)?;
     let visual_json = serde_json::to_value(&sheet.visual)?;
     let bench = sch_floorplan::bench::benched(&sheet.doc);
-    let png = gordian_runtime::render::svg_to_png(
-        &schematic_overlay(&sheet.svg, sheet.overview),
-        sheet.plan.overview_px,
-    )?;
+    let overview = sheet.pdf.raster(sheet.overview, sheet.plan.overview_px)?;
+    let png = annotate(&overview, sheet.plan.overview_px)?;
     let path = ctx.workspace().write_render(&png)?;
     let mut detail_paths = Vec::new();
     if let Some(detail_px) = sheet.plan.detail_px {
         for region in detail_regions(sheet.content) {
-            let detail_svg = schematic_overlay(&sheet.svg, region);
-            let detail_png = gordian_runtime::render::svg_to_png(&detail_svg, detail_px)?;
+            let raster = sheet.pdf.raster(region, detail_px)?;
+            let detail_png = annotate(&raster, detail_px)?;
             let detail_path = ctx.workspace().write_render(&detail_png)?;
             detail_paths.push(json!({
                 "region": [region.min_x, region.min_y, region.max_x, region.max_y],
@@ -126,7 +121,7 @@ pub fn render_schematic(ctx: &AgentRuntime) -> Result<Value> {
         "detail_paths": detail_paths,
         "visual": visual_json,
         "note": format!(
-            "Schematic rendered from the saved .kicad_sch using KiCad's schematic SVG export and attached. \
+            "Schematic rendered from the saved .kicad_sch using KiCad's schematic PDF export and attached. \
              Symbols, fields, labels, and wires are drawn on a light background; X/Y axes and ticks \
              are sheet millimetres, matching read_schematic @x,y positions. PNG saved to {}. \
              visual lists the deterministic measured problems; dense/large sheets also return \
@@ -160,11 +155,11 @@ fn padded_bounds(bounds: RenderBounds, padding: f64) -> RenderBounds {
     )
 }
 
-fn schematic_overlay(svg: &str, bounds: RenderBounds) -> String {
-    let cropped = gordian_runtime::render::crop_svg(svg, bounds);
-    gordian_runtime::render::add_coordinate_overlay(
-        &cropped,
-        bounds,
+/// The rendered crop under a millimetre coordinate ruler, at `long_edge_px`.
+pub fn annotate(raster: &Raster, long_edge_px: u32) -> Result<Vec<u8>> {
+    let overlaid = gordian_runtime::render::add_coordinate_overlay(
+        &gordian_runtime::render::raster_svg(raster),
+        raster.bounds,
         "mm",
         gordian_runtime::render::CoordinateOverlayStyle {
             background: "#fffdf7",
@@ -173,7 +168,8 @@ fn schematic_overlay(svg: &str, bounds: RenderBounds) -> String {
             x_axis: "#be123c",
             y_axis: "#1d4ed8",
         },
-    )
+    );
+    gordian_runtime::render::svg_to_png(&overlaid, long_edge_px)
 }
 
 fn detail_regions(bounds: RenderBounds) -> [RenderBounds; 4] {
