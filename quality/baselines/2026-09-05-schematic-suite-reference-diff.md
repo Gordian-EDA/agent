@@ -189,3 +189,17 @@ renders ≥ 8: 5. No ERC-only failures remain except one new one:
   `connect` call at a time (33 calls), was told the same thing again, and deleted the
   labels. Attempt 0 never touched them and passed ERC with 10. Fix: the lint is a
   warning phrased as a port; nothing in the drawing can "repair" a port but stripping it.
+
+Side-by-side (fresh reviewer, human original vs ours) on the two cases lowest on both
+attempts, current-sense 5.43/5.43 and sallen-key 6.0/6.0:
+- Every `place_parts` after the first is a graft beside what is drawn and nothing is
+  ever re-seated: four good blocks strewn across the top 1/12 of an A2 page, density
+  0.87 parts/1000 mm² vs the human's 3.5 on A4, captions 300 px from their block,
+  `arrange` on a seated block a no-op. → lane/reseat.
+- `place_parts` marked a lone pin on an author-named net no-connect (route.rs
+  `terms.len() < 2`), so port nets came out bare and the model spent 55 requests
+  (current-sense#0) and 27 (ddr#1) re-naming them. Fixed 86b8aeea: labelled on a stub.
+  Replay labels 837→853, text collisions 7→2; reviewer KEEP on three fixtures.
+- Machine names printed as labels: `N$3`/`N$7` (the dataset's unnamed nets, which
+  `machine_parts` does not recognise) and `N_U11_8` (INA240's pin 8 is named `+`, so
+  no readable name exists; the human wires it). Open.
