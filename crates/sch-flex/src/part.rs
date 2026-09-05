@@ -122,7 +122,7 @@ impl<'a> Part<'a> {
         self.pins
             .iter()
             .position(|p| std::ptr::eq(*p, pin))
-            .is_some_and(|i| self.attach.get(i).is_some_and(|room| *room > 0.0))
+            .is_some_and(|i| self.attach.get(i).is_some_and(Option::is_some))
     }
 
     /// Connectors and headers: a human mirrors the symbol to face the circuit rather than
