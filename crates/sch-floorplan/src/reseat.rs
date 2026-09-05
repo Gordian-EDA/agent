@@ -28,6 +28,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use geom::{GRID_50_MIL, Point2, Rect};
 use sch_doc::{Item, SchDoc, connect};
+use sch_flex::pack::BLOCK_GAP;
 use sch_model::text::TextKind;
 
 /// How far a caption may sit from the frame it names, in mm — the same reach
@@ -226,12 +227,19 @@ pub fn pieces(doc: &SchDoc) -> Option<Vec<Piece>> {
     for (i, item) in items.iter().enumerate() {
         let Item::Text(t) = item else { continue };
         let at = t.at.point();
-        let near = rects
-            .iter()
-            .map(|(_, frame, root)| (gap(frame, at), *root))
-            .filter(|(d, _)| *d <= CAPTION_REACH)
-            .min_by(|a, b| a.0.total_cmp(&b.0))
-            .map(|(_, root)| root)
+        // A caption NAMES its block, so the name is what it travels by. Geometry is the
+        // fallback for a title the author gave the block instead: taking the nearest
+        // frame is what carried `mechanical` off under its neighbour's outline.
+        let named = first.get(t.text.as_str()).map(|i| sets.find(*i));
+        let near = named
+            .or_else(|| {
+                rects
+                    .iter()
+                    .map(|(_, frame, root)| (gap(frame, at), *root))
+                    .filter(|(d, _)| *d <= CAPTION_REACH)
+                    .min_by(|a, b| a.0.total_cmp(&b.0))
+                    .map(|(_, root)| root)
+            })
             .or_else(|| nearest(&Rect::new(at.x, at.y, at.x, at.y), &parts, &mut sets));
         if let Some(root) = near {
             owner.insert(i, root);
@@ -291,6 +299,25 @@ fn union(a: &Rect, b: &Rect) -> Rect {
         a.max_x.max(b.max_x),
         a.max_y.max(b.max_y),
     )
+}
+
+/// The smallest standard page holding a drawing that spans `r`, margins and the band a
+/// title block prints in included.
+fn page_for(r: &Rect) -> Option<[f64; 2]> {
+    sch_doc::standard_page([
+        r.max_x + geom::PAGE_MARGIN,
+        r.max_y + geom::PAGE_MARGIN + sch_doc::TITLE_BLOCK_BAND,
+    ])
+    .map(|(_, page)| page)
+}
+
+/// The one rectangle a set of rectangles spans. Empty is impossible here: a piece is
+/// built from at least one drawn item.
+fn span(rects: impl IntoIterator<Item = Rect>) -> Rect {
+    rects
+        .into_iter()
+        .reduce(|a, b| union(&a, &b))
+        .unwrap_or_else(|| Rect::new(0.0, 0.0, 0.0, 0.0))
 }
 
 /// Wire segments running through a net label that is not their own.
@@ -361,7 +388,23 @@ pub fn reseat(doc: &mut SchDoc) -> Reseat {
             )
         })
         .collect();
-    if seats.iter().all(|d| d.x == 0.0 && d.y == 0.0) {
+    // Re-drawing the sheet has to buy something a reader can see: a smaller page, or a
+    // full block gap of reclaimed width or height. Anything less is the same arrangement
+    // slid across the paper, and moving every part of it for that is churn.
+    let here = span(pieces.iter().map(|p| p.frame));
+    let there = span(
+        origins
+            .iter()
+            .zip(&sizes)
+            .map(|(at, (w, h))| Rect::new(at.x, at.y, at.x + w, at.y + h)),
+    );
+    let smaller_page = page_for(&there).is_some_and(|page| {
+        doc.page()
+            .is_some_and(|now| page[0] * page[1] < now[0] * now[1] - geom::EPS)
+    });
+    let roomier = there.width() <= here.width() - BLOCK_GAP
+        || there.height() <= here.height() - BLOCK_GAP;
+    if !smaller_page && !roomier {
         return held;
     }
 

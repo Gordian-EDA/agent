@@ -114,13 +114,6 @@ pub fn to_doc(writer: SchematicWriter) -> sch_doc::Result<SchDoc> {
 /// what the sheet as a whole spans. [`sch_doc::SchDoc::refit_page`] settles both, moving
 /// only the block just adopted: the sheet's own parts are the caller's, and a graft that
 /// slid them would be an edit nobody asked for.
-///
-/// Then the whole sheet is packed again from the frames its blocks have now DRAWN
-/// ([`crate::reseat`]). A seat works from a claim, which is an upper bound and is only
-/// ever taken beside what is already down, so a sheet built one call at a time keeps the
-/// slack of every call before it. This is the only pass that can give that back, and it
-/// gives back nothing it cannot prove: an identical netlist, no new body overlap, and a
-/// smaller sheet, or the arrangement stands as it was.
 pub fn graft(doc: &mut SchDoc, writer: SchematicWriter) -> sch_doc::Result<Vec<String>> {
     let sheet = to_doc(writer)?;
     replace_frames(doc, &sheet);
@@ -129,7 +122,6 @@ pub fn graft(doc: &mut SchDoc, writer: SchematicWriter) -> sch_doc::Result<Vec<S
     drop_stray_labels(doc);
     debug_assert_unique_wire_segments(doc);
     doc.refit_page(&seated);
-    crate::reseat::reseat(doc);
     Ok(adopted)
 }
 
