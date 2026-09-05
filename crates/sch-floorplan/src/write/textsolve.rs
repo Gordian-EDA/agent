@@ -604,16 +604,24 @@ impl SchematicWriter {
     /// and field text move around a rail name rather than the reverse.
     ///
     /// Acceptance relaxes in tiers, nearest spot first within each, until every
-    /// name is seated. The tiers are exactly the obstacle classes, told apart by
-    /// their [`sch_model::text::Owner`]:
+    /// name is seated. The tiers are the obstacle classes, told apart by their
+    /// [`sch_model::text::Owner`]:
     ///
-    /// 1. clear of everything;
-    /// 2. crossing a WIRE ([`Owner::Net`]) allowed — a name over a wire still reads;
+    /// 1. clear of everything, the movable labels' current spots included —
+    ///    outranking a label is not a reason to evict one that has nowhere else
+    ///    to go, when this rail does;
+    /// 2. crossing a WIRE ([`Owner::Net`]) allowed — a name over a wire still
+    ///    reads — and the labels' courtesy dropped;
     /// 3. crossing a BODY ([`Owner::Symbol`]) allowed too, leaving only unowned
     ///    ink — pin text, no-connects, fixed labels — to dodge. Two names merged
     ///    into one unreadable run is the artifact worth avoiding longest.
     ///
-    /// A name that clears nothing even then takes its nearest candidate anyway.
+    /// A name that clears nothing even then takes its least-buried candidate.
+    ///
+    /// The one name that goes undrawn is a duplicate: a part's repeated power
+    /// pins share an endpoint, so its ten grounds are ten `power:GND` symbols on
+    /// ONE point, drawing as ONE glyph. That glyph gets one name and the stack's
+    /// other nine are [`Instance::val_hidden`] — no glyph is left unnamed.
     fn seat_rail_names(
         &mut self,
         obstacles: &[sch_model::text::Obstacle],
@@ -633,14 +641,15 @@ impl SchematicWriter {
         // as a SINGLE glyph and take a single name; the rest would pile ten
         // copies of "GND" on top of each other and each other's neighbours.
         let mut seen: BTreeSet<((u64, u64), String)> = BTreeSet::new();
+        for inst in &mut self.instances {
+            inst.val_hidden = false;
+        }
         order.retain(|&i| {
             let inst = &self.instances[i];
-            seen.insert((bits(inst.at), inst.value.clone()))
+            let first = seen.insert((bits(inst.at), inst.value.clone()));
+            self.instances[i].val_hidden = !first;
+            first
         });
-        for i in 0..self.instances.len() {
-            self.instances[i].val_hidden =
-                self.instances[i].refdes.starts_with('#') && !order.contains(&i);
-        }
         let seats: Vec<Vec<(TextPos, Rect)>> =
             order.iter().map(|&i| self.rail_name_seats(i)).collect();
 
@@ -721,16 +730,15 @@ impl SchematicWriter {
             .unwrap_or(Dir::North)
     }
 
-    /// Candidate seats for one power symbol's rail name, nearest first: beyond
-    /// the glyph tip, then to either side of it, that ring repeated at two
-    /// further removes so a glyph in a crowd still has somewhere legible to put
-    /// its name.
+    /// Candidate seats for one power symbol's rail name, nearest first: every
+    /// spot beyond the glyph tip, at [`RAIL_NAME_RINGS`] increasing removes, then
+    /// the same rings to either side of it.
     ///
-    /// Offsets are measured from the DRAWN glyph — a stubby ~2.5 mm wedge on one
-    /// side of the anchor — not from the symbol's placement cell, which
-    /// `approx_size` floors to 10 mm square: seating off the cell strands the
-    /// name 5 mm out in open space and leaves two rails a hand's width apart
-    /// declaring each other blocked.
+    /// Offsets are measured from the DRAWN glyph — a stubby wedge on one side of
+    /// the anchor — not from the symbol's placement cell, which `approx_size`
+    /// floors to 10 mm square: seating off the cell strands the name 5 mm out in
+    /// open space and leaves two rails a hand's width apart declaring each other
+    /// blocked.
     ///
     /// Each candidate is the anchor the writer will emit, boxed by the model that
     /// measures what KiCAD then draws there — so a spot the solver approves is a
