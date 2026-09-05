@@ -2073,6 +2073,14 @@ fn emit_local_power(
         if split_flag.is_some_and(|(flag_idx, _)| k == flag_idx) {
             continue;
         }
+        // Two pins on one point — a symbol's stacked supply pins, or one pin the
+        // sheet lists twice — already share the symbol the first of them was given.
+        if rail_taps
+            .iter()
+            .any(|p| (p[0] - ep[0]).abs() < EPS && (p[1] - ep[1]).abs() < EPS)
+        {
+            continue;
+        }
         if let Some(near) = rail_taps
             .iter()
             .map(|&p| {
