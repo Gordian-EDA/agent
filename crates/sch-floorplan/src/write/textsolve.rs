@@ -644,6 +644,20 @@ impl SchematicWriter {
         let seats: Vec<Vec<(TextPos, Rect)>> =
             order.iter().map(|&i| self.rail_name_seats(i)).collect();
 
+        // Where the movable labels currently sit. They are solved AFTER the rail
+        // names and will give way, so this is not a constraint — but a rail with
+        // a free alternative should take it rather than evict a label that then
+        // has nowhere of its own to go.
+        let courtesy: Vec<Obstacle> = self
+            .labels
+            .iter()
+            .filter(|l| !matches!(l.anchor, Anchor::Fixed))
+            .map(|l| Obstacle {
+                bbox: label_rect(l, l.at, l.dir),
+                owner: None,
+            })
+            .collect();
+
         let tiers: [fn(&Owner) -> bool; 3] = [
             |_| true,
             |o| !matches!(o, Owner::Net(_)),
@@ -659,6 +673,7 @@ impl SchematicWriter {
                 .iter()
                 .filter(|o| o.owner.as_ref().is_none_or(keeps))
                 .chain(placed.iter())
+                .chain(if tier == 0 { courtesy.as_slice() } else { &[] })
                 .cloned()
                 .collect();
             let movables: Vec<sch_model::text::Movable> = pending
