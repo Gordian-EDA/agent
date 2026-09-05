@@ -89,6 +89,24 @@ fn main() {
         });
         let ink: f64 = fr.iter().map(|f| f.width() * f.height()).sum();
         let hull_area = hull.map_or(0.0, |h| h.width() * h.height());
+        let tight = compacted(&fr);
+        let tight_hull = tight.iter().copied().reduce(|a, b| {
+            Rect::new(
+                a.min_x.min(b.min_x),
+                a.min_y.min(b.min_y),
+                a.max_x.max(b.max_x),
+                a.max_y.max(b.max_y),
+            )
+        });
+        let tight_area = tight_hull.map_or(0.0, |h| h.width() * h.height());
+        let mut tight_over = 0;
+        for i in 0..tight.len() {
+            for j in (i + 1)..tight.len() {
+                if tight[i].overlaps(&tight[j]) {
+                    tight_over += 1;
+                }
+            }
+        }
         let page = doc
             .page()
             .map(|p| format!("{:.0}x{:.0}", p[0], p[1]))
@@ -99,14 +117,61 @@ fn main() {
         tr += railcuts;
         println!(
             "{name}: frames={} overlap_pairs={over} cut_texts={cuts} (rail={railcuts}) \
-             page={page} frame_area={ink:.0} hull={hull_area:.0} free={:.0}%",
+             page={page} frame_area={ink:.0} hull={hull_area:.0} free={:.0}% \
+             compact_hull={tight_area:.0} compact_free={:.0}% compact_overlaps={tight_over}",
             fr.len(),
             if hull_area > 0.0 {
                 100.0 * (1.0 - ink / hull_area)
             } else {
                 0.0
             },
+            if tight_area > 0.0 {
+                100.0 * (1.0 - ink / tight_area)
+            } else {
+                0.0
+            },
         );
     }
     println!("TOTAL frames={tf} overlap_pairs={to} cut_texts={tc} rail_cuts={tr}");
+}
+
+/// `frames` slid left and down until each is [`GAP`] from its neighbours and the margin —
+/// what a post-seat compaction could reclaim if nothing else on the sheet held it.
+fn compacted(frames: &[Rect]) -> Vec<Rect> {
+    const GAP: f64 = 7.62;
+    let mut out = frames.to_vec();
+    let mut order: Vec<usize> = (0..out.len()).collect();
+    order.sort_by(|a, b| {
+        out[*a]
+            .min_y
+            .total_cmp(&out[*b].min_y)
+            .then(out[*a].min_x.total_cmp(&out[*b].min_x))
+    });
+    for _ in 0..8 {
+        for &i in &order {
+            let me = out[i];
+            let others: Vec<Rect> = out
+                .iter()
+                .enumerate()
+                .filter(|(j, _)| *j != i)
+                .map(|(_, r)| *r)
+                .collect();
+            let left = others
+                .iter()
+                .filter(|o| o.min_y - GAP < me.max_y && o.max_y + GAP > me.min_y)
+                .filter(|o| o.max_x <= me.min_x)
+                .map(|o| o.max_x + GAP)
+                .fold(geom::PAGE_MARGIN, f64::max);
+            out[i] = Rect::new(left, me.min_y, left + me.width(), me.max_y);
+            let me = out[i];
+            let down = others
+                .iter()
+                .filter(|o| o.min_x - GAP < me.max_x && o.max_x + GAP > me.min_x)
+                .filter(|o| o.max_y <= me.min_y)
+                .map(|o| o.max_y + GAP)
+                .fold(geom::PAGE_MARGIN, f64::max);
+            out[i] = Rect::new(me.min_x, down, me.max_x, down + me.height());
+        }
+    }
+    out
 }
