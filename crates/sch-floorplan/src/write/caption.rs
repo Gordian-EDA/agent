@@ -38,29 +38,43 @@ const WRAP_MAX: f64 = 90.0;
 /// Two rungs: a caption further off than that has stopped looking like it
 /// belongs to the block, which is worse than the overlap it bought.
 const PUSH_STEPS: usize = 2;
+/// How many parts a block needs before its outline is worth drawing.
+///
+/// A dashed rectangle around one resistor says nothing its caption does not already say,
+/// and reads as a mistake beside a frame holding a dozen parts — the reference sheets
+/// this engine is measured against draw no frames at all, so the safe direction is fewer.
+/// A pair still reads as a pair; three is where a frame starts doing the grouping work.
+const FRAMED_MIN_PARTS: usize = 3;
 
 impl SchematicWriter {
     /// Draw one dashed frame per block, captioned with its title and note.
     ///
     /// Every frame is drawn first, so a caption can be seated knowing where all of
     /// them are; the captions then go down in the given order, each avoiding the
-    /// ones already seated. A block with no parts on this sheet draws nothing.
+    /// ones already seated. A block with no parts on this sheet draws nothing, and a
+    /// block under [`FRAMED_MIN_PARTS`] draws its caption alone — its rectangle is
+    /// still measured, because the caption is seated against it and no other caption
+    /// may sit in it.
     ///
     /// Call AFTER [`SchematicWriter::prepare`], so the fields are where the solver
     /// put them; `prepare` is idempotent and re-running it reframes the sheet with
     /// the decoration included.
     pub fn add_block_frames(&mut self, blocks: &[BlockFrame<'_>]) {
+        let cores: Vec<Option<Rect>> =
+            blocks.iter().map(|b| self.member_bbox(b.members)).collect();
         let framed: Vec<(usize, Rect)> = blocks
             .iter()
             .enumerate()
-            .filter_map(|(i, b)| Some((i, self.block_frame(b.members)?)))
+            .filter_map(|(i, b)| Some((i, self.block_frame(b.members, i, &cores)?)))
             .collect();
         for (i, frame) in &framed {
-            self.add_rect(
-                [frame.min_x, frame.min_y],
-                [frame.max_x, frame.max_y],
-                blocks[*i].title,
-            );
+            if blocks[*i].members.len() >= FRAMED_MIN_PARTS {
+                self.add_rect(
+                    [frame.min_x, frame.min_y],
+                    [frame.max_x, frame.max_y],
+                    blocks[*i].title,
+                );
+            }
         }
 
         let ink = self.ink_boxes();
@@ -114,12 +128,12 @@ impl SchematicWriter {
     ///
     /// One block at a time is all an incremental call holds, so on that path there are no
     /// foreign parts to test and the reach is taken on trust.
-    fn block_frame(&self, members: &[String]) -> Option<Rect> {
+    fn block_frame(&self, members: &[String], mine: usize, cores: &[Option<Rect>]) -> Option<Rect> {
         let tight = self.member_bbox(members)?.inflate(FRAME_PAD);
-        let Some(labels) = self.member_label_bbox(members) else {
+        let Some(hanging) = self.member_hanging_ink(members, mine, cores) else {
             return Some(tight);
         };
-        let want = labels.inflate(FRAME_PAD);
+        let want = hanging.inflate(FRAME_PAD);
         let foreign = self.foreign_part_ink(members);
         let mut frame = tight;
         for side in 0..4 {
@@ -184,26 +198,48 @@ impl SchematicWriter {
         bbox
     }
 
-    /// The box around the net labels a block's parts carry — the ink a frame drawn to
-    /// the bodies alone cuts through, which is what a mirrored connector's label column
-    /// runs into. A pin label's uuid key names the part it hangs off.
-    fn member_label_bbox(&self, members: &[String]) -> Option<Rect> {
-        self.labels
+    /// The box around everything that hangs off a block's parts without being one: the
+    /// net labels on their pins, the port labels on the nets that leave, and the rail
+    /// symbols standing on their supply pins — glyph AND the name KiCAD prints beside it.
+    ///
+    /// This is the ink a frame drawn to the bodies alone cuts through. Only a pin
+    /// label's uuid key names the part it hangs off; a port label is keyed on its tap
+    /// point and a rail symbol carries no member at all, so both are claimed by
+    /// PROXIMITY — the block whose parts they stand nearest to, and only when that block
+    /// is `mine`. `cores` is every block's parts-only box, in the caller's order.
+    fn member_hanging_ink(
+        &self,
+        members: &[String],
+        mine: usize,
+        cores: &[Option<Rect>],
+    ) -> Option<Rect> {
+        let owned = |at: Point2| nearest_block(at, cores) == Some(mine);
+        let labels = self.labels.iter().filter_map(|label| {
+            let named = members
+                .iter()
+                .any(|refdes| label.uuid_key.starts_with(&format!("{refdes}:")));
+            (named || owned(label.at)).then(|| label_rect(label, label.at, label.dir))
+        });
+        let rails = self
+            .instances
             .iter()
-            .filter(|label| {
-                members
-                    .iter()
-                    .any(|refdes| label.uuid_key.starts_with(&format!("{refdes}:")))
+            .filter(|inst| inst.refdes.starts_with('#') && owned(inst.at))
+            .flat_map(|inst| {
+                let glyph = super::build::ink_box(inst);
+                let (_, v) = field_anchors(inst);
+                let name = (!inst.val_hidden && !inst.value.is_empty())
+                    .then(|| field_box(v.at, v.justify, &inst.value));
+                [Some(glyph), name]
             })
-            .map(|label| super::label_rect(label, label.at, label.dir))
-            .reduce(|a, b| {
-                Rect::new(
-                    a.min_x.min(b.min_x),
-                    a.min_y.min(b.min_y),
-                    a.max_x.max(b.max_x),
-                    a.max_y.max(b.max_y),
-                )
-            })
+            .flatten();
+        labels.chain(rails).reduce(|a, b| {
+            Rect::new(
+                a.min_x.min(b.min_x),
+                a.min_y.min(b.min_y),
+                a.max_x.max(b.max_x),
+                a.max_y.max(b.max_y),
+            )
+        })
     }
 
     /// Ink drawn by a real part this block does not hold: its body and field text.
@@ -271,6 +307,23 @@ impl SchematicWriter {
         }
         ink
     }
+}
+
+/// Which of `cores` a piece of unowned ink at `at` belongs to: the block whose parts it
+/// stands nearest to. A sheet drawn one block at a time has exactly one, which is why an
+/// incremental frame can claim everything hanging off it.
+fn nearest_block(at: Point2, cores: &[Option<Rect>]) -> Option<usize> {
+    let reach = |r: &Rect| {
+        let dx = (r.min_x - at.x).max(at.x - r.max_x).max(0.0);
+        let dy = (r.min_y - at.y).max(at.y - r.max_y).max(0.0);
+        dx.hypot(dy)
+    };
+    cores
+        .iter()
+        .enumerate()
+        .filter_map(|(i, core)| core.as_ref().map(|r| (i, reach(r))))
+        .min_by(|a, b| a.1.total_cmp(&b.1))
+        .map(|(i, _)| i)
 }
 
 /// The least-fouled seat for `text` among `corners`, as (fouled area, anchor,
@@ -419,6 +472,21 @@ mod tests {
             wrapped.split_whitespace().collect::<Vec<_>>(),
             note.split_whitespace().collect::<Vec<_>>(),
         );
+    }
+
+    /// A label between two blocks belongs to the one whose parts it stands nearer to —
+    /// the rule that stops a frame reaching over its neighbour's rail names. A sheet
+    /// drawn one block at a time has exactly one block, so everything on it is that
+    /// block's.
+    #[test]
+    fn hanging_ink_goes_to_the_block_it_stands_nearest() {
+        let left = Rect::new(0.0, 0.0, 20.0, 20.0);
+        let right = Rect::new(60.0, 0.0, 80.0, 20.0);
+        let cores = [Some(left), Some(right)];
+        assert_eq!(nearest_block(Point2::new(25.0, 10.0), &cores), Some(0));
+        assert_eq!(nearest_block(Point2::new(55.0, 10.0), &cores), Some(1));
+        assert_eq!(nearest_block(Point2::new(500.0, 10.0), &[Some(left)]), Some(0));
+        assert_eq!(nearest_block(Point2::new(0.0, 0.0), &[None]), None);
     }
 
     #[test]

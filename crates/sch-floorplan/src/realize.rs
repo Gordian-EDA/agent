@@ -142,19 +142,33 @@ fn unwrapped(text: &str) -> String {
 /// its outline and a note a clear line below, so anything further off is another block's.
 const CAPTION_REACH: f64 = 12.7;
 
-/// The frame `at` is seated against: the nearest one within [`CAPTION_REACH`].
-fn worn_frame(at: geom::Point2, frames: &[geom::Rect]) -> Option<geom::Rect> {
-    let gap = |f: &geom::Rect| {
-        let dx = (f.min_x - at.x).max(at.x - f.max_x).max(0.0);
-        let dy = (f.min_y - at.y).max(at.y - f.max_y).max(0.0);
+/// The caption `frame` wears: the nearest one within [`CAPTION_REACH`].
+fn nearest_caption<'a>(
+    frame: &geom::Rect,
+    captions: &'a [(String, geom::Point2)],
+) -> Option<&'a str> {
+    let gap = |at: &geom::Point2| {
+        let dx = (frame.min_x - at.x).max(at.x - frame.max_x).max(0.0);
+        let dy = (frame.min_y - at.y).max(at.y - frame.max_y).max(0.0);
         dx.hypot(dy)
     };
-    frames
+    captions
         .iter()
-        .map(|f| (gap(f), f))
+        .map(|(text, at)| (gap(at), text))
         .filter(|(d, _)| *d <= CAPTION_REACH)
         .min_by(|a, b| a.0.total_cmp(&b.0))
-        .map(|(_, f)| *f)
+        .map(|(_, text)| text.as_str())
+}
+
+/// Every block frame drawn on `doc`.
+fn frame_rects(doc: &SchDoc) -> Vec<geom::Rect> {
+    doc.items()
+        .iter()
+        .filter_map(|item| match item {
+            sch_doc::Item::Rectangle(r) => Some(geom::Rect::from_points(r.start, r.end)),
+            _ => None,
+        })
+        .collect()
 }
 
 /// Drop the block frames `sheet` is about to redraw — and only those.
@@ -169,37 +183,36 @@ fn worn_frame(at: geom::Point2, frames: &[geom::Rect]) -> Option<geom::Rect> {
 /// reserved less sheet than the frame drew, so adjacent frames intersected by
 /// construction. They no longer do ([`sch_flex::pack::block_frame`]), so overlap says
 /// nothing about whose frame a rectangle is.
+///
+/// Ownership runs from the FRAME outward, not from the caption: a rectangle belongs to
+/// the caption nearest it, and is stale when that caption is one this sheet redraws. A
+/// block too small to be worth an outline draws its caption bare, and a bare caption
+/// asking for the nearest rectangle would carry off its neighbour's — where a frame
+/// asking for its nearest caption always finds the title seated against its own corner.
 fn replace_frames(doc: &mut SchDoc, sheet: &SchDoc) {
-    let mut redrawn = false;
-    let mut captions: BTreeSet<String> = BTreeSet::new();
-    for item in sheet.items() {
-        match item {
-            sch_doc::Item::Rectangle(_) => redrawn = true,
-            sch_doc::Item::Text(t) => {
-                captions.insert(unwrapped(&t.text));
-            }
-            _ => {}
-        }
-    }
-    if !redrawn {
-        return;
-    }
-    let frames: Vec<geom::Rect> = doc
+    let captions: BTreeSet<String> = sheet
         .items()
         .iter()
         .filter_map(|item| match item {
-            sch_doc::Item::Rectangle(r) => Some(geom::Rect::from_points(r.start, r.end)),
+            sch_doc::Item::Text(t) => Some(unwrapped(&t.text)),
             _ => None,
         })
         .collect();
-    let stale: Vec<geom::Rect> = doc
+    if captions.is_empty() {
+        return;
+    }
+    let seated: Vec<(String, geom::Point2)> = doc
         .items()
         .iter()
         .filter_map(|item| match item {
-            sch_doc::Item::Text(t) if captions.contains(&unwrapped(&t.text)) => {
-                worn_frame(t.at.point(), &frames)
-            }
+            sch_doc::Item::Text(t) => Some((unwrapped(&t.text), t.at.point())),
             _ => None,
+        })
+        .collect();
+    let stale: Vec<geom::Rect> = frame_rects(doc)
+        .into_iter()
+        .filter(|frame| {
+            nearest_caption(frame, &seated).is_some_and(|text| captions.contains(text))
         })
         .collect();
     doc.retain_drawing(|item| match item {
@@ -292,6 +305,23 @@ mod tests {
             vec![neighbour],
             "the redrawn block's old frame goes, the neighbour's stays"
         );
+    }
+
+    /// A block too small for an outline draws its caption bare. Redrawing it must not
+    /// carry off the frame of the neighbour it happens to sit against.
+    #[test]
+    fn a_bare_caption_leaves_its_neighbours_frame_alone() {
+        let neighbour = geom::Rect::new(25.4, 50.8, 76.2, 101.6);
+        let mut sheet = SchematicWriter::new();
+        captioned(&mut sheet, "regulators", neighbour);
+        sheet.add_text("mcu", [30.48, 106.68], 2.54, true, "mcu:title");
+        let mut doc = to_doc(sheet).unwrap();
+
+        let mut redraw = SchematicWriter::new();
+        redraw.add_text("mcu", [30.48, 152.4], 2.54, true, "mcu:title");
+        replace_frames(&mut doc, &to_doc(redraw).unwrap());
+
+        assert_eq!(frames(&doc), vec![neighbour], "the neighbour's frame went with a bare caption");
     }
 
     #[cfg(debug_assertions)]
