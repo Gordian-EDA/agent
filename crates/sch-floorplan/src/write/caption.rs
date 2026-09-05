@@ -38,13 +38,23 @@ const WRAP_MAX: f64 = 90.0;
 /// Two rungs: a caption further off than that has stopped looking like it
 /// belongs to the block, which is worse than the overlap it bought.
 const PUSH_STEPS: usize = 2;
+/// How many parts a block needs before its outline is worth drawing.
+///
+/// A dashed rectangle around one resistor says nothing its caption does not already say,
+/// and reads as a mistake beside a frame holding a dozen parts — the reference sheets
+/// this engine is measured against draw no frames at all, so the safe direction is fewer.
+/// A pair still reads as a pair; three is where a frame starts doing the grouping work.
+const FRAMED_MIN_PARTS: usize = 3;
 
 impl SchematicWriter {
     /// Draw one dashed frame per block, captioned with its title and note.
     ///
     /// Every frame is drawn first, so a caption can be seated knowing where all of
     /// them are; the captions then go down in the given order, each avoiding the
-    /// ones already seated. A block with no parts on this sheet draws nothing.
+    /// ones already seated. A block with no parts on this sheet draws nothing, and a
+    /// block under [`FRAMED_MIN_PARTS`] draws its caption alone — its rectangle is
+    /// still measured, because the caption is seated against it and no other caption
+    /// may sit in it.
     ///
     /// Call AFTER [`SchematicWriter::prepare`], so the fields are where the solver
     /// put them; `prepare` is idempotent and re-running it reframes the sheet with
@@ -58,11 +68,13 @@ impl SchematicWriter {
             .filter_map(|(i, b)| Some((i, self.block_frame(b.members, i, &cores)?)))
             .collect();
         for (i, frame) in &framed {
-            self.add_rect(
-                [frame.min_x, frame.min_y],
-                [frame.max_x, frame.max_y],
-                blocks[*i].title,
-            );
+            if blocks[*i].members.len() >= FRAMED_MIN_PARTS {
+                self.add_rect(
+                    [frame.min_x, frame.min_y],
+                    [frame.max_x, frame.max_y],
+                    blocks[*i].title,
+                );
+            }
         }
 
         let ink = self.ink_boxes();
