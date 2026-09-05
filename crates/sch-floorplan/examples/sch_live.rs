@@ -2,8 +2,8 @@
 //!
 //! ```text
 //! sch_live place-parts <sch> <input.json>
-//! sch_live arrange     <sch> R1,R2,…
-//! sch_live rewire      <sch> R1,R2,…
+//! sch_live arrange     <sch> R1,R2,… | @block
+//! sch_live rewire      <sch> R1,R2,… | @block
 //! ```
 //!
 //! The schematic is edited in place — created blank if it does not exist — and the
@@ -62,9 +62,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// `R1,R2,R3`, or four numbers `x1,y1,x2,y2` for a bounding box.
+/// `R1,R2,R3`, four numbers `x1,y1,x2,y2` for a bounding box, or `@name` for a block.
 fn selection(rest: &[&str]) -> Result<Selection, Box<dyn std::error::Error>> {
     let list = rest.first().ok_or("missing selection")?;
+    if let Some(block) = list.strip_prefix('@') {
+        return Ok(Selection::Block(block.to_string()));
+    }
     let parts: Vec<&str> = list
         .split(',')
         .map(str::trim)
