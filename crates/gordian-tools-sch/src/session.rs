@@ -305,6 +305,13 @@ impl Edit {
         // drew it, and the net delta below is what proves the drop changed nothing.
         let shadowed = sch_doc::power_shadowed_labels(&self.doc);
         self.doc.remove_drawing(&shadowed);
+        // A label whose anchor touches no conductor names nothing — KiCAD calls it
+        // `label_dangling` and it is an ERC error. Whichever tool cut the wire or
+        // moved the part out from under it, the name it left behind carries no
+        // connection, so dropping it here is netlist-neutral by construction and
+        // the delta below is what proves it.
+        let stray = sch_doc::stray_labels(&self.doc);
+        self.doc.remove_drawing(&stray);
         let wire_faults = self.doc.wire_faults();
         if !wire_faults.is_empty() {
             self.doc.restore(self.rollback)?;

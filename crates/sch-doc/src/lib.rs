@@ -68,6 +68,7 @@ mod page;
 mod pins;
 mod sexpr;
 mod shadow;
+mod stray;
 mod text;
 
 pub use body::{body_rect, body_rects, definition_unit_box};
@@ -85,6 +86,7 @@ pub use model::{
 pub use page::{PageFit, STANDARD_PAGES, TITLE_BLOCK_BAND, standard_page};
 pub use pins::{PlacedPin, placed_pins};
 pub use shadow::power_shadowed_labels;
+pub use stray::stray_labels;
 pub use text::{escape, unescape};
 
 /// Pretty-print one top-level item, bypassing its retained bytes — the path an

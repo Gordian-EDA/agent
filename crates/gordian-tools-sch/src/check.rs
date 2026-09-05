@@ -276,13 +276,22 @@ fn contains_name(text: &str, name: &str) -> bool {
     })
 }
 
+/// What may not follow a reference designator without making it a different one.
+/// `#PWR_+3V3_0_5` is one name, so `#PWR_+3V3_0` does not occur in it: without
+/// this, a rail glyph answers for a longer-named sibling and every fix planned
+/// from that finding names the wrong symbol. A `.` is excluded for the older
+/// reason — it starts a pin number, and the pin is the more specific subject.
+fn continues_refdes(character: char) -> bool {
+    character.is_ascii_alphanumeric() || matches!(character, '_' | '.')
+}
+
 fn contains_refdes(text: &str, reference: &str) -> bool {
     text.match_indices(reference).any(|(start, _)| {
         let end = start + reference.len();
         let before = text[..start].chars().next_back();
         let after = text[end..].chars().next();
         before.is_none_or(|character| !character.is_ascii_alphanumeric())
-            && after.is_none_or(|character| !character.is_ascii_alphanumeric() && character != '.')
+            && after.is_none_or(|character| !continues_refdes(character))
     })
 }
 
@@ -297,6 +306,7 @@ fn strip_subject_prefix(message: String, refs: &[String], nets: &[String]) -> St
 #[derive(Clone)]
 struct FixPin {
     id: String,
+    at: geom::Point2,
     refdes: String,
     name: String,
     etype: String,
@@ -307,6 +317,9 @@ struct FixPin {
 struct FixPlanner {
     /// Rail glyphs KiCAD reported as bare, gathered before any fix is planned.
     bare_rails: BTreeSet<String>,
+    /// Every label on the sheet whose anchor touches no conductor, by UUID and
+    /// text. Read from the drawing, not from ERC: one call takes them all.
+    stray_labels: Vec<(String, String)>,
     pins: Vec<FixPin>,
     parts: BTreeMap<String, String>,
     rotations: BTreeMap<String, f64>,
@@ -326,6 +339,7 @@ impl FixPlanner {
                         .iter()
                         .any(|loose| loose.refdes == pin.refdes && loose.pin == pin.number),
                     id,
+                    at: pin.at,
                     refdes: pin.refdes,
                     name: pin.name,
                     etype: pin.etype,
@@ -350,8 +364,15 @@ impl FixPlanner {
             .symbols()
             .map(|symbol| (symbol.refdes().to_string(), symbol.at.rot))
             .collect();
+        let strays: BTreeSet<String> = sch_doc::stray_labels(doc).into_iter().collect();
+        let stray_labels = doc
+            .labels()
+            .filter(|label| strays.contains(&label.uuid))
+            .map(|label| (label.uuid.clone(), sch_doc::unescape(&label.text)))
+            .collect();
         Self {
             bare_rails: BTreeSet::new(),
+            stray_labels,
             pins,
             parts,
             rotations,
@@ -403,6 +424,10 @@ impl FixPlanner {
                 self.polarity(finding)
             } else if is_assignable_footprint(&code, &message) {
                 self.footprint(finding, ctx)
+            } else if code == "pin-not-driven" {
+                self.undriven_dead_end(finding)
+            } else if code == "label-dangling" {
+                self.stray_label()
             } else if is_connection_finding(&code, &message) {
                 self.connection(finding)
             } else {
@@ -415,8 +440,7 @@ impl FixPlanner {
             finding.why =
                 "No same-net or same-function endpoint proves the intended connection.".to_string();
         } else if is_output_conflict(&code, &message) {
-            finding.why =
-                "The finding does not identify which driver should be disconnected.".to_string();
+            finding.why = self.rival_drivers(finding);
         } else if is_assignable_footprint(&code, &message) {
             finding.why =
                 "No installed footprint matches both the symbol family and its pad numbers."
@@ -547,7 +571,7 @@ impl FixPlanner {
             ));
         }
         let desired_net = finding.nets.first().or(from.net.as_ref());
-        let to = desired_net
+        let Some(to) = desired_net
             .and_then(|net| {
                 self.pins
                     .iter()
@@ -555,7 +579,10 @@ impl FixPlanner {
                     .filter(|pin| pin.net.as_ref() == Some(net))
                     .min_by(|left, right| left.id.cmp(&right.id))
             })
-            .or_else(|| self.intent_matched_pin(from))?;
+            .or_else(|| self.intent_matched_pin(from))
+        else {
+            return self.deliberately_unused(finding, from);
+        };
         let (from, to) = if from.unconnected && to.unconnected && from.id > to.id {
             (to, from)
         } else {
@@ -576,6 +603,39 @@ impl FixPlanner {
                     to.id, from.id
                 ),
             },
+        ))
+    }
+
+    /// The shell of a connector, its shield, its mounting posts: pins a board
+    /// leaves open on purpose, which is why the drawing has nothing to connect
+    /// them to and nothing that hints at what it would be.
+    ///
+    /// A no-connect marker on one is netlist-neutral — the extractor reads the
+    /// pin as unconnected before the marker and after it — and it is the only
+    /// statement KiCAD accepts for a pin left out deliberately. It is offered
+    /// only for a pin that really is loose, never for a signal pin, whose
+    /// silence is a missing connection rather than a decision, and never for a
+    /// rail glyph, whose repair is to take the glyph away.
+    fn deliberately_unused(&self, finding: &Finding, pin: &FixPin) -> Option<(ToolFix, String)> {
+        if !is_bare_pin_rule(&finding.code.to_ascii_lowercase().replace('_', "-"))
+            || !pin.unconnected
+            || !is_mechanical_pin(&pin.name)
+            || self.is_lone_rail_pin(pin)
+        {
+            return None;
+        }
+        Some((
+            ToolFix {
+                tool: "no_connect",
+                args: json!({"pin": pin.id}),
+            },
+            format!(
+                "{} is a shell, shield or mounting pin, and nothing on the sheet shares a net \
+                 or a pin function with it, so it is open on purpose. A marker says that and \
+                 moves no net — the pin is unconnected either way. If this board does tie the \
+                 shell to a rail, `add_power` on it instead.",
+                pin.id
+            ),
         ))
     }
 
@@ -650,8 +710,216 @@ impl FixPlanner {
             .min_by(|left, right| left.id.cmp(&right.id))
     }
 
-    fn output_conflict(&self, _finding: &Finding) -> Option<(ToolFix, String)> {
-        None
+    /// An input pin whose net reaches nothing else at all.
+    ///
+    /// KiCAD reports it undriven, and it is: the name on it goes nowhere, so no
+    /// output can ever appear on it. Nothing on the sheet can be wired to it
+    /// without inventing the connection, and a marker states what the drawing
+    /// already shows — the pin is a dead end. `no_connect` retracts the name and
+    /// the stub with it, and the net it removes had exactly this one pin, so no
+    /// pin loses a connection.
+    ///
+    /// A net with other pins on it is a different case entirely: there the wiring
+    /// is real and only its driver is missing, and severing it would be a lie.
+    fn undriven_dead_end(&self, finding: &Finding) -> Option<(ToolFix, String)> {
+        let pin = self.affected_pin(finding)?;
+        let net = pin.net.as_deref()?;
+        let sharing = self
+            .pins
+            .iter()
+            .filter(|other| other.net.as_deref() == Some(net))
+            .count();
+        if sharing != 1 {
+            return None;
+        }
+        Some((
+            ToolFix {
+                tool: "no_connect",
+                args: json!({"pin": pin.id}),
+            },
+            format!(
+                "`{net}` reaches {} and nothing else, so no output can ever drive it and no \
+                 other pin on the sheet claims that name. A marker says the pin is left out on \
+                 purpose and takes the dead-end name with it. If `{net}` was meant to reach a \
+                 part that is not on the sheet yet, place that part and `connect` it instead.",
+                pin.id
+            ),
+        ))
+    }
+
+    /// A label anchored where nothing conducts names nothing, so it is ink the
+    /// sheet can lose without losing a connection — that is the whole content of
+    /// KiCAD's `label_dangling`. One call takes every one of them, because they
+    /// all fail the same test and the netlist is the same afterwards either way.
+    ///
+    /// Re-drawing the wire the label was meant to sit on is the better repair
+    /// when the connection was intended, and the reason says so; but only the
+    /// author knows that, and no reading of the sheet can supply it.
+    fn stray_label(&self) -> Option<(ToolFix, String)> {
+        if self.stray_labels.is_empty() {
+            return None;
+        }
+        let mut names: Vec<&str> = self
+            .stray_labels
+            .iter()
+            .map(|(_, text)| text.as_str())
+            .collect();
+        names.sort_unstable();
+        names.dedup();
+        Some((
+            ToolFix {
+                tool: "delete_labels",
+                args: json!({
+                    "uuids": self.stray_labels.iter().map(|(uuid, _)| uuid).collect::<Vec<_>>()
+                }),
+            },
+            format!(
+                "{} touch no wire and no pin, so they join nothing to anything and taking \
+                 them away changes no net. If one of those names was meant to reach a pin, \
+                 `connect` that pin to the net instead — a label alone never reaches it.",
+                names.join(", ")
+            ),
+        ))
+    }
+
+    /// A `power:PWR_FLAG` states "a driver reaches this net" for a rail that has
+    /// no output pin on it. When ERC reports the flag's pin against a SECOND power
+    /// output, the net demonstrably has a real driver, so the flag is saying
+    /// something already true — and saying it a second time is the error itself.
+    ///
+    /// Taking the flag away is the whole repair: a flag drives nothing and joins
+    /// nothing, so no pin loses a net. Two flags on one net are the same case with
+    /// the redundant one picked by name, so the call is deterministic.
+    ///
+    /// Two ordinary part outputs on one net is a different thing entirely — the
+    /// drawing really does tie two supplies together — and no single call can know
+    /// which one the design meant. That one keeps its honest refusal.
+    fn output_conflict(&self, finding: &Finding) -> Option<(ToolFix, String)> {
+        if !is_power_output_conflict(
+            &finding.code.to_ascii_lowercase().replace('_', "-"),
+            &finding.message.to_ascii_lowercase(),
+        ) {
+            return None;
+        }
+        let sides = self.conflicting_pins(finding);
+        let flags: Vec<&FixPin> = sides
+            .iter()
+            .copied()
+            .filter(|pin| self.is_power_flag(pin))
+            .collect();
+        if flags.is_empty() {
+            return None;
+        }
+        // Every flag goes when a real output stays; when the net has nothing but
+        // flags, the first one says all of it and the rest are the duplication.
+        let redundant: Vec<&FixPin> = match flags.len() == sides.len() {
+            true => flags[1..].to_vec(),
+            false => flags.clone(),
+        };
+        let kept = sides
+            .iter()
+            .copied()
+            .find(|pin| !redundant.iter().any(|gone| gone.id == pin.id))?;
+        let net = kept.net.clone().unwrap_or_else(|| "that rail".to_string());
+        Some((
+            ToolFix {
+                tool: "remove_symbols",
+                args: json!({
+                    "refs": redundant.iter().map(|pin| &pin.refdes).collect::<Vec<_>>()
+                }),
+            },
+            format!(
+                "{kept_id} already drives {net}, so the flag on {gone} declares a driver the \
+                 sheet already has — and two things typed Power output on one net IS this \
+                 error. A PWR_FLAG carries no connection, so removing it leaves every pin on \
+                 {net} exactly where it was.",
+                kept_id = kept.id,
+                gone = redundant
+                    .iter()
+                    .map(|pin| pin.id.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        ))
+    }
+
+    /// Why two drivers on one net is not a one-call repair, said with the two
+    /// pins named and the sequence that does clear it spelled out.
+    /// The lone rail glyph seated on `pin`, which is what ties it to its rail when
+    /// no wire does.
+    fn seated_rail(&self, pin: &FixPin) -> Option<&FixPin> {
+        self.pins
+            .iter()
+            .filter(|glyph| glyph.id != pin.id && self.is_lone_rail_pin(glyph))
+            .find(|glyph| glyph.at.near_eq(pin.at, 1e-6))
+    }
+
+    /// The call that takes one driver off the net it shares.
+    fn disconnect_call(&self, pin: &FixPin) -> String {
+        match self.seated_rail(pin) {
+            Some(glyph) => format!("`remove_symbols {{\"refs\": [\"{}\"]}}`", glyph.refdes),
+            None => format!("`delete_wires {{\"pins\": [\"{}\"]}}`", pin.id),
+        }
+    }
+
+    fn rival_drivers(&self, finding: &Finding) -> String {
+        let sides = self.conflicting_pins(finding);
+        let [left, right] = sides.as_slice() else {
+            return "The finding does not identify which driver should be disconnected."
+                .to_string();
+        };
+        let net = left.net.clone().unwrap_or_else(|| "one net".to_string());
+        format!(
+            "{left} and {right} are both typed Power output and the drawing ties both to \
+             {net}, so the sheet really does have two supplies driving it. Do NOT add a \
+             PWR_FLAG — a flag is a third Power output and raises this same error again. \
+             Decide which one should NOT feed {net} and take it off in two calls: {cut_left} \
+             then `no_connect {{\"pin\": \"{left}\"}}` to drop {left}, or {cut_right} then \
+             `no_connect {{\"pin\": \"{right}\"}}` to drop {right}.",
+            left = left.id,
+            right = right.id,
+            cut_left = self.disconnect_call(left),
+            cut_right = self.disconnect_call(right)
+        )
+    }
+
+    /// The pins a power-output conflict is actually about.
+    ///
+    /// ERC names its two subjects as `Symbol U1 Pin 45` and `Symbol #FLG Pin 1`,
+    /// and the locator reads every refdes and every pin number out of that one
+    /// string — so `U1.1` comes along for the ride whenever the other subject is
+    /// somebody's pin 1. The finding itself says what the real pair is: two pins
+    /// typed Power output, on one net. Anything failing either test was never a
+    /// subject of it.
+    fn conflicting_pins<'a>(&'a self, finding: &Finding) -> Vec<&'a FixPin> {
+        let mut by_net: BTreeMap<&str, Vec<&FixPin>> = BTreeMap::new();
+        for pin in finding
+            .refs
+            .iter()
+            .filter_map(|reference| self.pin(reference))
+            .filter(|pin| is_power_output(&pin.etype))
+        {
+            let Some(net) = pin.net.as_deref() else {
+                continue;
+            };
+            let side = by_net.entry(net).or_default();
+            if !side.iter().any(|held| held.id == pin.id) {
+                side.push(pin);
+            }
+        }
+        let mut sides = by_net
+            .into_values()
+            .filter(|side| side.len() >= 2)
+            .max_by_key(Vec::len)
+            .unwrap_or_default();
+        sides.sort_by(|left, right| left.id.cmp(&right.id));
+        sides
+    }
+
+    fn is_power_flag(&self, pin: &FixPin) -> bool {
+        self.parts
+            .get(&pin.refdes)
+            .is_some_and(|lib_id| lib_id.eq_ignore_ascii_case("power:PWR_FLAG"))
     }
 
     /// A reversed two-pin indicator is repaired by turning the symbol in place:
@@ -797,6 +1065,12 @@ fn is_output_conflict(code: &str, message: &str) -> bool {
         || code.contains("output-to-output")
         || message.contains("conflicting drivers")
         || message.contains("multiple outputs")
+        || (code == "pin-to-pin" && message.contains("output") && message.contains("connected"))
+}
+
+/// Whether a finding is KiCAD's "two power outputs meet here".
+fn is_power_output_conflict(code: &str, message: &str) -> bool {
+    code == "pin-to-pin" && message.contains("power output") && message.contains("connected")
 }
 
 fn is_assignable_footprint(code: &str, message: &str) -> bool {
@@ -816,6 +1090,16 @@ fn is_power_output(etype: &str) -> bool {
 
 fn is_output(etype: &str) -> bool {
     matches!(etype, "output" | "tri_state")
+}
+
+/// A pin whose NAME says it is structural rather than electrical.
+fn is_mechanical_pin(name: &str) -> bool {
+    let name = name.trim().to_ascii_uppercase();
+    let stem = name.trim_end_matches(|character: char| character.is_ascii_digit());
+    matches!(
+        stem,
+        "SH" | "SHIELD" | "SHLD" | "SHELL" | "CASE" | "MP" | "MH" | "MOUNT" | "NC" | "DNC"
+    )
 }
 
 fn is_library_no_connect(etype: &str) -> bool {
@@ -965,7 +1249,9 @@ fn demote_unrepairable(findings: &mut [Finding]) -> Vec<Value> {
         }
         finding.severity = "warning".to_string();
         finding.advisory = true;
-        finding.why = unrepairable_why(&finding.code, &finding.message);
+        if let Some(why) = unrepairable_why(&finding.code, &finding.message) {
+            finding.why = why;
+        }
         reported.push(json!({
             "code": finding.code,
             "refs": finding.refs,
@@ -976,24 +1262,25 @@ fn demote_unrepairable(findings: &mut [Finding]) -> Vec<Value> {
     reported
 }
 
-/// Why no edit clears this finding, said plainly enough that the honest answer
-/// is obvious.
-fn unrepairable_why(code: &str, message: &str) -> String {
+/// Why no edit clears this finding, or `None` where the planner already named
+/// the subjects and the sequence better than a rule on the message could.
+fn unrepairable_why(code: &str, message: &str) -> Option<String> {
     let message = message.to_ascii_lowercase();
     if message.contains("power output") && message.contains("connected") {
-        return "Two library pins are both typed Power output on one rail. That is how the \
-                symbols are typed, not a fault in the wiring: leave it, or attach a single \
-                PWR_FLAG to the rail. Removing the rail symbols does not fix it."
-            .to_string();
+        return None;
     }
     if code.contains("polarity") {
-        return "This part does not have exactly two placed pins, so no half turn exchanges \
-                them. Re-pick the symbol or wire it deliberately; do not delete it."
-            .to_string();
+        return Some(
+            "This part does not have exactly two placed pins, so no half turn exchanges them. \
+             Re-pick the symbol or wire it deliberately; do not delete it."
+                .to_string(),
+        );
     }
-    "No edit clears this rule. Report it in your summary; deleting the parts it names is not \
-     a repair."
-        .to_string()
+    Some(
+        "No edit clears this rule. Report it in your summary; deleting the parts it names is \
+         not a repair."
+            .to_string(),
+    )
 }
 
 fn erc_finding(locator: &FindingLocator<'_>, violation: &kicad::Violation) -> Finding {
@@ -1601,9 +1888,10 @@ pub fn check_schematic(input: Value, ctx: &AgentRuntime) -> Result<Value> {
 mod tests {
     use super::*;
 
-    fn pin(id: &str, name: &str, etype: &str, net: Option<&str>, _x: f64) -> FixPin {
+    fn pin(id: &str, name: &str, etype: &str, net: Option<&str>, x: f64) -> FixPin {
         FixPin {
             id: id.to_owned(),
+            at: geom::Point2::from([x, 0.0]),
             refdes: id.split('.').next().unwrap().to_owned(),
             name: name.to_owned(),
             etype: etype.to_owned(),
@@ -1614,6 +1902,7 @@ mod tests {
 
     fn planner(pins: Vec<FixPin>) -> FixPlanner {
         FixPlanner {
+            stray_labels: Vec::new(),
             bare_rails: BTreeSet::new(),
             pins,
             parts: BTreeMap::new(),
@@ -1815,6 +2104,19 @@ mod tests {
             }
         );
         assert!(why.contains("functional pin U1.4"));
+    }
+
+    /// KiCAD mints `#PWR_+3V3_0` and `#PWR_+3V3_0_5` on the same sheet. Reading
+    /// the shorter one out of the longer one is what made the bare-rail repair
+    /// name a live glyph, which the commit then refused — the finding came back
+    /// every turn and no rail was ever cleared.
+    #[test]
+    fn a_refdes_is_not_read_out_of_a_longer_one() {
+        let text = "Symbol #PWR_+3V3_0_5 Pin 1 [Power input, Line]";
+        assert!(contains_refdes(text, "#PWR_+3V3_0_5"));
+        assert!(!contains_refdes(text, "#PWR_+3V3_0"));
+        assert!(!contains_refdes("Symbol U12 Pin 3", "U1"));
+        assert!(contains_refdes("Symbol U1 Pin 3", "U1"));
     }
 
     #[test]

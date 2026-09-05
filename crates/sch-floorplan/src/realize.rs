@@ -20,8 +20,8 @@ use sch_doc::SchDoc;
 use sch_model::ir::LayoutIr;
 use sch_model::item::{Incidence, Item};
 
-use crate::floorplan::place::add_orphan_label_columns;
 use crate::floorplan::place::RoutedSheetRealizer;
+use crate::floorplan::place::add_orphan_label_columns;
 use crate::write::SchematicWriter;
 
 /// How a block is drawn, beyond the items themselves.
@@ -119,6 +119,7 @@ pub fn graft(doc: &mut SchDoc, writer: SchematicWriter) -> sch_doc::Result<Vec<S
     replace_frames(doc, &sheet);
     let seated = seated_uuids(doc);
     let adopted = doc.adopt(&sheet)?;
+    drop_stray_labels(doc);
     debug_assert_unique_wire_segments(doc);
     doc.refit_page(&seated);
     Ok(adopted)
@@ -211,9 +212,7 @@ fn replace_frames(doc: &mut SchDoc, sheet: &SchDoc) {
         .collect();
     let stale: Vec<geom::Rect> = frame_rects(doc)
         .into_iter()
-        .filter(|frame| {
-            nearest_caption(frame, &seated).is_some_and(|text| captions.contains(text))
-        })
+        .filter(|frame| nearest_caption(frame, &seated).is_some_and(|text| captions.contains(text)))
         .collect();
     doc.retain_drawing(|item| match item {
         sch_doc::Item::Rectangle(r) => !stale.contains(&geom::Rect::from_points(r.start, r.end)),
@@ -229,9 +228,23 @@ pub fn graft_drawing(doc: &mut SchDoc, writer: SchematicWriter) -> sch_doc::Resu
     replace_frames(doc, &sheet);
     let seated = seated_uuids(doc);
     doc.adopt_drawing(&sheet)?;
+    drop_stray_labels(doc);
     debug_assert_unique_wire_segments(doc);
     doc.refit_page(&seated);
     Ok(())
+}
+
+/// Take away the labels the graft left touching nothing.
+///
+/// Re-wiring a block replaces the drawing under its names: a stub the new wiring
+/// does not draw leaves its label anchored in empty space, which is KiCAD's
+/// `label_dangling` error. Such a label joins nothing to anything, so this drops
+/// no connection — it drops ink that was already saying nothing.
+fn drop_stray_labels(doc: &mut SchDoc) {
+    let stray = sch_doc::stray_labels(doc);
+    if !stray.is_empty() {
+        doc.remove_drawing(&stray);
+    }
 }
 
 /// Assert in debug builds that the adopted sheet has unique unordered wire segments.
@@ -264,7 +277,11 @@ mod tests {
     /// A captioned block frame, seated the way [`crate::write::SchematicWriter`] seats
     /// one: the title a clear line above the outline's top-left corner.
     fn captioned(writer: &mut SchematicWriter, title: &str, frame: geom::Rect) {
-        writer.add_rect([frame.min_x, frame.min_y], [frame.max_x, frame.max_y], title);
+        writer.add_rect(
+            [frame.min_x, frame.min_y],
+            [frame.max_x, frame.max_y],
+            title,
+        );
         writer.add_text(
             title,
             [frame.min_x, frame.min_y - 1.905],
@@ -291,13 +308,21 @@ mod tests {
     fn a_redraw_replaces_its_own_frame_and_only_its_own() {
         let neighbour = geom::Rect::new(101.6, 50.8, 152.4, 101.6);
         let mut sheet = SchematicWriter::new();
-        captioned(&mut sheet, "regulators", geom::Rect::new(25.4, 50.8, 76.2, 101.6));
+        captioned(
+            &mut sheet,
+            "regulators",
+            geom::Rect::new(25.4, 50.8, 76.2, 101.6),
+        );
         captioned(&mut sheet, "audio", neighbour);
         let mut doc = to_doc(sheet).unwrap();
         assert_eq!(frames(&doc).len(), 2);
 
         let mut redraw = SchematicWriter::new();
-        captioned(&mut redraw, "regulators", geom::Rect::new(25.4, 127.0, 88.9, 177.8));
+        captioned(
+            &mut redraw,
+            "regulators",
+            geom::Rect::new(25.4, 127.0, 88.9, 177.8),
+        );
         replace_frames(&mut doc, &to_doc(redraw).unwrap());
 
         assert_eq!(
@@ -321,7 +346,11 @@ mod tests {
         redraw.add_text("mcu", [30.48, 152.4], 2.54, true, "mcu:title");
         replace_frames(&mut doc, &to_doc(redraw).unwrap());
 
-        assert_eq!(frames(&doc), vec![neighbour], "the neighbour's frame went with a bare caption");
+        assert_eq!(
+            frames(&doc),
+            vec![neighbour],
+            "the neighbour's frame went with a bare caption"
+        );
     }
 
     #[cfg(debug_assertions)]
@@ -369,4 +398,3 @@ mod tests {
         );
     }
 }
-
