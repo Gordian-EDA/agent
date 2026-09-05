@@ -15,6 +15,8 @@
 //!   a fixed neighbour, or another movable part is walked out to the nearest clear grid
 //!   position. With no obstacles this is a no-op.
 
+use std::collections::BTreeSet;
+
 use geom::{Point2, Rect};
 
 use kicad::KicadInstallation;
@@ -23,11 +25,19 @@ use sch_model::item::{Incidence, Item};
 use sch_model::place::PlaceResult;
 
 use crate::floorplan::place::{RoutedEvaluator, RoutedSheetRealizer, incidence};
-use sch_flex::pack::{BLOCK_GAP, FRAME_PAD, landings};
+use sch_flex::pack::{BLOCK_GAP, FRAME_PAD, apart, landings};
 use sch_model::geometry::{body_rect, item_rect};
 
 /// The width-to-height ratio a sheet aims for: a landscape page's usable area.
 const SHEET_ASPECT: f64 = 1.5;
+/// How much sheet one shared net is worth being near, in mm² of paper per mm of
+/// separation. The exchange rate between the two things a landing is judged on: the page
+/// it costs and the runs it leaves behind.
+const REACH: f64 = 60.0;
+/// What a landing on the wrong side of a neighbour costs, as a multiple of its distance.
+/// A block whose shared pins face west belongs east of the block it feeds; landing the
+/// other way round is not a shorter wire, it is the same wire drawn around the outside.
+const WRONG_SIDE: f64 = 2.5;
 /// Step of the legalisation walk (100 mil — two schematic grid steps).
 const WALK: f64 = 2.0 * geom::GRID_50_MIL.pitch();
 /// How far a single part may be nudged once its block has landed. A local repair: a part
@@ -123,28 +133,81 @@ fn hull(rects: &[Rect]) -> Option<Rect> {
     rects.split_first().map(|(a, rest)| rest.iter().fold(*a, |h, r| union(&h, r)))
 }
 
-/// What the sheet is already using, as one rect per BLOCK: every part's frame and every
-/// obstacle, with overlapping ones merged.
+/// Something already on the sheet: the room it takes, and the signal nets its pins carry.
+#[derive(Clone)]
+struct Seated {
+    rect: Rect,
+    nets: BTreeSet<String>,
+}
+
+/// The signal nets of `item` — the ones a neighbour is worth being near.
+///
+/// Rails are left out: they are drawn as a power symbol at each pin, so two blocks
+/// sharing a ground have no reason to sit together. Everything else is a wire or a pair
+/// of labels, and both get shorter as the blocks get closer.
+fn signal_nets(item: &Item) -> BTreeSet<String> {
+    item.pins
+        .iter()
+        .filter_map(|(_, _, net)| net.as_deref())
+        .filter(|net| !circuit_graph::netclass::is_power_net(net))
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Which way the pins carrying `nets` leave `items`, as a unit vector — the side of the
+/// block its wires to that neighbour want to leave from. `None` when they disagree.
+fn faces(items: &[Item], nets: &BTreeSet<String>) -> Option<Point2> {
+    let mut sum = Point2::new(0.0, 0.0);
+    let mut n = 0.0;
+    for item in items {
+        for pin in &item.geom.pins {
+            let carries = item
+                .pins
+                .iter()
+                .any(|(number, _, net)| {
+                    *number == pin.number && net.as_deref().is_some_and(|net| nets.contains(net))
+                });
+            if !carries {
+                continue;
+            }
+            let d = sch_model::geometry::quantize_dir(pin.angle, item.angle, item.mirror).vec();
+            sum = Point2::new(sum.x + d.x, sum.y + d.y);
+            n += 1.0;
+        }
+    }
+    let len = (sum.x * sum.x + sum.y * sum.y).sqrt();
+    (n > 0.0 && len > 0.5).then(|| Point2::new(sum.x / len, sum.y / len))
+}
+
+/// What the sheet is already using, as one entry per BLOCK: every part's frame and every
+/// obstacle, with overlapping ones merged and their nets pooled.
 ///
 /// A block's parts sit close enough that their frames touch, so merging recovers the
 /// blocks without the sheet having to record them; two blocks that were drawn apart stay
 /// apart, and the hole between them is a hole a new block may land in. Seating against a
 /// single hull of all of it — what this used to do — is what cost a row or a column of
 /// sheet per block added, whatever the block's own size.
-fn occupied(fixed: &[Item], obstacles: &[Rect]) -> Vec<Rect> {
-    let mut rects: Vec<Rect> = fixed
+fn occupied(fixed: &[Item], obstacles: &[Rect]) -> Vec<Seated> {
+    let mut rects: Vec<Seated> = fixed
         .iter()
-        .map(frame_of)
-        .chain(obstacles.iter().copied())
+        .map(|it| Seated {
+            rect: frame_of(it),
+            nets: signal_nets(it),
+        })
+        .chain(obstacles.iter().map(|r| Seated {
+            rect: *r,
+            nets: BTreeSet::new(),
+        }))
         .collect();
     let mut merged = true;
     while merged {
         merged = false;
-        let mut out: Vec<Rect> = Vec::with_capacity(rects.len());
+        let mut out: Vec<Seated> = Vec::with_capacity(rects.len());
         for r in rects {
-            match out.iter_mut().find(|o| o.overlaps(&r)) {
+            match out.iter_mut().find(|o| o.rect.overlaps(&r.rect)) {
                 Some(o) => {
-                    *o = union(o, &r);
+                    o.rect = union(&o.rect, &r.rect);
+                    o.nets.extend(r.nets);
                     merged = true;
                 }
                 None => out.push(r),
@@ -192,12 +255,25 @@ fn beside_pages(there: Rect) -> Vec<[f64; 2]> {
 /// cost a whole row or column of sheet per block: a 28x20 mm block grew the sheet by
 /// 12,815 mm². Nine blocks came out 2.9x the area the same nine pack into, and the
 /// sparsest agent sheets were exactly the ones built from the most calls.
-fn seat_beside(movable: &mut [Item], taken: &[Rect], drawn: &[Rect]) {
+fn seat_beside(movable: &mut [Item], taken: &[Seated], drawn: &[Rect]) {
     let frames: Vec<Rect> = movable.iter().map(frame_of).collect();
     let (Some(here), false) = (hull(&frames), taken.is_empty()) else {
         return;
     };
     let size = (here.width(), here.height());
+    let rects: Vec<Rect> = taken.iter().map(|s| s.rect).collect();
+    let mine: BTreeSet<String> = movable.iter().flat_map(signal_nets).collect();
+    // Who this block belongs beside: the blocks already down that its own pins reach, and
+    // which way those pins point. The pins are what the wire leaves from, so a block whose
+    // shared pins face west belongs to the EAST of the block it shares them with.
+    let neighbours: Vec<(Rect, f64, Option<Point2>)> = taken
+        .iter()
+        .filter_map(|s| {
+            let shared: BTreeSet<String> = s.nets.intersection(&mine).cloned().collect();
+            (!shared.is_empty())
+                .then(|| (s.rect, shared.len() as f64, faces(movable, &shared)))
+        })
+        .collect();
     // The sheet is what is DRAWN on it. An obstacle is something to keep off, not sheet
     // the drawing claims: pricing the label columns and wire keepouts into the extent
     // made a strip beside them look free and stretched the sheet into a ribbon.
@@ -208,12 +284,62 @@ fn seat_beside(movable: &mut [Item], taken: &[Rect], drawn: &[Rect]) {
     // Area with the sheet's proportions as a tie-break: two landings that grow the sheet
     // by the same amount are not equally good, and the one that leaves a ribbon reads
     // worse. A landing that fills a hole changes neither term, so it still wins outright.
-    let cost = |r: &Rect| {
+    let paper = |r: &Rect| {
         let aspect = ((r.width() / r.height().max(1.0)) / SHEET_ASPECT).ln().abs();
         r.width() * r.height() * (1.0 + aspect)
     };
+    // What the landing costs the READER: every net this block shares with a block already
+    // down, priced by how far apart the two end up, and by whether the block landed on the
+    // side its own pins face. Sheet area alone seats a one-capacitor block 48 mm from the
+    // pair of resistors it shares a net with on an otherwise empty page, and every net
+    // that crosses that gap is drawn as a pair of labels instead of a wire.
+    let seam = |at: &Point2| {
+        let mine = Rect::new(at.x, at.y, at.x + size.0, at.y + size.1);
+        neighbours
+            .iter()
+            .map(|(there, shared, face)| {
+                let gap = apart(&mine, there);
+                let turned = face.is_some_and(|f| !toward(&mine, there, f));
+                shared * gap * if turned { WRONG_SIDE } else { 1.0 }
+            })
+            .sum::<f64>()
+    };
+    let cost = |at: &Point2| paper(&sheet(at)) + REACH * seam(at);
+    if false {
+        eprintln!(
+            "SEAT mine={} taken={} neighbours={} shared={:?} faces={:?}",
+            mine.len(),
+            taken.len(),
+            neighbours.len(),
+            neighbours.iter().map(|n| n.1).collect::<Vec<_>>(),
+            neighbours.iter().map(|n| n.2.is_some()).collect::<Vec<_>>(),
+        );
+        for page in crate::write::usable_pages() {
+            let all: Vec<Point2> = landings(&rects, size, page[0], BLOCK_GAP)
+                .into_iter()
+                .filter(|at| {
+                    let s = sheet(at);
+                    s.max_x <= geom::PAGE_MARGIN + page[0] + geom::EPS
+                        && s.max_y <= geom::PAGE_MARGIN + page[1] + geom::EPS
+                })
+                .collect();
+            if all.is_empty() {
+                continue;
+            }
+            let mut xs: Vec<(f64, f64, f64, f64)> = all
+                .iter()
+                .map(|at| (cost(at), paper(&sheet(at)), REACH * seam(at), at.x))
+                .collect();
+            xs.sort_by(|a, b| a.0.total_cmp(&b.0));
+            eprintln!("   page {page:?} candidates={}", xs.len());
+            for (c, p, sm, x) in xs.iter().take(3) {
+                eprintln!("     cost={c:.0} paper={p:.0} seam={sm:.0} x={x:.0}");
+            }
+            break;
+        }
+    }
     let best = |limit: f64, page: Option<[f64; 2]>| {
-        landings(taken, size, limit, BLOCK_GAP)
+        landings(&rects, size, limit, BLOCK_GAP)
             .into_iter()
             .filter(|at| {
                 page.is_none_or(|p| {
@@ -222,7 +348,7 @@ fn seat_beside(movable: &mut [Item], taken: &[Rect], drawn: &[Rect]) {
                         && s.max_y <= geom::PAGE_MARGIN + p[1] + geom::EPS
                 })
             })
-            .min_by(|a, b| cost(&sheet(a)).total_cmp(&cost(&sheet(b))))
+            .min_by(|a, b| cost(a).total_cmp(&cost(b)))
     };
     let landed = crate::write::usable_pages()
         .into_iter()
@@ -234,7 +360,7 @@ fn seat_beside(movable: &mut [Item], taken: &[Rect], drawn: &[Rect]) {
     // top of whatever is already at the origin". Below everything already down is always
     // free, so that is the fallback.
     let at = landed.unwrap_or_else(|| {
-        let there = hull(taken).expect("taken is not empty");
+        let there = hull(&rects).expect("taken is not empty");
         Point2::new(geom::PAGE_MARGIN, there.max_y + BLOCK_GAP)
     });
     // ONE snapped delta for the whole group: snapping each part independently would move
@@ -246,6 +372,14 @@ fn seat_beside(movable: &mut [Item], taken: &[Rect], drawn: &[Rect]) {
     for it in movable {
         it.at = Point2::new(it.at.x + delta.x, it.at.y + delta.y);
     }
+}
+
+/// Whether `mine` sits on the side of `there` that `face` — the outward direction of the
+/// pins joining them — points AWAY from: pins facing west want the block to their east.
+fn toward(mine: &Rect, there: &Rect, face: Point2) -> bool {
+    let centre = |r: &Rect| Point2::new((r.min_x + r.max_x) / 2.0, (r.min_y + r.max_y) / 2.0);
+    let (a, b) = (centre(mine), centre(there));
+    (b.x - a.x) * face.x + (b.y - a.y) * face.y > 0.0
 }
 
 /// Whether `r` clears every obstacle and every rect in `others`.
@@ -361,8 +495,8 @@ pub fn arrange(problem: RegionProblem) -> RegionOutput {
     // blocks may be typeset for: the whole page ladder on an empty sheet, the free strips
     // of each page on a sheet that already carries a drawing.
     let taken = occupied(&fixed, &obstacles);
-    let drawn = occupied(&fixed, &[]);
-    let pages = match hull(&taken) {
+    let drawn: Vec<Rect> = occupied(&fixed, &[]).iter().map(|s| s.rect).collect();
+    let pages = match hull(&taken.iter().map(|s| s.rect).collect::<Vec<_>>()) {
         None => crate::write::usable_pages(),
         Some(there) => beside_pages(there),
     };

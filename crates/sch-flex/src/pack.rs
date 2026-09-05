@@ -50,6 +50,15 @@ pub fn landings(placed: &[Rect], size: (f64, f64), limit: f64, gap: f64) -> Vec<
     corners
 }
 
+/// How far apart two blocks are drawn: the gap between their boxes, along both axes.
+/// Touching blocks are zero apart, and the wire or label pair that joins them is about
+/// this long.
+pub fn apart(a: &Rect, b: &Rect) -> f64 {
+    let dx = (b.min_x - a.max_x).max(a.min_x - b.max_x).max(0.0);
+    let dy = (b.min_y - a.max_y).max(a.min_y - b.max_y).max(0.0);
+    dx + dy
+}
+
 /// Bottom-left packing of `sizes`, visited in `order`, into a box `limit` wide and
 /// unbounded in height: each block takes the lowest, then left-most corner that clears the
 /// blocks already down. Row-major shelves leave a dead band under every short block; a
