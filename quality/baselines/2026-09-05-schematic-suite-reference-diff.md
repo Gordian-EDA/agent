@@ -121,3 +121,32 @@ user direction). Fix in flight, in the loop not the prompt: second non-improving
 review ends layout editing for the turn; a review with no layout change since the
 last is refused (lane/review-stop). No further suite until it lands — each review is
 seven vision calls.
+
+## Fifth run, main ad8f185a (+ review stop enforced at the second flat review; review grades the same two images as the harness; finish gate on changed-since-review)
+
+| | fourth run | this run |
+| --- | --- | --- |
+| pass both attempts | 0 / 14 | 0 / 14 |
+| pass one attempt | 4 | 2 |
+| mean critic, same 27 renders | 6.73 | **6.24** |
+| mean human-look | 5.56 | **4.93** |
+| total requests | 2177 | 1910 |
+
+Requests and reviews fell as designed; the means fell with them. The trajectories say
+why, and it is not the stop rule — it is what the rule reveals. Self-review means in
+order, then the harness final:
+  light-accessory#0   6.86 3.29 3.43 -> 5.00
+  three-phase#1       7.29 6.00 3.00 -> 6.10
+  bjt-preamp#1        8.43 7.86 6.57 -> 6.70
+  hbridge#0           6.43 4.00 5.43 -> 6.30
+  current-sense#0     4.50 5.57 5.57 6.00 6.00 5.71 -> 5.57   (previous run: 4.00 -> 8.71 -> 9.29)
+On most runs the FIRST review is the best score the sheet ever has, and each arrange
+after it makes the sheet worse. The operator "review, then re-arrange the named block"
+degrades sheets more often than it improves them. The fourth run scored higher only
+because unbounded iteration sometimes wandered back up.
+
+Two responses. In flight: close the loop at the FIRST non-improving review, and tell the
+model a worse review means the last edit hurt. Not built, by direction: keeping the
+best-reviewed sheet and restoring it at finish — that is the checkpoint mechanism the
+user removed on 2026-09-02, and it is the only thing that would let a bad edit cost
+nothing. That decision is the user's.
