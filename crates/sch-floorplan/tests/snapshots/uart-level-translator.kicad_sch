@@ -1996,7 +1996,7 @@
 	)
 	(symbol
 		(lib_id "power:GND")
-		(at 49.53 83.82 0)
+		(at 109.22 78.74 0)
 		(unit 1)
 		(exclude_from_sim no)
 		(in_bom yes)
@@ -2004,51 +2004,6 @@
 		(dnp no)
 		(uuid "dc700478-5922-5981-b3e0-47d11a723ee7")
 		(property "Reference" "#PWR_GNDD_1"
-			(at 55.88 82.55 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(justify left)
-				(hide yes)
-			)
-		)
-		(property "Value" "GNDD"
-			(at 49.53 87.63 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Footprint" ""
-			(at 49.53 83.82 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(instances
-			(project ""
-				(path "/78c1c215-99f1-55bb-ac37-0886ad3d1a9e"
-					(reference "#PWR_GNDD_1")
-					(unit 1)
-				)
-			)
-		)
-	)
-	(symbol
-		(lib_id "power:GND")
-		(at 109.22 78.74 0)
-		(unit 1)
-		(exclude_from_sim no)
-		(in_bom yes)
-		(on_board yes)
-		(dnp no)
-		(uuid "e699fc04-346c-5caa-b313-7700bf5aba7d")
-		(property "Reference" "#PWR_GNDD_2"
 			(at 115.57 77.47 0)
 			(effects
 				(font
@@ -2078,7 +2033,7 @@
 		(instances
 			(project ""
 				(path "/78c1c215-99f1-55bb-ac37-0886ad3d1a9e"
-					(reference "#PWR_GNDD_2")
+					(reference "#PWR_GNDD_1")
 					(unit 1)
 				)
 			)
@@ -2092,8 +2047,8 @@
 		(in_bom yes)
 		(on_board yes)
 		(dnp no)
-		(uuid "f6d06fc8-10bc-516e-b961-6e23dd15dcc4")
-		(property "Reference" "#PWR_GNDD_3"
+		(uuid "e699fc04-346c-5caa-b313-7700bf5aba7d")
+		(property "Reference" "#PWR_GNDD_2"
 			(at 133.35 77.47 0)
 			(effects
 				(font
@@ -2113,6 +2068,51 @@
 		)
 		(property "Footprint" ""
 			(at 127 78.74 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(instances
+			(project ""
+				(path "/78c1c215-99f1-55bb-ac37-0886ad3d1a9e"
+					(reference "#PWR_GNDD_2")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "power:GND")
+		(at 49.53 83.82 0)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(uuid "f6d06fc8-10bc-516e-b961-6e23dd15dcc4")
+		(property "Reference" "#PWR_GNDD_3"
+			(at 55.88 82.55 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+				(hide yes)
+			)
+		)
+		(property "Value" "GNDD"
+			(at 49.53 87.63 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Footprint" ""
+			(at 49.53 83.82 0)
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -2356,7 +2356,7 @@
 	)
 	(symbol
 		(lib_id "power:VCC")
-		(at 36.83 76.2 0)
+		(at 127 71.12 0)
 		(unit 1)
 		(exclude_from_sim no)
 		(in_bom yes)
@@ -2364,51 +2364,6 @@
 		(dnp no)
 		(uuid "d50c2a35-0db2-589b-a04c-c130207f96b6")
 		(property "Reference" "#PWR_VCCD_1"
-			(at 43.18 74.93 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(justify left)
-				(hide yes)
-			)
-		)
-		(property "Value" "VCCD"
-			(at 36.83 70.1 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Footprint" ""
-			(at 36.83 76.2 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(instances
-			(project ""
-				(path "/78c1c215-99f1-55bb-ac37-0886ad3d1a9e"
-					(reference "#PWR_VCCD_1")
-					(unit 1)
-				)
-			)
-		)
-	)
-	(symbol
-		(lib_id "power:VCC")
-		(at 127 71.12 0)
-		(unit 1)
-		(exclude_from_sim no)
-		(in_bom yes)
-		(on_board yes)
-		(dnp no)
-		(uuid "35cd9da5-3f4f-5ff4-af6a-7f64b2ae8b01")
-		(property "Reference" "#PWR_VCCD_2"
 			(at 133.35 69.85 0)
 			(effects
 				(font
@@ -2428,6 +2383,51 @@
 		)
 		(property "Footprint" ""
 			(at 127 71.12 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(instances
+			(project ""
+				(path "/78c1c215-99f1-55bb-ac37-0886ad3d1a9e"
+					(reference "#PWR_VCCD_1")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "power:VCC")
+		(at 36.83 76.2 0)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(uuid "35cd9da5-3f4f-5ff4-af6a-7f64b2ae8b01")
+		(property "Reference" "#PWR_VCCD_2"
+			(at 43.18 74.93 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+				(hide yes)
+			)
+		)
+		(property "Value" "VCCD"
+			(at 36.83 70.1 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Footprint" ""
+			(at 36.83 76.2 0)
 			(effects
 				(font
 					(size 1.27 1.27)

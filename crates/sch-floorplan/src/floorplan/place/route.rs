@@ -1677,11 +1677,17 @@ pub(crate) fn riser_hits_foreign_pin(
     })
 }
 
-/// A rail: with ≥3 pins, draw a horizontal wire spanning them, stub each pin up to it,
-/// and put one power symbol at the left end. With fewer pins, no common band, no row the
-/// trunk can occupy without touching another net, or a trunk/riser longer than
-/// [`RAIL_SEGMENT_MAX`], emit a per-pin power symbol instead ([`emit_local_power`] — the
-/// clustered case, e.g. a divider's two GNDs).
+/// A rail: every BANK of ≥3 pins — pins on one row, none more than
+/// [`RAIL_SEGMENT_MAX`] from the next — gets a horizontal wire spanning it, a stub
+/// from each pin, and one power symbol at the left end. What is left over — a pin
+/// alone on its row, a bank with no row its trunk can own, a riser too long to read
+/// as a wire — takes a per-pin power symbol ([`emit_local_power`]).
+///
+/// A bank is judged by the air BETWEEN its risers, not by the width of the whole
+/// row: a rail across a dozen decoupling caps is the one wire a person draws over
+/// them, and reads as a bus however long the row runs; a trunk that reaches 50 mm
+/// across empty paper to its next pin reads as the "one wire runs the whole width"
+/// tell that distribution exists to avoid.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn emit_rail(
     env: &KicadInstallation,
@@ -1690,7 +1696,7 @@ pub(crate) fn emit_rail(
     eps: &[([f64; 2], Dir)],
     band: Band,
     rail_y: Option<f64>,
-    flag: Option<&mut BTreeMap<String, ([f64; 2], f64)>>,
+    mut flag: Option<&mut BTreeMap<String, ([f64; 2], f64)>>,
     riser_offsets: &BTreeMap<(String, i64), f64>,
     bodies: &[([f64; 2], [f64; 2])],
     foreign_pins: &[([f64; 2], String)],
@@ -1700,10 +1706,138 @@ pub(crate) fn emit_rail(
     let Some(rail_y) = rail_y.filter(|_| eps.len() >= 3) else {
         return emit_local_power(env, w, net, eps, flag, power_keepouts, foreign_pins);
     };
+    let mut local: Vec<([f64; 2], Dir)> = Vec::new();
+    let mut trunks = 0usize;
+    for bank in rail_banks(eps) {
+        if bank.len() < 3 {
+            local.extend(bank);
+            continue;
+        }
+        // A bank's rail runs beside its own row, one lane out, never on a row two
+        // banks away: risers that climb past another bank's rail cross it.
+        let outward = if band == Band::Top { -1.0 } else { 1.0 };
+        let own_row = bank[0].0[1] + outward * RAIL_LANE;
+        let drawn = emit_trunk(
+            env,
+            w,
+            net,
+            &bank,
+            band,
+            own_row,
+            trunks,
+            flag.as_deref_mut(),
+            riser_offsets,
+            bodies,
+            foreign_pins,
+            power_keepouts,
+            used_lanes,
+        )?;
+        match drawn {
+            true => trunks += 1,
+            false => local.extend(bank),
+        }
+    }
+    // What no bank took still shares the row the level assignment gave the net — a
+    // regulator's pin, a resistor's top and a cap's top on three rows of one block
+    // were one rail before banks existed, and stay one.
+    if local.len() >= 3 {
+        let drawn = emit_trunk(
+            env,
+            w,
+            net,
+            &local,
+            band,
+            rail_y,
+            trunks,
+            flag.as_deref_mut(),
+            riser_offsets,
+            bodies,
+            foreign_pins,
+            power_keepouts,
+            used_lanes,
+        )?;
+        if drawn {
+            return Ok(());
+        }
+    }
+    if local.is_empty() {
+        return Ok(());
+    }
+    emit_local_power(env, w, net, &local, flag, power_keepouts, foreign_pins)
+}
+
+/// A net's pins split into banks: the pins of one row (within a lane of each other in
+/// y), in x order, cut wherever two neighbours sit more than [`RAIL_SEGMENT_MAX`] apart.
+fn rail_banks(eps: &[([f64; 2], Dir)]) -> Vec<Vec<([f64; 2], Dir)>> {
+    let mut sorted: Vec<([f64; 2], Dir)> = eps.to_vec();
+    sorted.sort_by(|a, b| {
+        a.0[1]
+            .total_cmp(&b.0[1])
+            .then(a.0[0].total_cmp(&b.0[0]))
+    });
+    let mut banks: Vec<Vec<([f64; 2], Dir)>> = Vec::new();
+    for ep in sorted {
+        let joins = banks.last().is_some_and(|bank| {
+            let last = bank[bank.len() - 1].0;
+            (ep.0[1] - last[1]).abs() <= RAIL_LANE + EPS
+                && ep.0[0] - last[0] <= RAIL_SEGMENT_MAX + EPS
+        });
+        match joins {
+            true => banks.last_mut().expect("joins a bank").push(ep),
+            false => banks.push(vec![ep]),
+        }
+    }
+    banks
+}
+
+/// The `used_lanes` owner prefix under which a rail records the column its power
+/// glyph stands in, so the next rail keeps its own glyph out of it.
+const GLYPH_LANE: &str = "#glyph:";
+
+/// Whether any riser or lead-out from a pin to the trunk on `rail_y` would run
+/// through a part body — its own excluded, since a pin tip sits on its edge.
+fn risers_hit_body(
+    eps: &[([f64; 2], Dir)],
+    attaches: &[f64],
+    rail_y: f64,
+    bodies: &[Rect],
+) -> bool {
+    eps.iter().zip(attaches).any(|((ep, _), &ax)| {
+        let (y0, y1) = (ep[1].min(rail_y), ep[1].max(rail_y));
+        let (x0, x1) = (ep[0].min(ax), ep[0].max(ax));
+        bodies.iter().any(|b| {
+            let riser = ax > b.min_x + EPS && ax < b.max_x - EPS && y0 < b.max_y - EPS && y1 > b.min_y + EPS;
+            let lead = ep[1] > b.min_y + EPS && ep[1] < b.max_y - EPS && x0 < b.max_x - EPS && x1 > b.min_x + EPS;
+            riser || lead
+        })
+    })
+}
+
+/// One bank's trunk, on the nearest row it can own: `start_y` first, then rows stepping
+/// outward a lane at a time. A trunk is drawn with no obstacle router of its own, so a
+/// row it cannot own alone is rejected whole rather than patched. Returns whether it was drawn; a bank with no row, or one
+/// whose risers or the air between them would run past [`RAIL_SEGMENT_MAX`], is left to
+/// the caller.
+#[allow(clippy::too_many_arguments)]
+fn emit_trunk(
+    env: &KicadInstallation,
+    w: &mut SchematicWriter,
+    net: &str,
+    eps: &[([f64; 2], Dir)],
+    band: Band,
+    start_y: f64,
+    index: usize,
+    flag: Option<&mut BTreeMap<String, ([f64; 2], f64)>>,
+    riser_offsets: &BTreeMap<(String, i64), f64>,
+    bodies: &[([f64; 2], [f64; 2])],
+    foreign_pins: &[([f64; 2], String)],
+    power_keepouts: &[Rect],
+    used_lanes: &mut Vec<(f64, f64, f64, String)>,
+) -> io::Result<bool> {
     // A rail's whole geometry — every riser column, the trunk and its span — follows from
-    // the row it sits on, so the row is what is searched: the assigned row first, then
-    // rows stepping OUTWARD from the parts. A trunk is drawn with no obstacle router of
-    // its own, so a row it cannot own alone is rejected whole rather than patched.
+    // the row it sits on, so the row is what is searched. A trunk is drawn with no
+    // obstacle router of its own, so a row it cannot own alone is rejected whole rather
+    // than patched.
     let foreign_wires: Vec<(f64, f64, f64)> = foreign_rows(w, net);
     let plan = |y: f64| {
         let attaches =
@@ -1714,40 +1848,33 @@ pub(crate) fn emit_rail(
         );
         (attaches, span)
     };
-    // The NEAREST row the trunk can own: the assigned one, then rows stepping OUTWARD from
-    // the parts a lane at a time. Everything is on the 50-mil grid, so "shares no point
-    // with another net" already means a full grid step of air. A rail with nowhere to go
-    // gives up the trunk for distributed local power symbols.
+    // Everything is on the 50-mil grid, so "shares no point with another net" already
+    // means a full grid step of air.
     let outward = if band == Band::Top { -1.0 } else { 1.0 };
-    let Some((rail_y, attaches, (span_lo, span_hi))) = std::iter::once(rail_y)
-        .chain((1..=8).map(|k| rail_y + outward * k as f64 * RAIL_LANE))
-        .enumerate()
-        .find_map(|(step, y)| {
+    let Some((rail_y, attaches, (span_lo, span_hi))) = std::iter::once(start_y)
+        .chain((1..=8).map(|k| start_y + outward * k as f64 * RAIL_LANE))
+        .find_map(|y| {
             let (attaches, span) = plan(y);
             let clear = trunk_clear(net, y, span, foreign_pins, &foreign_wires)
-                // The assigned row is where the level assignment put the rail, bodies and
-                // all; only a row we moved to has to earn its way past them.
-                && (step == 0 || !trunk_hits_body(y, span, power_keepouts));
+                && !trunk_hits_body(y, span, power_keepouts)
+                && !risers_hit_body(eps, &attaches, y, power_keepouts);
             clear.then_some((y, attaches, span))
         })
     else {
-        return emit_local_power(env, w, net, eps, flag, power_keepouts, foreign_pins);
+        return Ok(false);
     };
-    // The trunk and its risers are drawn literally, with no router and no length
-    // policy of their own, so a rail whose pins are spread across the sheet becomes
-    // exactly the "one wire runs the whole width" tell — the 723 mm GND riser and the
-    // 260 mm BMS_GND trunk that made our live-edit sheets read as machine output.
-    // Measure what would be drawn and, when a segment is too long to read as a wire,
-    // give the trunk up for distributed local power symbols. Length is the honest
-    // test: it is what the reader sees, unlike the pin half-perimeter it replaces.
+    // Measured on what would be drawn: each riser and lead-out, and the air between
+    // neighbouring risers — never the row as a whole.
+    let mut columns: Vec<f64> = attaches.clone();
+    columns.sort_by(f64::total_cmp);
     let longest = eps
         .iter()
         .zip(&attaches)
         .flat_map(|((p, _), &ax)| [(p[1] - rail_y).abs(), (ax - p[0]).abs()])
-        .chain(std::iter::once(span_hi - span_lo))
+        .chain(columns.windows(2).map(|pair| pair[1] - pair[0]))
         .fold(0.0, f64::max);
     if longest > RAIL_SEGMENT_MAX {
-        return emit_local_power(env, w, net, eps, flag, power_keepouts, foreign_pins);
+        return Ok(false);
     }
     for (ep, &ax) in eps.iter().map(|(p, _)| p).zip(&attaches) {
         used_lanes.push((ax, ep[1].min(rail_y), ep[1].max(rail_y), net.to_string()));
@@ -1760,18 +1887,34 @@ pub(crate) fn emit_rail(
         w.add_wire_on_net([ax, ep[1]], [ax, rail_y], net); // riser
         w.add_junction_on_net([ax, rail_y], net);
     }
-    // One power symbol at the left end (pin coincident with the rail). A top
-    // rail's symbol sits above, a bottom rail's below — both at angle 0.
-    let sym_x = span_lo;
+    // One power symbol at the left end (pin coincident with the rail), or the right
+    // end when another rail's glyph already stands in that column a lane or two away
+    // — two banks stacked in rows would otherwise print their names on each other.
+    // A top rail's symbol sits above, a bottom rail's below — both at angle 0.
+    let glyph_near = |x: f64| {
+        used_lanes.iter().any(|(lx, lo, hi, owner)| {
+            owner.starts_with(GLYPH_LANE)
+                && (lx - x).abs() <= 2.0 * RAIL_LANE + EPS
+                && *lo <= rail_y + 2.0 * RAIL_LANE + EPS
+                && *hi >= rail_y - 2.0 * RAIL_LANE - EPS
+        })
+    };
+    let sym_x = match glyph_near(span_lo) && !glyph_near(span_hi) {
+        true => span_hi,
+        false => span_lo,
+    };
+    used_lanes.push((
+        sym_x,
+        rail_y - 2.0 * RAIL_LANE,
+        rail_y + 2.0 * RAIL_LANE,
+        format!("{GLYPH_LANE}{net}"),
+    ));
     let flag_at = [sym_x, rail_y];
-    w.add_power_symbol(
-        env,
-        &power_lib_id(net),
-        &format!("#PWR_{net}"),
-        net,
-        flag_at,
-        0.0,
-    )?;
+    let reference = match index {
+        0 => format!("#PWR_{net}"),
+        k => format!("#PWR_{net}_R{k}"),
+    };
+    w.add_power_symbol(env, &power_lib_id(net), &reference, net, flag_at, 0.0)?;
     // The ERC flag (only when this net needs one) sits COINCIDENT with the rail's
     // power symbol, rotated to extend the same way the symbol does (up for a top
     // V+ rail, down for a bottom GND rail) — into open space, no dangling stub.
@@ -1781,7 +1924,7 @@ pub(crate) fn emit_rail(
             .entry(net.to_string())
             .or_insert(([sym_x, rail_y], angle));
     }
-    Ok(())
+    Ok(true)
 }
 
 /// What another net already occupies that a trunk could land on, as rows `(y, x_lo,
