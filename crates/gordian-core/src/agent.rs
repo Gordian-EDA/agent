@@ -34,6 +34,7 @@ use gordian_llm::{
 };
 
 use crate::AgentRuntime;
+use crate::thrash::ThrashGuard;
 use crate::tools::{run_tool, tool_defs};
 use gordian_runtime::tool::IMAGE_PATH_KEY;
 use gordian_runtime::tool::{ReviewOutcome, ToolEffect, ToolOutcome};
@@ -951,6 +952,7 @@ impl<P: Provider> Agent<P> {
         let mut state_read_uses: HashMap<String, u64> = HashMap::new();
         let mut pcb_recovery = PcbRecoveryState::default();
         let mut pcb_quality = PcbQualityState::default();
+        let mut thrash = ThrashGuard::default();
         loop {
             if let Some(cap) = self.max_requests
                 && provider_requests >= cap
@@ -1158,8 +1160,12 @@ impl<P: Provider> Agent<P> {
                     && state_read_uses
                         .get(&call.fn_name)
                         .is_some_and(|generation| *generation == tool_state_generation);
+                let edit_loop = thrash.intervene(&call.fn_name, &call.fn_arguments);
 
-                let (mut content, images, image_path, dispatched) = if discovery_duplicate {
+                let (mut content, images, image_path, dispatched) = if let Some(refusal) = edit_loop
+                {
+                    (refusal.to_string(), Vec::new(), None, false)
+                } else if discovery_duplicate {
                     (
                         json!({
                             "error": "duplicate discovery call deferred",
