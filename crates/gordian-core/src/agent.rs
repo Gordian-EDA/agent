@@ -1296,7 +1296,7 @@ impl<P: Provider> Agent<P> {
                 if dispatched && call.fn_name == "review_schematic"
                     && let Some(notice) = reviews.observe(&parsed)
                 {
-                    content = add_agent_guidance(&content, json!({"stop": notice}));
+                    content = add_agent_guidance(&content, json!({"review": notice}));
                 }
                 if dispatched && call.fn_name == "check_schematic" {
                     let complete = check_schematic_is_complete(&parsed);
@@ -3146,11 +3146,11 @@ mod tests {
         calls
     }
 
-    /// stm32#0 spent twelve reviews and seventeen arranges to finish below the
-    /// mean it reached on its third. Two reviews that fail to beat the best close
-    /// the loop, and the layout edits that would reopen it are refused.
+    /// `555#0` read 6.86, 6.29, 6.00 and finished at 6.30: the second review is
+    /// where the loop should close, one edit deep. The layout edits that would
+    /// take it further are refused from there.
     #[tokio::test]
-    async fn two_flat_reviews_close_the_loop_and_refuse_further_layout_edits() {
+    async fn the_first_flat_review_closes_the_loop_and_refuses_further_layout_edits() {
         let Some(ctx) = AgentRuntime::detect_for_test() else {
             eprintln!("SKIP: no KiCAD detected");
             return;
@@ -3162,9 +3162,6 @@ mod tests {
         script.push(review());
         script.extend(scripted_review(6.0));
         script.push(nudge("R2"));
-        script.push(review());
-        script.extend(scripted_review(6.0));
-        script.push(nudge("R1"));
         script.extend((0..6).map(|_| crate::testing::final_text("done")));
 
         let calls = run_recording_tools(ctx, script).await;
@@ -3173,22 +3170,54 @@ mod tests {
             .iter()
             .filter(|(name, _)| name == "review_schematic")
             .collect();
-        assert_eq!(reviews.len(), 3, "{calls:?}");
+        assert_eq!(reviews.len(), 2, "{calls:?}");
         assert!(reviews[0].1["agent_guidance"].is_null());
-        assert!(reviews[1].1["agent_guidance"].is_null());
-        let stop = reviews[2].1["agent_guidance"]["stop"]
+        let stop = reviews[1].1["agent_guidance"]["review"]
             .as_str()
             .unwrap_or_default()
             .to_owned();
-        assert!(stop.contains("stopped improving"), "{stop}");
+        assert!(stop.contains("the last edit hurt"), "{stop}");
         let moves: Vec<_> = calls
             .iter()
             .filter(|(name, _)| name == "move_symbols")
             .collect();
-        assert_eq!(moves.len(), 3, "{calls:?}");
+        assert_eq!(moves.len(), 2, "{calls:?}");
         assert!(moves[0].1.get("error").is_none());
-        assert!(moves[1].1.get("error").is_none());
-        assert_eq!(moves[2].1["error"], "review loop closed");
+        assert_eq!(moves[1].1["error"], "review loop closed");
+    }
+
+    /// A sheet that already reads well on its first review is told to stop short
+    /// of a whole-block re-arrange, which every such run in the suite lost by.
+    #[tokio::test]
+    async fn a_high_first_review_is_told_to_make_one_targeted_fix() {
+        let Some(ctx) = AgentRuntime::detect_for_test() else {
+            eprintln!("SKIP: no KiCAD detected");
+            return;
+        };
+        let mut script = vec![
+            two_resistors(),
+            crate::testing::tool_call("review", "review_schematic", json!({})),
+        ];
+        script.extend(scripted_review(8.0));
+        script.push(nudge("R1"));
+        script.extend((0..6).map(|_| crate::testing::final_text("done")));
+
+        let calls = run_recording_tools(ctx, script).await;
+
+        let (_, verdict) = calls
+            .iter()
+            .find(|(name, _)| name == "review_schematic")
+            .expect("a review ran");
+        let notice = verdict["agent_guidance"]["review"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned();
+        assert!(notice.contains("ONE targeted fix"), "{notice}");
+        let moved = calls.iter().find(|(name, _)| name == "move_symbols");
+        assert!(
+            moved.expect("the one fix ran").1.get("error").is_none(),
+            "one targeted fix is still allowed"
+        );
     }
 
     /// A review with nothing changed since the last one grades the same picture
