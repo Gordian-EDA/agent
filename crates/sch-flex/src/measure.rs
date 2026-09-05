@@ -1051,6 +1051,10 @@ fn face_connectors(
 }
 
 /// The signal nets of the siblings on either side of child `i`.
+///
+/// A neighbour that is a GROUP counts for every net it carries: the column of pull-ups
+/// beside a translator is what the translator has to face, and reading only leaf siblings
+/// left every device with a composed neighbour facing whichever way its symbol was drawn.
 fn neighbour_nets(
     children: &[Node],
     parts: &[Part],
@@ -1058,7 +1062,6 @@ fn neighbour_nets(
 ) -> (BTreeSet<String>, BTreeSet<String>) {
     let of = |j: Option<usize>| {
         j.and_then(|j| children.get(j))
-            .filter(|n| matches!(n.kind, Kind::Leaf { .. }))
             .map(|n| n.signal_nets(parts))
             .unwrap_or_default()
     };

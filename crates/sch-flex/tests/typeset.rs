@@ -157,10 +157,7 @@ fn a_column_beside_an_ic_seats_its_pin_on_the_ic_pin_line() {
     ];
     let tree = stack(
         Axis::Row,
-        vec![
-            stack(Axis::Col, vec![leaf("R1"), leaf("R2")]),
-            leaf("U1"),
-        ],
+        vec![stack(Axis::Col, vec![leaf("R1"), leaf("R2")]), leaf("U1")],
     );
     sch_flex::typeset(&mut items, &trees(tree), &[]);
     let at = |refdes: &str| items.iter().find(|i| i.refdes == refdes).unwrap().at;
@@ -223,7 +220,11 @@ fn a_leaf_for_a_part_this_call_is_not_placing_leaves_no_hole() {
     let mut both = vec![passive("R1", "A", "B"), passive("R2", "B", "C")];
     sch_flex::typeset(&mut both, &trees(tree.clone()), &[]);
     let mut only = vec![passive("R1", "A", "B"), passive("R2", "B", "C")];
-    sch_flex::typeset(&mut only, &trees(stack(Axis::Row, vec![leaf("R1"), leaf("R2")])), &[]);
+    sch_flex::typeset(
+        &mut only,
+        &trees(stack(Axis::Row, vec![leaf("R1"), leaf("R2")])),
+        &[],
+    );
     assert_eq!(
         (both[1].at.x - both[0].at.x, both[0].at),
         (only[1].at.x - only[0].at.x, only[0].at),
@@ -232,8 +233,10 @@ fn a_leaf_for_a_part_this_call_is_not_placing_leaves_no_hole() {
 }
 
 /// A `decouple` cap is synthesized after the author composed the block, so the author
-/// could not have named it. It is drawn as one row beside the part it supports — not in
-/// the leftovers row at the bottom of the block — and its author is not told off for it.
+/// could not have named it. The bank is drawn as one row beside the part it supports,
+/// inside that part's own group — not in the leftovers row at the bottom of the block. It
+/// touches no signal pin, so no seating of it makes a wire; it takes the shape that costs
+/// the drawing least.
 #[test]
 fn a_synthesized_decoupler_is_seated_beside_the_part_it_supports() {
     let cap = |refdes: &str| Item {
@@ -256,11 +259,11 @@ fn a_synthesized_decoupler_is_seated_beside_the_part_it_supports() {
     assert_eq!((c1.y, c2.y), (c3.y, c3.y), "the caps are not on one line");
     assert!(
         u1.x < c1.x && c1.x < c2.x && c2.x < c3.x && c3.x < r2.x,
-        "the caps do not sit between U1 and the rest of the row"
+        "the bank does not sit between U1 and the rest of the row"
     );
     assert!(
         ((c2.x - c1.x) - (c3.x - c2.x)).abs() < 1e-6,
-        "the row is not evenly pitched"
+        "the bank is not evenly pitched"
     );
 }
 
@@ -369,7 +372,10 @@ fn a_pull_up_and_a_pull_down_in_one_row_stand_alike() {
         ys.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-9),
         "siblings off one rail took different baselines: {ys:?}"
     );
-    assert!(angles[0] % 180.0 == 0.0, "a leg off a rail stands: {angles:?}");
+    assert!(
+        angles[0] % 180.0 == 0.0,
+        "a leg off a rail stands: {angles:?}"
+    );
 }
 
 /// The same three, with their signals now reaching an IC in the same row. An IC pin is
@@ -405,15 +411,67 @@ fn a_series_element_that_touches_a_rail_lies_along_its_chain() {
     let mut items = vec![passive("R1", "VCC", "OUT"), passive("R2", "OUT", "GND")];
     let tree = stack(Axis::Row, vec![leaf("R1"), leaf("R2")]);
     sch_flex::typeset(&mut items, &trees(tree), &[]);
-    assert_eq!(items[0].angle % 180.0, 90.0, "the top of a divider stood up");
+    assert_eq!(
+        items[0].angle % 180.0,
+        90.0,
+        "the top of a divider stood up"
+    );
 }
 
 /// A potentiometer has three pins and is still a link of the chain, not a place a leg
 /// ends: the resistor feeding its top from a rail lies along the divider it is half of.
 #[test]
 fn a_resistor_in_series_with_a_potentiometer_lies_along_it() {
-    let mut items = vec![passive("R2", "VCC", "ADJ"), pot("RV1", ["ADJ", "OUT", "GND"])];
+    let mut items = vec![
+        passive("R2", "VCC", "ADJ"),
+        pot("RV1", ["ADJ", "OUT", "GND"]),
+    ];
     let tree = stack(Axis::Row, vec![leaf("R2"), leaf("RV1")]);
     sch_flex::typeset(&mut items, &trees(tree), &[]);
-    assert_eq!(items[0].angle % 180.0, 90.0, "a resistor feeding a pot stood up");
+    assert_eq!(
+        items[0].angle % 180.0,
+        90.0,
+        "a resistor feeding a pot stood up"
+    );
+}
+
+/// A support part the author left out is drawn beside the pin it serves, not in a row of
+/// strangers: the wire between them is a few millimetres and never needs a name.
+#[test]
+fn a_support_part_left_out_is_seated_beside_the_pin_it_serves() {
+    let mut items = vec![
+        ic("U1", ["A", "B", "GND"]),
+        passive("R9", "B", "VCC"),
+        passive("R1", "IN", "OUT"),
+        passive("R2", "OUT", "GND"),
+    ];
+    let tree = stack(Axis::Row, vec![leaf("R1"), leaf("R2"), leaf("U1")]);
+    sch_flex::typeset(&mut items, &trees(tree), &[]);
+    let at = |refdes: &str| items.iter().find(|i| i.refdes == refdes).unwrap().at;
+    // U1's pin 2 carries B and so does R9's top pin; both are west-facing, so R9 sits one
+    // gap to the left of the IC with its pin on that pin's line.
+    let (r9, u1) = (at("R9"), at("U1"));
+    assert!(r9.x < u1.x, "R9 at {r9:?} is not on U1's pin side {u1:?}");
+    assert!(
+        r9.dist(u1) < 30.0,
+        "R9 at {r9:?} is a page from the U1 pin it serves at {u1:?}"
+    );
+}
+
+/// The same, for a block whose author composed nothing at all: a bare row is still not a
+/// composition, but the parts that plainly serve a pin are drawn beside it.
+#[test]
+fn a_bare_row_still_seats_supports_beside_what_they_serve() {
+    let mut items = vec![
+        passive("R1", "IN", "OUT"),
+        ic("U1", ["A", "B", "GND"]),
+        passive("C1", "A", "GND"),
+    ];
+    let report = sch_flex::typeset(&mut items, &Trees::new(), &[]);
+    assert_eq!(report.untreed, ["b"]);
+    let at = |refdes: &str| items.iter().find(|i| i.refdes == refdes).unwrap().at;
+    assert!(
+        at("C1").dist(at("U1")) < at("R1").dist(at("U1")),
+        "C1 is further from the pin it serves than a part that serves nothing"
+    );
 }

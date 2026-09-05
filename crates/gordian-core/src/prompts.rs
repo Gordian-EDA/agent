@@ -16,7 +16,7 @@ Work in small, legal blocks. Partial states are fine. After EVERY block call `re
 
 Discover symbols once with `search_symbols({queries})`; top hits carry pins, alternates and a validated footprint. Search footprints BY SYMBOL with `search_footprints({symbol, query?})`; use only compatible hits. Never invent IDs or pins.
 
-Compose 2-6 functional blocks (POWER, MCU, CLOCK, USB, DEBUG, CONNECTORS...), each holding ALL the parts of one sub-circuit; a crystal with its caps is never a block alone. Blocks meet only through net labels, so neither over-split a small circuit nor let one block span the sheet. Use `place_parts({parts, layout, name?, intent?, block?, blocks?})` for only the current block, then `connect`, `label`, `no_connect` and `arrange({refs|bbox|block, layout})` for corrections. Pin keys accept number, name or alternate, any case; `"nc"` means no-connect. Rails and ports take left/right/top/bottom. YOU compose the layout, the engine only measures: pass `layout: {<block>: <tree>}` per block, naming only its parts. A node is `{part, unit?, rot?, mirror?}`, `{row: [...]}` or `{col: [...]}`, with `gap` (1.27 mm grid units). A row is ONE signal path: neighbours must share a net; unrelated parts never sit side by side. Whatever hangs off a node (shunt cap, pull-up) goes in a `col` with its series part; a crystal's two load caps sit side by side in one `row` under it. An IC sits between a col of input-side and a col of output-side parts, its OWN decoupling caps in a row after it. Symmetric halves: two mirrored cols in one row. 3-12 parts per block; gaps 4-6 in a chain, 6-8 round an IC. Omit `rot`. Always pass `name` (sheet title); name each `block` and give it `blocks: {<block>: {title?, note?}}` with a one-line `note` where a human would explain a choice.
+Compose 2-6 functional blocks (POWER, MCU, CLOCK, USB, DEBUG, CONNECTORS...), each holding ALL the parts of one sub-circuit; a crystal with its caps is never a block alone. Blocks meet only through net labels, so neither over-split a small circuit nor let one block span the sheet. Use `place_parts({parts, layout, name?, intent?, block?, blocks?})` for only the current block, then `connect`, `label`, `no_connect` and `arrange({refs|bbox|block, layout})` for corrections. Pin keys accept number, name or alternate, any case; `"nc"` means no-connect. Rails and ports take left/right/top/bottom. YOU compose the layout, the engine only measures: pass `layout: {<block>: <tree>}` per block, naming only its parts. A node is `{part, unit?, rot?, mirror?}`, `{row: [...]}` or `{col: [...]}`, with `gap` (1.27 mm grid units). A row is ONE signal path: neighbours must share a net; unrelated parts never sit side by side. A part that SERVES one pin — decoupler, pull-up, reset cap, shunt — goes in the `col` beside that part, on the side that pin leaves from; anywhere else needs a label. A crystal's load caps sit in one `row` under it. An IC sits between its input- and output-side cols, its decoupling caps a further col. 3-12 parts per block; gaps 4-6 in a chain, 6-8 round an IC. Omit `rot`. Always pass `name` (sheet title); name each `block` and give it `blocks: {<block>: {title?, note?}}` with a one-line `note` where a human would explain a choice.
 
 `place_parts` never refuses a whole payload: unresolvable parts return as `unplaced` ({ref, reason, did_you_mean}) with their nets open, everything else is placed, and it appends, so resubmit only what it names. A block that cannot be drawn truthfully is BENCHED (`benched`: wired by name, no layout); `add_parts({parts})` benches directly; `arrange({refs|block, layout})` lays them out and empties the bench. Checks report `bench: n`; `sync_board`/`export_fab` refuse while it is non-empty.
 
@@ -129,6 +129,23 @@ mod tests {
         ] {
             assert!(prompt.contains(phrase), "prompt missing `{phrase}`");
         }
+    }
+
+    /// Where a support part goes is the whole difference between a five-millimetre wire
+    /// and a labelled node the reader has to search the sheet for. The old wording sent a
+    /// device's decoupling caps into "a row after it", which pushes everything the author
+    /// composed on that side a hand's width from the pins it was composed for.
+    #[test]
+    fn prompt_seats_a_support_part_beside_the_pin_it_serves() {
+        let prompt = system_prompt();
+        for phrase in [
+            "A part that SERVES one pin",
+            "goes in the `col` beside that part, on the side that pin leaves from",
+            "anywhere else needs a label",
+        ] {
+            assert!(prompt.contains(phrase), "prompt missing `{phrase}`");
+        }
+        assert!(!prompt.contains("decoupling caps in a row after it"));
     }
 
     #[test]

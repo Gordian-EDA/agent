@@ -7,30 +7,6 @@ use std::collections::BTreeMap;
 use ::geom::Point2;
 use kicad_symbol::geometry::SymbolGeometry;
 
-/// The side of the symbol body a pin sits on, from its local geometry.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum PinSide {
-    East,
-    West,
-    North,
-    South,
-}
-
-/// Classify a pin's local `(x, y)` offset into the body side it sits on.
-pub fn pin_side(at: Point2) -> PinSide {
-    if at.x.abs() >= at.y.abs() {
-        if at.x >= 0.0 {
-            PinSide::East
-        } else {
-            PinSide::West
-        }
-    } else if at.y >= 0.0 {
-        PinSide::North // symbol-local +y is up; the pin points up = top side
-    } else {
-        PinSide::South
-    }
-}
-
 /// One placed component plus the data the engine needs about it.
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct Item {
