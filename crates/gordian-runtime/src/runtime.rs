@@ -317,10 +317,18 @@ fn write_project_file(sch_path: &Path) -> Result<()> {
                     "microvia_drill": 0.1,
                     "diff_pair_gap": 0.25,
                     "diff_pair_width": 0.2,
-                    "priority": 2147483647
+                    "diff_pair_via_gap": 0.25,
+                    "priority": 2147483647,
+                    // KiCad 10 plots a netclass without these as a zero-width wire,
+                    // which every renderer then draws as an invisible hairline.
+                    "wire_width": 6,
+                    "bus_width": 12,
+                    "line_style": 0,
+                    "schematic_color": "rgba(0, 0, 0, 0.000)",
+                    "pcb_color": "rgba(0, 0, 0, 0.000)"
                 }
             ],
-            "meta": { "version": 3 }
+            "meta": { "version": 4 }
         },
         "meta": { "filename": filename, "version": 1 }
     });
