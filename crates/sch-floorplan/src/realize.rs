@@ -183,10 +183,36 @@ fn replace_frames(doc: &mut SchDoc, sheet: &SchDoc) {
             })
         })
         .collect();
+    // A frame still wearing the caption of a block this sheet is NOT redrawing belongs to
+    // that block, however close the new one lands. Deleting it on overlap alone is what
+    // strips a neighbour's outline the moment two blocks are seated next to each other:
+    // frames carry their own padding, so adjacent blocks overlap by construction, and the
+    // neighbour is never redrawn to get its outline back.
+    let live: Vec<geom::Rect> = doc
+        .items()
+        .iter()
+        .filter_map(|item| match item {
+            sch_doc::Item::Text(t) if !captions.contains(&unwrapped(&t.text)) => Some(t.at.point()),
+            _ => None,
+        })
+        .flat_map(|at| {
+            doc.items().iter().filter_map(move |item| match item {
+                sch_doc::Item::Rectangle(r) => {
+                    let f = geom::Rect::from_points(r.start, r.end);
+                    ((at.x - f.min_x).abs() <= LINE
+                        && at.y >= f.min_y - LINE
+                        && at.y <= f.max_y + LINE)
+                        .then_some(f)
+                }
+                _ => None,
+            })
+        })
+        .collect();
     doc.retain_drawing(|item| match item {
         sch_doc::Item::Rectangle(r) => {
             let f = geom::Rect::from_points(r.start, r.end);
-            !frames.iter().any(|n| n.overlaps(&f)) && !recaptioned.contains(&f)
+            (live.contains(&f) || !frames.iter().any(|n| n.overlaps(&f)))
+                && !recaptioned.contains(&f)
         }
         sch_doc::Item::Text(t) => !captions.contains(&unwrapped(&t.text)),
         _ => true,
