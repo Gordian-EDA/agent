@@ -140,11 +140,11 @@ fn a_nets_own_block_keeps_it_unlabelled() {
     );
 }
 
-/// A net declared once, on one pin, and never mentioned again is not a contract with a
-/// second block — it is an open end. The audit reports it; the sheet must not paper
-/// over it with a label nobody asked for.
+/// A net declared once, on one pin, under a name the author wrote is a port: the net
+/// goes on beyond this sheet, and the label is how the sheet says so. Leaving the pin
+/// bare threw the name away and had the model re-naming it one call at a time.
 #[test]
-fn a_net_named_once_gains_no_stray_label() {
+fn a_net_named_once_is_drawn_as_a_port() {
     let Some(env) = KicadInstallation::detect() else {
         eprintln!("no KiCAD environment; skipping");
         return;
@@ -158,8 +158,8 @@ fn a_net_named_once_gains_no_stray_label() {
     );
     let labels: Vec<String> = doc.labels().map(|l| sch_doc::unescape(&l.text)).collect();
     assert!(
-        !labels.contains(&"LONELY".to_string()),
-        "an open end was labelled: {labels:?}"
+        labels.contains(&"LONELY".to_string()),
+        "the port was not labelled: {labels:?}"
     );
 }
 
