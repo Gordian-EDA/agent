@@ -866,6 +866,15 @@ fn rearrange_inner(
         doc.restore(snapshot)?;
         return Err(Error::BodyOverlap(Overlaps(landed_on)));
     }
+    // A block re-laid out has a new frame, and the sheet packs again around it
+    // exactly as it does around a block just placed; a run of arranges is how a
+    // sheet drifts to the corners of a page twice its size otherwise.
+    if laid_out {
+        let reseated = crate::reseat::reseat(doc);
+        if reseated.moved > 0 {
+            tracing::info!(?reseated, "re-seated the sheet around the block just arranged");
+        }
+    }
     Ok(ArrangeReport {
         // The restore put every benched symbol back on the bench too.
         left_bench: match laid_out {
