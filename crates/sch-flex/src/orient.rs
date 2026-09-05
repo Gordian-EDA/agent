@@ -13,9 +13,15 @@ use crate::part::{Part, Pose, rail_penalty};
 ///
 /// - A connector, or anything with more than four pins, stands as the library drew it.
 /// - A transistor picks the rot/mirror that points its ground pin down and its supply up.
-/// - A 2-pin part touching a rail, or stacked in a column, stands vertical (ground pin at
-///   the bottom); anything else in a row lies along the row, which is what "a row is one
-///   signal path" means geometrically.
+/// - A resistor, capacitor or LED touching a rail — a pull-down, a pull-up, a shunt, a
+///   bypass, an indicator — stands vertical between its rail and the signal, ground pin at
+///   the bottom and supply at the top. The rail it touches IS its role, so every part
+///   playing that role comes out at the same angle without any of them consulting the
+///   others: a pull-up beside a pull-down no longer lies down while its sibling stands.
+/// - An inductor, fuse or power diode is a link in the current path, not a leg off it, so
+///   it stands only for GROUND or between two rails, and otherwise lies along its row.
+/// - Anything else, and anything stacked in a column, follows its container: a part in a
+///   row lies along the row, which is what "a row is one signal path" means geometrically.
 pub fn default_pose(part: &Part, axis: Axis) -> Pose {
     if part.is_connector() || part.pins.len() > 4 {
         return Pose::default();
@@ -24,14 +30,26 @@ pub fn default_pose(part: &Part, axis: Axis) -> Pose {
         return upright(part);
     }
     let rails = part.rails();
-    let on_rail = rails.iter().any(|net| circuit_graph::netclass::is_ground(net)) || rails.len() == 2;
-    if on_rail || axis == Axis::Col {
+    let across_the_path = if legs_off_a_rail(part) {
+        !rails.is_empty()
+    } else {
+        rails.iter().any(|net| circuit_graph::netclass::is_ground(net)) || rails.len() == 2
+    };
+    if across_the_path || axis == Axis::Col {
         return standing(part);
     }
     Pose {
         angle: part.rotations_along(true).first().copied().unwrap_or(0.0),
         mirror: false,
     }
+}
+
+/// Whether this symbol is the kind a human hangs OFF a rail rather than threading a
+/// current path through: resistors, capacitors and LEDs, but not inductors, fuses or
+/// power diodes.
+fn legs_off_a_rail(part: &Part) -> bool {
+    let symbol = part.item.part.rsplit(':').next().unwrap_or_default();
+    matches!(symbol.split('_').next(), Some("R" | "C" | "LED"))
 }
 
 /// A multi-pin part (transistor, small regulator) turned so its rails point the way a

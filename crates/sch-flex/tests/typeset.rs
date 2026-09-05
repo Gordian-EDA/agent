@@ -274,3 +274,30 @@ fn a_decoupler_with_nowhere_to_sit_is_still_drawn() {
     sch_flex::typeset(&mut items, &trees(leaf("R1")), &[]);
     assert_ne!(items[0].at, items[1].at, "C1 was never placed");
 }
+
+/// The defect a reader names as "sibling orientation": a pull-up and a pull-down are the
+/// same part playing the same role — a leg off a rail — so they must stand the same way
+/// on the same baseline, however differently their rails are named. The engine used to
+/// stand only the pull-down and lay the pull-up along the row.
+#[test]
+fn a_pull_up_and_a_pull_down_in_one_row_stand_alike() {
+    let mut items = vec![
+        passive("R1", "3V3", "SCL"),
+        passive("R2", "SDA", "GND"),
+        passive("R3", "3V3", "NRST"),
+    ];
+    let tree = stack(Axis::Row, vec![leaf("R1"), leaf("R2"), leaf("R3")]);
+    sch_flex::typeset(&mut items, &trees(tree), &[]);
+    let angles: Vec<f64> = items.iter().map(|it| it.angle).collect();
+    let ys: Vec<f64> = items.iter().map(|it| it.at.y).collect();
+    assert!(
+        angles.windows(2).all(|w| w[0] == w[1]),
+        "siblings off one rail took different angles: {angles:?}"
+    );
+    assert!(
+        ys.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-9),
+        "siblings off one rail took different baselines: {ys:?}"
+    );
+    let vertical = items[0].geom.pins.iter().all(|p| p.at.x.abs() < 1e-9);
+    assert!(vertical && angles[0] % 180.0 == 0.0, "a leg off a rail stands: {angles:?}");
+}
