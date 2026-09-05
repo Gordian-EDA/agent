@@ -1227,7 +1227,11 @@ def critic(kind, rendered, prompt, facts, llm, anchor=None, same_circuit=False):
         args.append("--drc-clean")
     result = command(
         args,
-        timeout=300,
+        # Seven sequential reads of a large sheet on a loaded gateway pass 300 s; when
+        # the sample count went 3 -> 7 this did not follow it, and six renders of one
+        # suite came back unscored with "timed out after 300 seconds". Scale with the
+        # reads, not a constant.
+        timeout=150 * CRITIC_SAMPLES,
         check=False,
         env={
             **os.environ,
