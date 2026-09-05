@@ -233,6 +233,25 @@ impl SchDoc {
         Rect::bounding(&points)
     }
 
+    /// The bounding box of one drawn item, as KiCAD renders it — bodies from the
+    /// embedded definition, text boxed by its estimated width. `None` for an item with
+    /// no geometry of its own.
+    pub fn item_bbox(&self, item: &Item) -> Option<Rect> {
+        let mut points = Vec::new();
+        item_points(self, item, &mut points);
+        Rect::bounding(&points)
+    }
+
+    /// Shift the items named by `uuids` by `(dx, dy)` mm, leaving the rest where they are.
+    ///
+    /// Rigid only within the moved set, so a caller that moves part of a sheet owns the
+    /// proof that the netlist survived it.
+    pub fn translate_items(&mut self, uuids: &BTreeSet<String>, dx: f64, dy: f64) {
+        self.translate_where(dx, dy, |item| {
+            item.uuid().is_some_and(|u| uuids.contains(u))
+        });
+    }
+
     /// Shift every drawn item by `(dx, dy)` mm.
     ///
     /// Rigid, so no two points that coincided stop coinciding: the netlist is

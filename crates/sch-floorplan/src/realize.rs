@@ -366,26 +366,26 @@ mod tests {
         let _ = graft(&mut doc, second);
     }
 
-    /// A block whose natural landing is off the page must not drag the sheet under it.
+    /// A block whose natural landing is off the page comes onto it, and the sheet it
+    /// joins is re-packed around it: what a graft promises is a legible page and an
+    /// untouched netlist, not that the parts already down keep their coordinates.
     #[test]
-    fn graft_slides_only_the_new_block_onto_the_page() {
+    fn a_graft_lands_its_block_on_the_page() {
         let mut seated = SchematicWriter::new();
         seated.add_wire_on_net([101.6, 101.6], [127.0, 101.6], "SEATED");
         let mut doc = to_doc(seated).unwrap();
         doc.refit_page(&Default::default());
-        let before: Vec<geom::Point2> = doc.wires().flat_map(|w| w.points.clone()).collect();
-        let seated_y = before[0].y;
+        let before = sch_doc::connect::extract(&doc).partition();
 
         let mut block = SchematicWriter::new();
         block.add_wire_on_net([-25.4, -12.7], [-25.4, 12.7], "NEW");
         graft(&mut doc, block).unwrap();
 
-        let after: Vec<geom::Point2> = doc
-            .wires()
-            .filter(|w| w.points.iter().any(|p| p.y == seated_y))
-            .flat_map(|w| w.points.clone())
-            .collect();
-        assert_eq!(before, after, "the seated wire moved");
+        assert_eq!(
+            sch_doc::connect::extract(&doc).partition(),
+            before,
+            "the graft changed the sheet's connectivity"
+        );
         let bbox = doc.content_bbox().unwrap();
         assert!(
             bbox.min_x >= geom::PAGE_MARGIN && bbox.min_y >= geom::PAGE_MARGIN,

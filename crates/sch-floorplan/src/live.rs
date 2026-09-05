@@ -442,6 +442,16 @@ fn place_parts_inner(
         tracing::info!(?stitched, "wired the seams that were too short to need a name");
     }
     enforce_label_scopes(doc, &was_global);
+    // The sheet is finished; now pack it again from the frames its blocks have DRAWN.
+    // A seat works from a CLAIM — an upper bound, taken beside whatever was already
+    // down — so a sheet built one call at a time keeps the slack of every call before
+    // it, and only a pass over the drawn frames can give that back. It runs last, after
+    // the seams are wired, because a seam decided on the packed sheet is a long wire
+    // drawn where the two blocks used to be far apart.
+    let reseated = crate::reseat::reseat(doc);
+    if reseated.moved > 0 {
+        tracing::info!(?reseated, "re-seated the sheet around the block just drawn");
+    }
 
     let mut mismatch = live_phase("verify", placed.len(), inc.len(), || {
         verify(doc, &design)

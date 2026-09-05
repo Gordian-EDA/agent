@@ -199,13 +199,12 @@ fn beside_pages(there: Rect) -> Vec<[f64; 2]> {
 /// 12,815 mm². Nine blocks came out 2.9x the area the same nine pack into, and the
 /// sparsest agent sheets were exactly the ones built from the most calls.
 ///
-/// What is left to win here is about one point. Measured over the nine multi-frame
-/// fixtures of the block replay: the drawn frames leave 32.4% of their hull empty, an
-/// OFFLINE optimal pack of the very same claims — free to reorder the blocks — leaves
-/// about 31%, and an offline optimal pack of the frames as DRAWN leaves 15%. The 16 points
-/// between the last two are not packing at all: a claim is an upper bound and comes out
-/// 18.4% larger in area than the frame the realiser then draws inside it. Only a pass that
-/// re-seats blocks once they are drawn can reclaim that; no landing rule can.
+/// What is left to win here no landing rule can win. Measured over the multi-frame
+/// fixtures of the block replay: an offline optimal pack of the CLAIMS is worth about a
+/// point over this, where an offline pack of the frames as DRAWN is worth sixteen — a
+/// claim is an upper bound and comes out 18.4% larger in area than the frame the realiser
+/// then draws inside it. That is [`crate::reseat`]'s to reclaim, once the block is drawn
+/// and its frame is known exactly.
 fn seat_beside(movable: &mut [Item], frames: &[Rect], taken: &[Rect], drawn: &[Rect]) {
     let (Some(here), false) = (hull(frames), taken.is_empty()) else {
         return;
