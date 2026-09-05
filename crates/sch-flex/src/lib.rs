@@ -249,12 +249,7 @@ fn complete(
         let seat = serving
             .get(&i)
             .map(|s| (items[s.served].refdes.clone(), s.seat))
-            .or_else(|| {
-                items[i]
-                    .supports
-                    .clone()
-                    .map(|device| (device, Seat::Beside(Dir::East)))
-            })
+            .or_else(|| items[i].supports.clone().map(|device| (device, Seat::Bank)))
             .filter(|(device, _)| named.iter().any(|(r, _)| r == device));
         match seat {
             Some((device, seat)) => seat_in(beside.entry(device).or_default(), seat, key(i)),
@@ -316,7 +311,7 @@ fn in_pin_order(serving: &BTreeMap<usize, serve::Serves>) -> Vec<(usize, &serve:
 fn seat_in(flanks: &mut Flanks, seat: Seat, part: (String, u8)) {
     let len = |dir| flanks.get(&Seat::Beside(dir)).map_or(0, Vec::len);
     let seat = match seat {
-        Seat::Beside(Dir::West | Dir::East) | Seat::Next => seat,
+        Seat::Beside(Dir::West | Dir::East) | Seat::Next | Seat::Bank => seat,
         _ if len(Dir::West) < len(Dir::East) => Seat::Beside(Dir::West),
         _ => Seat::Beside(Dir::East),
     };
@@ -414,12 +409,16 @@ fn flanked(device: Tree, flanks: &Flanks) -> Tree {
         .flatten()
         .cloned()
         .map(|(part, unit)| Tree::leaf(part, unit));
+    let bank = flanks
+        .get(&Seat::Bank)
+        .map(|parts| Tree::row_of(parts.clone()));
     Tree::Container(Container {
         axis: Axis::Row,
         children: column(Dir::West)
             .into_iter()
             .chain([device])
             .chain(next)
+            .chain(bank)
             .chain(column(Dir::East))
             .collect(),
         gap: None,

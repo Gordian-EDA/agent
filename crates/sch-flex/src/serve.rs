@@ -31,6 +31,11 @@ pub(crate) enum Seat {
     /// In the column against the side of a DEVICE that its pin leaves from — the caps a
     /// human stacks along the edge of an MCU.
     Beside(Dir),
+    /// In one row after the device: a bank of decoupling caps, which touch no signal pin
+    /// and so have no pin line to sit on. Nothing about where it stands makes a wire, so
+    /// it takes the shape that costs the drawing least — a row beside the device it
+    /// supports, which is where a human writes it.
+    Bank,
     /// In the next seat of the row, hanging off the node — how a leg off a chain of
     /// two-pin parts is drawn. A column there would buy a whole column's width for one
     /// part that only ever needed the seat next door.
@@ -106,14 +111,13 @@ pub(crate) fn serving(items: &[Item], members: &[usize]) -> BTreeMap<usize, Serv
     out
 }
 
-/// A part the signal passes THROUGH: two pins, neither on a rail. A support part belongs
-/// beside one of these before it belongs beside the device at the far end of the net.
+/// A part the signal passes THROUGH: two pins, or a discrete whose only other pins are
+/// rails — a crystal, shield pins and all. A support part belongs beside one of these
+/// before it belongs beside the device at the far end of the net.
 fn links_a_chain(item: &Item) -> bool {
-    item.pins.len() == 2
-        && !item
-            .pins
-            .iter()
-            .any(|(_, _, net)| net.as_deref().is_some_and(is_power_net))
+    let rails = |net: &Option<String>| net.as_deref().is_some_and(is_power_net);
+    let signal = item.pins.iter().filter(|(_, _, net)| !rails(net)).count();
+    signal == 2 && (item.pins.len() == 2 || item.part.starts_with("Device:"))
 }
 
 /// The net a two-pin part's non-rail pin sits on, when its other pin sits on a rail.

@@ -965,7 +965,10 @@ fn face_neighbours(
         if !part_ref.two_pin() {
             // Turn the device to face the row it stands in, then line it up on the pin
             // that reaches its neighbour.
-            let pose = match axis == Axis::Row && turning_faces_more(part_ref, pose, &before, &after) {
+            let (left, right) = side_nets(children, parts, i);
+            let pose = match axis == Axis::Row
+                && turning_faces_more(part_ref, pose, &left, &right)
+            {
                 true => {
                     let turned = Pose { mirror: !pose.mirror, ..pose };
                     children[i] = leaf_node(part, parts, turned, axis);
@@ -1097,8 +1100,20 @@ fn connector_faces_away(part: &Part, pose: Pose, axis: Axis, i: usize, len: usiz
     }
 }
 
-/// Whether flipping a device left-for-right puts MORE of its pins on the side the
-/// neighbour sharing their net is on.
+/// The signal nets of everything before and after child `i` in its container.
+///
+/// Which way a device should FACE is decided against the whole row, not the part next to
+/// it: a device whose output net is read three seats to its right still belongs with that
+/// pin on the right, however its immediate neighbour is wired.
+fn side_nets(children: &[Node], parts: &[Part], i: usize) -> (BTreeSet<String>, BTreeSet<String>) {
+    let of = |range: &[Node]| -> BTreeSet<String> {
+        range.iter().flat_map(|k| k.signal_nets(parts)).collect()
+    };
+    (of(&children[..i]), of(&children[i + 1..]))
+}
+
+/// Whether flipping a device left-for-right puts MORE of its pins on the side the parts
+/// sharing their net are on.
 ///
 /// The same convention as the one that turns a connector at the end of a row, applied to
 /// the device in the middle of it: a level translator whose B pins are drawn on the right
@@ -1128,7 +1143,11 @@ fn turning_faces_more(
         mirror: !pose.mirror,
         ..pose
     };
-    facing(turned) > facing(pose)
+    // Only a device drawn ENTIRELY backwards is turned. Trading one wired side for the
+    // other reverses the convention the symbol was drawn with — a 555 whose timing parts
+    // happen to sit on its right ends up with its output pointing back into the block —
+    // and buys nothing the alignment line does not already give.
+    facing(pose) == 0 && facing(turned) > 0
 }
 
 /// Where a multi-pin part's alignment line goes: onto the pin that faces the neighbour it
