@@ -1,12 +1,15 @@
 //! Turn a KiCAD export into a PNG the LLM can see.
 //!
-//! The schematic goes out as PDF and is rasterized by poppler (`pdftoppm`), the
-//! renderer KiCAD's own PDF is written for. SVG rasterizers are not equivalent
-//! here: ImageMagick refuses a dense sheet outright (`vector graphics nested too
-//! deeply`), so the picture a grader scores has to come from the PDF.
+//! The schematic is exported as PDF and rasterized by poppler (`pdftoppm`), so
+//! the drawing reaches the grader through the renderer KiCAD writes it for.
+//! Rasterizing KiCAD's SVG means trusting a second reading of it, and both
+//! readings available here are lossy: ImageMagick refuses seven of the
+//! twenty-four corpus sheets outright (`vector graphics nested too deeply`),
+//! and `resvg` had to have KiCAD's zero-width wire strokes patched before it
+//! would draw them at all.
 //!
-//! `resvg` still draws the coordinate overlay — our own generated SVG, with the
-//! poppler raster embedded underneath it — and the PCB SVG exports.
+//! `resvg` still draws SVGs this workspace writes itself: the coordinate
+//! overlay, with the poppler raster embedded beneath it, and the PCB exports.
 
 use std::fmt::Write as _;
 use std::path::Path;
@@ -22,7 +25,7 @@ const DENSE_RENDER_ITEMS: usize = 40;
 const REFERENCE_TEXT_HEIGHT_MM: f64 = 0.8;
 const TARGET_REFERENCE_HEIGHT_PX: f64 = 10.0;
 
-/// Physical coordinate bounds represented by an SVG view box.
+/// A rectangle of sheet millimetres: an SVG view box, or a crop of a PDF page.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct RenderBounds {
     pub min_x: f64,
@@ -425,12 +428,9 @@ pub fn schematic_sheet(env: &KicadInstallation, sch: &Path) -> Result<SchematicS
 impl SchematicSheet {
     /// Rasterize `bounds` so its long edge is `long_edge_px` pixels.
     pub fn raster(&self, bounds: RenderBounds, long_edge_px: u32) -> Result<Raster> {
-        let long_mm = bounds.width().max(bounds.height());
-        anyhow::ensure!(long_mm > 0.0, "empty render bounds {bounds:?}");
-        let dpi = long_edge_px.max(1) as f64 / long_mm * 25.4;
-        let px = |mm: f64| (mm * dpi / 25.4).round().max(0.0) as u32;
-        let (x, y) = (px(bounds.min_x), px(bounds.min_y));
-        let (w, h) = (px(bounds.max_x) - x, px(bounds.max_y) - y);
+        let Some(Crop { dpi, x, y, w, h }) = crop(bounds, long_edge_px) else {
+            anyhow::bail!("empty render bounds {bounds:?}");
+        };
 
         let out = tempfile::tempdir().context("temp dir for schematic raster")?;
         let root = out.path().join("page");
@@ -465,6 +465,35 @@ impl SchematicSheet {
             png,
         })
     }
+}
+
+/// Where a millimetre rectangle lands on a PDF page rasterized at `dpi`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Crop {
+    dpi: f64,
+    x: u32,
+    y: u32,
+    w: u32,
+    h: u32,
+}
+
+/// The page crop whose long edge is `long_edge_px` pixels, or `None` if
+/// `bounds` encloses nothing.
+fn crop(bounds: RenderBounds, long_edge_px: u32) -> Option<Crop> {
+    let long_mm = bounds.width().max(bounds.height());
+    if long_mm <= 0.0 {
+        return None;
+    }
+    let dpi = long_edge_px.max(1) as f64 / long_mm * 25.4;
+    let px = |mm: f64| (mm * dpi / 25.4).round().max(0.0) as u32;
+    let (x, y) = (px(bounds.min_x), px(bounds.min_y));
+    Some(Crop {
+        dpi,
+        x,
+        y,
+        w: px(bounds.max_x) - x,
+        h: px(bounds.max_y) - y,
+    })
 }
 
 /// Wrap `raster` as an SVG in its own physical coordinates, so the coordinate
@@ -564,6 +593,28 @@ mod tests {
         assert!(overlaid.contains(">25</text>"));
         assert!(overlaid.contains(">X mm</text>"));
         assert!(overlaid.contains(">Y mm</text>"));
+    }
+
+    #[test]
+    fn a_crop_puts_the_requested_long_edge_on_the_page() {
+        let page = crop(RenderBounds::new(10.0, 20.0, 110.0, 70.0), 2000).expect("crop");
+        assert_eq!((page.w, page.h), (2000, 1000));
+        assert_eq!((page.x, page.y), (200, 400));
+        assert!((page.dpi - 2000.0 / 100.0 * 25.4).abs() < 1e-9);
+        assert_eq!(crop(RenderBounds::new(0.0, 0.0, 0.0, 0.0), 100), None);
+    }
+
+    #[test]
+    fn a_raster_carries_its_own_page_rectangle_into_the_overlay_svg() {
+        let raster = Raster {
+            png: vec![1, 2, 3],
+            bounds: RenderBounds::new(10.0, 20.0, 110.0, 70.0),
+            width_px: 2000,
+            height_px: 1000,
+        };
+        let svg = raster_svg(&raster);
+        assert!(svg.contains("viewBox=\"10.0000 20.0000 100.0000 50.0000\""));
+        assert!(svg.contains("href=\"data:image/png;base64,AQID\""));
     }
 
     #[test]
