@@ -904,9 +904,20 @@ def extract_object(text, key="score"):
         except json.JSONDecodeError:
             pass
     verdicts = [value for value in objects if key in value]
-    if not verdicts:
+    if verdicts:
+        return verdicts[-1]
+    # A grader that drops one quote inside its own JSON — `"...cramped.":""]` — used
+    # to cost the whole grade, and two of 28 human-look scores in one suite went to
+    # nothing that way. The score and the lists are still legible; read them loosely.
+    score = re.search(rf'"{re.escape(key)}"\s*:\s*(\d+(?:\.\d+)?)', text)
+    if score is None:
         raise ValueError(f"model returned no object with {key!r}: {text!r}")
-    return verdicts[-1]
+    loose = {key: int(float(score.group(1)))}
+    for field in ("worst_three", "what_a_human_would_change", "issues"):
+        block = re.search(rf'"{field}"\s*:\s*\[(.*?)\]', text, re.S)
+        if block:
+            loose[field] = re.findall(r'"((?:[^"\\]|\\.){8,}?)"', block.group(1))[:3]
+    return loose
 
 
 def llm_config():

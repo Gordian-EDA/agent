@@ -69,3 +69,30 @@ unrepairable blocking finding, not the guard; follow-up is with the loop lane.
 
 The DDR and ECG drops (9.00→7.00, 7.57→5.86) are within one run's swing on those
 cases; deterministic facts are checked below before blaming the typesetter.
+
+## Third run, main 4520f35a (+ rail names never hidden, orientation by chain fan-out, honest frames, guard v2, LED-polarity fix)
+
+| | second run | this run |
+| --- | --- | --- |
+| pass both attempts | 0 / 14 | 0 / 14 |
+| pass one attempt | 3 | **8** (555 8.57, stm32 8.29, current-sense 8.00, ddr, ibm, bjt, hbridge, arduino) |
+| mean critic, all 28 | 6.52 | 6.38 |
+| mean human-look (excluding 2 grader parse failures) | 5.08 | 5.08 |
+
+Deterministic state of main at this run, block-replay path: 51 frames for 51 blocks,
+0 overlapping frame pairs, 0 rail glyphs without a name, text collisions 214, scattered
+/ shorted / body overlaps 0 on all 24.
+
+## The finding that explains the flat mean
+
+Best-case is rising (eight single-attempt passes, the most ever); worst-case is not.
+Between two attempts of one case the critic differs by up to 3 points, and that is the
+agent, not the engine. Two facts from the logs:
+- 13 of 27 renders never called `review_schematic` at all.
+- Where it did, the agent's OWN critic grades with 3 samples and reports the modal —
+  the statistic proved unable to resolve a sheet (786458a2) — and tells the model to
+  stop when "the lowest sample reaches 9". It read 9.0 on three-phase#1 (harness 5.43)
+  and on bjt-preamp#1 (harness 6.57), and stopped. The reference wins by iterating until
+  its critic says 8; ours iterates on a critic that cannot see.
+Fix in flight: review tool on the 7-sample mean, finish gated on a review
+(lane/review-calibrated).
