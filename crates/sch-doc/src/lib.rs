@@ -69,7 +69,7 @@ mod sexpr;
 mod shadow;
 mod text;
 
-pub use body::{body_rect, body_rects};
+pub use body::{body_rect, body_rects, definition_unit_box};
 pub use connect::{Net, NetDelta, NetSource, Netlist, PinRef, Scene};
 pub use doc::{SchDoc, SnapshotId};
 pub use drawn::drawn_texts;

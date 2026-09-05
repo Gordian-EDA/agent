@@ -586,6 +586,40 @@ pub fn pin_texts(
     })
 }
 
+/// The rectangle one placed UNIT occupies out to its PIN TIPS — the line
+/// outside which text is beside the part rather than on it.
+///
+/// The drawn body is where the ink stops; this is where the pins do. Field text
+/// seats off the union of the two, so a refdes clears the pin stubs without
+/// standing the padding-width of a placement cell out in open paper.
+pub fn unit_extent_box(
+    pins: &[PinGeom],
+    unit: u8,
+    inst_at: Point2,
+    inst_angle: f64,
+    inst_mirror: bool,
+) -> Option<Rect> {
+    let corners: Vec<Point2> = pins
+        .iter()
+        .filter(|p| p.unit.max(1) == unit.max(1))
+        .map(|p| {
+            let off = p.at.transform_offset(inst_angle, inst_mirror);
+            Point2::new(inst_at.x + off.x, inst_at.y + off.y)
+        })
+        .collect();
+    // A single pin row leaves one axis degenerate — a passive's pins run down
+    // its centre line — but the body still draws a shape with width. One grid
+    // step is what KiCAD's own passives span across that axis.
+    const MIN_SPAN: f64 = 2.54;
+    Rect::bounding(&corners).map(|r| {
+        let (gx, gy) = (
+            (MIN_SPAN - r.width()).max(0.0) / 2.0,
+            (MIN_SPAN - r.height()).max(0.0) / 2.0,
+        );
+        Rect::new(r.min_x - gx, r.min_y - gy, r.max_x + gx, r.max_y + gy)
+    })
+}
+
 /// [`pin_texts`] without the kinds — what an obstacle set needs.
 pub fn pin_text_boxes(
     pin: &PinGeom,
