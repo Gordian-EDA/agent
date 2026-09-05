@@ -36,6 +36,7 @@ use sch_model::tree::{Align, Axis, Container, Tree, Trees};
 use measure::typeset_block;
 use pack::{BLOCK_GAP, FRAME_PAD, corner_pack};
 use part::Part;
+use serve::Seat;
 /// The width-to-height ratio a graft aims for when no page is named — a landscape page's
 /// usable area.
 pub(crate) const SHEET_ASPECT: f64 = 1.5;
@@ -237,14 +238,26 @@ fn complete(
     let serving = serve::serving(items, members);
     let mut beside: BTreeMap<String, Flanks> = BTreeMap::new();
     let mut orphans: Vec<(String, u8)> = Vec::new();
+    let order = in_pin_order(&serving);
+    let missing: Vec<usize> = order
+        .iter()
+        .map(|(i, _)| *i)
+        .filter(|i| missing.contains(i))
+        .chain(missing.iter().copied().filter(|i| !serving.contains_key(i)))
+        .collect();
     for i in missing {
         let seat = serving
             .get(&i)
-            .map(|s| (items[s.served].refdes.clone(), s.side))
-            .or_else(|| items[i].supports.clone().map(|device| (device, Dir::East)))
+            .map(|s| (items[s.served].refdes.clone(), s.seat))
+            .or_else(|| {
+                items[i]
+                    .supports
+                    .clone()
+                    .map(|device| (device, Seat::Beside(Dir::East)))
+            })
             .filter(|(device, _)| named.iter().any(|(r, _)| r == device));
         match seat {
-            Some((device, side)) => seat_in(beside.entry(device).or_default(), side, key(i)),
+            Some((device, seat)) => seat_in(beside.entry(device).or_default(), seat, key(i)),
             None => orphans.push(key(i)),
         }
     }
@@ -279,22 +292,35 @@ fn complete(
     })
 }
 
-/// The parts serving one device, by the side of it they sit on.
-type Flanks = BTreeMap<Dir, Vec<(String, u8)>>;
+/// The parts serving one device, by where beside it they sit.
+type Flanks = BTreeMap<Seat, Vec<(String, u8)>>;
+
+/// The support parts of a block, ordered so that each column reaches its pins in the order
+/// they are drawn down the device: a column seated in any other order has its wires
+/// crossing each other on the way in.
+fn in_pin_order(serving: &BTreeMap<usize, serve::Serves>) -> Vec<(usize, &serve::Serves)> {
+    let mut out: Vec<(usize, &serve::Serves)> = serving.iter().map(|(i, s)| (*i, s)).collect();
+    out.sort_by(|(i, a), (j, b)| {
+        (a.served, a.line, *i)
+            .partial_cmp(&(b.served, b.line, *j))
+            .expect("a pin line is a number")
+    });
+    out
+}
 
 /// Add one support part to a device's flanks.
 ///
 /// A pin on the TOP or BOTTOM edge of a symbol belongs to neither column, so it joins the
 /// shorter one: a device whose supports all hang off its edges gets two short columns
 /// rather than one tower down one side.
-fn seat_in(flanks: &mut Flanks, side: Dir, part: (String, u8)) {
-    let len = |side| flanks.get(&side).map_or(0, Vec::len);
-    let side = match side {
-        Dir::West | Dir::East => side,
-        _ if len(Dir::West) < len(Dir::East) => Dir::West,
-        _ => Dir::East,
+fn seat_in(flanks: &mut Flanks, seat: Seat, part: (String, u8)) {
+    let len = |dir| flanks.get(&Seat::Beside(dir)).map_or(0, Vec::len);
+    let seat = match seat {
+        Seat::Beside(Dir::West | Dir::East) | Seat::Next => seat,
+        _ if len(Dir::West) < len(Dir::East) => Seat::Beside(Dir::West),
+        _ => Seat::Beside(Dir::East),
     };
-    flanks.entry(side).or_default().push(part);
+    flanks.entry(seat).or_default().push(part);
 }
 
 /// The row a block whose author composed no tree is drawn as: its parts in payload order,
@@ -308,15 +334,16 @@ fn bare_row(items: &[Item], members: &[usize]) -> Tree {
     let serving = serve::serving(items, members);
     let key = |i: usize| (items[i].refdes.clone(), items[i].unit);
     let mut flanks: BTreeMap<usize, Flanks> = BTreeMap::new();
-    for (server, s) in &serving {
-        seat_in(flanks.entry(s.served).or_default(), s.side, key(*server));
+    for (server, s) in in_pin_order(&serving) {
+        seat_in(flanks.entry(s.served).or_default(), s.seat, key(server));
     }
     let children: Vec<Tree> = members
         .iter()
+        .copied()
         .filter(|i| !serving.contains_key(i))
         .map(|i| {
-            let leaf = Tree::leaf(items[*i].refdes.clone(), items[*i].unit);
-            match flanks.get(i) {
+            let leaf = Tree::leaf(items[i].refdes.clone(), items[i].unit);
+            match flanks.get(&i) {
                 Some(flanks) => flanked(leaf, flanks),
                 None => leaf,
             }
@@ -365,25 +392,34 @@ fn seat_beside(tree: &Tree, device: &str, flanks: &Flanks) -> Tree {
 /// in it a page from the pin it serves.
 fn flanked(device: Tree, flanks: &Flanks) -> Tree {
     let column = |side| {
-        flanks.get(&side).map(|parts: &Vec<(String, u8)>| {
-            Tree::Container(Container {
-                axis: Axis::Col,
-                children: parts
-                    .iter()
-                    .cloned()
-                    .map(|(part, unit)| Tree::leaf(part, unit))
-                    .collect(),
-                gap: None,
-                align: Align::Center,
-                wrap: Some(f64::INFINITY),
+        flanks
+            .get(&Seat::Beside(side))
+            .map(|parts: &Vec<(String, u8)>| {
+                Tree::Container(Container {
+                    axis: Axis::Col,
+                    children: parts
+                        .iter()
+                        .cloned()
+                        .map(|(part, unit)| Tree::leaf(part, unit))
+                        .collect(),
+                    gap: None,
+                    align: Align::Center,
+                    wrap: Some(f64::INFINITY),
+                })
             })
-        })
     };
+    let next = flanks
+        .get(&Seat::Next)
+        .into_iter()
+        .flatten()
+        .cloned()
+        .map(|(part, unit)| Tree::leaf(part, unit));
     Tree::Container(Container {
         axis: Axis::Row,
         children: column(Dir::West)
             .into_iter()
             .chain([device])
+            .chain(next)
             .chain(column(Dir::East))
             .collect(),
         gap: None,

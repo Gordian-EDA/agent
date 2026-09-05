@@ -75,8 +75,9 @@ fn main() {
         if verbose {
             for p in &pairs {
                 println!(
-                    "    {:<7} {:<6} → {:<10} net={:<18} {:>6.1}mm {}",
+                    "    {:<7} {:<9} {:<6} → {:<10} net={:<18} {:>6.1}mm {}",
                     p.kind.name(),
+                    if p.together { "in-block" } else { "across" },
                     p.part,
                     p.served,
                     p.net,
