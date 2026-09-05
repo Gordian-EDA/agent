@@ -28,6 +28,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use geom::{GRID_50_MIL, Point2, Rect};
 use sch_doc::{Item, SchDoc, connect};
+use sch_model::text::TextKind;
 
 /// How far a caption may sit from the frame it names, in mm — the same reach
 /// [`crate::realize`] pairs one by.
@@ -292,6 +293,29 @@ fn union(a: &Rect, b: &Rect) -> Rect {
     )
 }
 
+/// Wire segments running through a net label that is not their own.
+///
+/// Packing blocks closer leaves the router less air, and the ink it then has least room
+/// for is the label column between two blocks. This is that cost, counted so a re-seat
+/// that buys its page with unreadable labels is refused.
+fn label_hits(doc: &SchDoc) -> usize {
+    let labels: Vec<sch_model::text::DrawnText> = sch_doc::drawn_texts(doc)
+        .into_iter()
+        .filter(|t| matches!(t.kind, TextKind::Label | TextKind::PortLabel))
+        .collect();
+    sch_doc::connect::scene(doc)
+        .segments
+        .into_iter()
+        .map(|(a, b, net)| {
+            let seg = geom::Segment::new(a, b);
+            labels
+                .iter()
+                .filter(|t| t.text != net && seg.axis_aligned_hits_rect_interior(&t.bbox))
+                .count()
+        })
+        .sum()
+}
+
 /// How big the sheet is, ranked the way a reader sees it: the paper first, and how much
 /// of the drawing's own hull is air only within one paper size. A wide ribbon has the
 /// smaller hull and buys the bigger sheet, so hull alone is the wrong objective.
@@ -343,6 +367,7 @@ pub fn reseat(doc: &mut SchDoc) -> Reseat {
 
     let partition = connect::extract(doc).partition();
     let overlaps = crate::visual::body_overlaps(doc).len();
+    let over_labels = label_hits(doc);
     let snapshot = doc.snapshot();
     let moved = pieces
         .iter()
@@ -359,7 +384,8 @@ pub fn reseat(doc: &mut SchDoc) -> Reseat {
     let now = sheet_size(doc);
     let kept = now < was
         && connect::extract(doc).partition() == partition
-        && crate::visual::body_overlaps(doc).len() <= overlaps;
+        && crate::visual::body_overlaps(doc).len() <= overlaps
+        && label_hits(doc) <= over_labels;
     if !kept {
         tracing::debug!(?was, ?now, "the re-seated sheet was no better; kept the seats");
         let _ = doc.restore(snapshot);
