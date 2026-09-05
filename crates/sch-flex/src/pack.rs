@@ -8,13 +8,98 @@
 //! blocks would have landed had they been packed together.
 
 use geom::{PAGE_MARGIN as MARGIN, Point2, Rect};
+use sch_model::item::Item;
 use sch_model::tree::UNIT_MM;
+
+use crate::part::{Part, Pose};
 
 /// Air between two block frames the typesetter packs onto a page of its own.
 pub const BLOCK_GAP: f64 = 6.0 * UNIT_MM;
-/// Room each block keeps outside its parts for the dashed frame the realiser draws around
-/// it and the field text the solver seats along its edge.
+/// Air between a block's outermost ink and the dashed frame the realiser draws around it.
+/// A hairline over the pad the realiser itself uses, so a frame drawn around the ink a
+/// block claimed stays inside the claim.
 pub const FRAME_PAD: f64 = 4.0 * UNIT_MM;
+
+/// The sheet a block CLAIMS: everything its parts can draw at the poses they now hold —
+/// bodies, the reference/value pair, and the net labels and rail glyphs hanging off their
+/// pins — grown by [`FRAME_PAD`], which is the rect the realiser then outlines.
+///
+/// This is the ONE rect a block claims: a graft seats it among the frames a sheet already
+/// carries, and the realiser draws its outline around the same ink. Measuring the seat on
+/// bare bodies is what put a grafted frame straight through its neighbour's.
+///
+/// Room is kept for a label on EVERY connected pin, not just the one pin per net that
+/// leaves the block ([`crate::label_pins`], which is what the block's INTERNAL spacing is
+/// measured with). What the writer actually labels is decided by the router, downstream of
+/// every placement: a net it cannot wire is drawn as a label on each of its pins, and a
+/// claim that assumed otherwise came up 15 mm short of the frame the realiser then drew.
+/// A claim is the one measure that has to be an upper bound.
+///
+/// The reference/value pair is measured the same way and for the same reason: which of a
+/// body's four sides the text solver seats it against is settled after the sheet is drawn,
+/// so the claim keeps room on all four. [`sch_model::geometry::field_pad`] reserves only
+/// the band an IC stacks its pair in, which is the right answer for the spacing INSIDE a
+/// block and 6 mm short of a passive's frame at the edge of one.
+pub fn block_frame(items: &[Item], members: &[usize]) -> Option<Rect> {
+    /// A clear line between a body and the reference/value pair seated beside it, and the
+    /// band the same pair takes above or below one — the four sides `write::textsolve`
+    /// chooses between.
+    const FIELD_GAP: f64 = 1.27;
+    const FIELD_BAND: f64 = 5.59;
+    let fields = |item: &Item| {
+        let text = sch_model::text::text_width(&item.value)
+            .max(sch_model::text::text_width(&item.refdes));
+        let r = sch_model::geometry::body_rect(item, item.at);
+        Rect::new(
+            r.min_x - FIELD_GAP - text,
+            r.min_y - FIELD_BAND,
+            r.max_x + FIELD_GAP + text,
+            r.max_y + FIELD_BAND,
+        )
+    };
+    let labelled = members
+        .iter()
+        .flat_map(|i| {
+            items[*i]
+                .pins
+                .iter()
+                .filter(|(_, _, net)| net.is_some())
+                .map(move |(number, ..)| (*i, number.clone()))
+        })
+        .collect();
+    members
+        .iter()
+        .map(|i| {
+            let item = &items[*i];
+            let pose = Pose {
+                angle: item.angle,
+                mirror: item.mirror,
+            };
+            let r = Part::new(*i, item, &labelled).extent(pose);
+            let drawn = Rect::new(
+                item.at.x + r.min_x,
+                item.at.y + r.min_y,
+                item.at.x + r.max_x,
+                item.at.y + r.max_y,
+            );
+            let text = fields(item);
+            Rect::new(
+                drawn.min_x.min(text.min_x),
+                drawn.min_y.min(text.min_y),
+                drawn.max_x.max(text.max_x),
+                drawn.max_y.max(text.max_y),
+            )
+        })
+        .reduce(|a, b| {
+            Rect::new(
+                a.min_x.min(b.min_x),
+                a.min_y.min(b.min_y),
+                a.max_x.max(b.max_x),
+                a.max_y.max(b.max_y),
+            )
+        })
+        .map(|hull| hull.inflate(FRAME_PAD))
+}
 
 /// A placed block's rect grown by half `gap` on every side, so two blocks that merely
 /// respect the gap do not read as overlapping.
@@ -77,6 +162,60 @@ pub fn corner_pack(sizes: &[(f64, f64)], order: &[usize], limit: f64) -> (Vec<Po
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A vertical `Device:R` at the origin, with `net` on its top pin.
+    fn resistor(refdes: &str, net: &str) -> Item {
+        let pin = |number: &str, y: f64, angle: f64| kicad_symbol::geometry::PinGeom {
+            number: number.into(),
+            name: "~".into(),
+            at: Point2::new(0.0, y),
+            angle,
+            length: 2.54,
+            unit: 1,
+            text: Default::default(),
+        };
+        Item {
+            refdes: refdes.into(),
+            block: "filter".into(),
+            part: "Device:R".into(),
+            value: "10k".into(),
+            footprint: None,
+            geom: kicad_symbol::geometry::SymbolGeometry {
+                lib_id: "Device:R".into(),
+                pins: vec![pin("1", 3.81, 270.0), pin("2", -3.81, 90.0)],
+                raw_definition: String::new(),
+            },
+            pins: vec![("1".into(), String::new(), Some(net.into()))],
+            at: Point2::new(100.0, 100.0),
+            angle: 0.0,
+            unit: 1,
+            mirror: false,
+            preseeded: false,
+            supports: None,
+        }
+    }
+
+    /// The claim covers everything the sheet will draw for the block, whatever the router
+    /// and the text solver then decide: the label on a pin — on EVERY pin, since which
+    /// ones get one is settled downstream — and the reference/value pair on whichever
+    /// side of the body it lands.
+    #[test]
+    fn a_claim_covers_the_text_the_block_has_yet_to_draw() {
+        let items = [resistor("R1", "VERY_LONG_NET_NAME")];
+        let claim = block_frame(&items, &[0]).expect("a block with a part has a frame");
+        let body = sch_model::geometry::body_rect(&items[0], items[0].at);
+
+        let label = sch_model::text::text_width("VERY_LONG_NET_NAME");
+        assert!(
+            claim.min_y <= body.min_y - label,
+            "the label off pin 1 reaches out of the claim: {claim:?}"
+        );
+        let field = sch_model::text::text_width("10k").max(sch_model::text::text_width("R1"));
+        assert!(
+            claim.min_x <= body.min_x - field && claim.max_x >= body.max_x + field,
+            "the field pair reaches out of the claim: {claim:?}"
+        );
+    }
 
     /// A third block tucks into the band a short second block leaves beside a tall first,
     /// instead of starting a row below both — the dead page a shelf pack cannot use.

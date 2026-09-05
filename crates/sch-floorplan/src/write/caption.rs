@@ -20,7 +20,9 @@ pub struct BlockFrame<'a> {
     pub members: &'a [String],
 }
 
-/// Air between the block's outermost ink and its frame.
+/// Air between the block's outermost ink and its frame. Never more than the pad
+/// [`sch_flex::pack::block_frame`] claims for the block, so a frame drawn around the ink
+/// a seat reserved for stays inside the sheet that seat was given.
 const FRAME_PAD: f64 = 3.81;
 /// Air between a frame and the caption seated against it. A caption whose
 /// ascenders graze the dashed border reads as a mistake, so this is a clear
