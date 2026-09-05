@@ -353,8 +353,8 @@ fn render_instance(inst: &Instance, root_uuid: &str) -> String {
     let hide_ref = inst.refdes.starts_with('#');
     // Hide the Value of PWR_FLAG symbols (keyed on lib_id) — the graphic makes
     // the flag self-evident and the "PWR_FLAG" string would clutter power rail
-    // junctions. Also hide solver-suppressed values (`val_hidden`).
-    let hide_val = inst.lib_id == "power:PWR_FLAG" || inst.val_hidden;
+    // junctions.
+    let hide_val = inst.lib_id == "power:PWR_FLAG";
 
     let mut s = String::new();
     s.push_str("\t(symbol\n");

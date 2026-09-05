@@ -129,7 +129,6 @@ impl SchematicWriter {
             half_extents,
             ref_pos: None,
             val_pos: None,
-            val_hidden: false,
             unit: 1,
         });
         Ok(())
@@ -705,30 +704,14 @@ impl SchematicWriter {
                 // glyph gets the same keepout the no-connect X gets: tagged with its own
                 // net, which its stub may reach and every other wire detours around.
                 scene.points.push((inst.at, inst.value.clone()));
-                // The glyph reaches ~2.5 mm from the anchor along the stub and is barely
-                // wider than the wire across it; the keepout is the drawn triangle plus a
-                // hair, not the symbol's padded placement box, so it never walls off the
-                // channel beside a rail.
-                let h = Point2::new(1.27, 3.175).rotated_half_extents(inst.angle);
-                scene.label_solids.push((
-                    Rect::new(
-                        inst.at[0] - h[0],
-                        inst.at[1] - h[1],
-                        inst.at[0] + h[0],
-                        inst.at[1] + h[1],
-                    ),
-                    inst.value.clone(),
-                ));
+                // The keepout is the drawn triangle plus a hair, not the symbol's padded
+                // placement box, so it never walls off the channel beside a rail.
+                scene
+                    .label_solids
+                    .push((ink_box(inst), inst.value.clone()));
                 continue;
             }
-            let h = inst.half_extents.rotated_half_extents(inst.angle);
-            let (hx, hy) = ((h[0] - 2.54).max(1.27), (h[1] - 2.54).max(1.27));
-            scene.solids.push(Rect::new(
-                inst.at[0] - hx,
-                inst.at[1] - hy,
-                inst.at[0] + hx,
-                inst.at[1] + hy,
-            ));
+            scene.solids.push(ink_box(inst));
         }
         // A no-connect X is a glyph with real extent, owned by no net. Register it
         // both as a foreign anchor point (a wire may not pass exactly through it) AND
@@ -1113,6 +1096,30 @@ pub fn pin_end0(env: &KicadInstallation, lib_id: &str, pin: &str) -> io::Result<
         .into_iter()
         .map(|pg| <[f64; 2]>::from(pg.at.transform_offset(0.0, false)))
         .collect())
+}
+
+/// The box of INK an instance actually draws — body graphic plus pin lines —
+/// as opposed to [`Instance::half_extents`], which is the PADDED placement
+/// cell (`approx_size` adds 2.54 mm per side beyond the pin endpoints).
+///
+/// Two consumers need the ink, not the cell: the router (a wire may graze the
+/// padding but never the glyph) and the text solver (a field is legible in the
+/// padding; it is unreadable on top of a body). A power symbol's glyph is a
+/// small triangle at its anchor and never fills the 10 mm cell `approx_size`
+/// floors it to, so it is measured directly.
+pub(crate) fn ink_box(inst: &Instance) -> Rect {
+    let h = if inst.refdes.starts_with('#') {
+        Point2::new(1.27, 3.175).rotated_half_extents(inst.angle)
+    } else {
+        let h = inst.half_extents.rotated_half_extents(inst.angle);
+        Point2::new((h[0] - 2.54).max(1.27), (h[1] - 2.54).max(1.27))
+    };
+    Rect::new(
+        inst.at[0] - h[0],
+        inst.at[1] - h[1],
+        inst.at[0] + h[0],
+        inst.at[1] + h[1],
+    )
 }
 
 #[cfg(test)]

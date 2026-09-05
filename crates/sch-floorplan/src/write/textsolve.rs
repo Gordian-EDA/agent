@@ -48,8 +48,6 @@ enum Apply {
     SwivelLabel(usize, Vec<Dir>),
     /// instances[i]: per-candidate (Reference, Value) anchors.
     Fields(usize, Vec<(TextPos, TextPos)>),
-    /// instances[i]: per-candidate Value anchor (power rail name).
-    PowerVal(usize, Vec<TextPos>),
 }
 
 impl SchematicWriter {
@@ -350,12 +348,14 @@ impl SchematicWriter {
     }
 
     /// Assign collision-free positions to all movable text via the greedy
-    /// candidate solver [`crate::label::choose`].
+    /// candidate solver [`crate::label::GreedyText`].
     ///
-    /// Builds the obstacle scene ([`Self::build_obstacles`]) then the movables
-    /// in most-constrained-first order — stub signal labels
-    /// ([`Self::stub_label_movables`]) ahead of the refdes-ordered field/power
-    /// pass ([`Self::field_movables`]) — solves, and applies each pick.
+    /// Builds the obstacle scene ([`Self::build_obstacles`]), seats the power
+    /// rail names first ([`Self::seat_rail_names`] — they outrank every other
+    /// movable and are never hidden), then solves the rest in
+    /// most-constrained-first order: stub signal labels
+    /// ([`Self::stub_label_movables`]) ahead of the refdes-ordered field pass
+    /// ([`Self::field_movables`]).
     ///
     /// Idempotent: every assignment is recomputed from scratch on each call
     /// (a retract-chosen label has no stub on the re-run and becomes a fixed
@@ -365,7 +365,9 @@ impl SchematicWriter {
         use crate::label::GreedyText;
         use sch_model::text::TextSolver;
 
-        let obstacles = self.build_obstacles();
+        let mut obstacles = self.build_obstacles();
+        obstacles.extend(self.seat_rail_names(&obstacles));
+
         let (mut movables, mut applies) = self.stub_label_movables();
         for (m, a) in [self.swivel_label_movables(), self.field_movables()] {
             movables.extend(m);
@@ -373,13 +375,8 @@ impl SchematicWriter {
         }
 
         let picks = GreedyText.solve(&obstacles, &movables);
-        for (
-            apply,
-            sch_model::text::Pick {
-                candidate: pick,
-                fits,
-            },
-        ) in applies.into_iter().zip(picks)
+        for (apply, sch_model::text::Pick { candidate: pick, .. }) in
+            applies.into_iter().zip(picks)
         {
             match apply {
                 Apply::StubLabel(i) => {
@@ -415,14 +412,6 @@ impl SchematicWriter {
                     self.instances[i].ref_pos = Some(r);
                     self.instances[i].val_pos = Some(v);
                 }
-                Apply::PowerVal(i, cands) => {
-                    // A rail name with no free spot is OPTIONAL text: hide it
-                    // rather than smear it over a sibling. Greedy order means
-                    // the first symbol of a tight same-rail run shows the
-                    // name and the rest hide — the conventional tidy look.
-                    self.instances[i].val_pos = Some(cands[pick]);
-                    self.instances[i].val_hidden = !fits;
-                }
             }
         }
     }
@@ -434,15 +423,8 @@ impl SchematicWriter {
         use sch_model::text::{Obstacle, Owner, pin_text_boxes, wire_box};
         let mut obstacles: Vec<Obstacle> = Vec::new();
         for inst in &self.instances {
-            let h = inst.half_extents.rotated_half_extents(inst.angle);
             obstacles.push(Obstacle {
-                bbox: [
-                    inst.at[0] - h[0],
-                    inst.at[1] - h[1],
-                    inst.at[0] + h[0],
-                    inst.at[1] + h[1],
-                ]
-                .into(),
+                bbox: crate::write::build::ink_box(inst),
                 owner: Some(Owner::Symbol(inst.refdes.clone())),
             });
             // Pin name/number text (skip power/flag graphics — single
@@ -552,46 +534,122 @@ impl SchematicWriter {
             .unzip()
     }
 
-    /// Reference+Value field pairs and power-symbol rail names, in deterministic
-    /// refdes order (one shared pass, so greedy solve order is stable). Each
-    /// instance dispatches to [`Self::power_value_movable`] (power symbols) or
-    /// [`Self::field_pair_movable`] (everything else).
+    /// Reference+Value field pairs, in deterministic refdes order so the greedy
+    /// solve order is stable. Power symbols carry no such pair — their rail name
+    /// is seated ahead of everything by [`Self::seat_rail_names`].
     fn field_movables(&self) -> (Vec<sch_model::text::Movable>, Vec<Apply>) {
-        let mut movables: Vec<sch_model::text::Movable> = Vec::new();
-        let mut applies = Vec::new();
-        let mut order: Vec<usize> = (0..self.instances.len()).collect();
+        let mut order: Vec<usize> = (0..self.instances.len())
+            .filter(|&i| !self.instances[i].refdes.starts_with('#'))
+            .collect();
         order.sort_by(|&a, &b| self.instances[a].refdes.cmp(&self.instances[b].refdes));
-        for &i in &order {
-            let pair = if self.instances[i].refdes.starts_with('#') {
-                self.power_value_movable(i)
-            } else {
-                Some(self.field_pair_movable(i))
-            };
-            if let Some((m, a)) = pair {
-                movables.push(m);
-                applies.push(a);
-            }
-        }
-        (movables, applies)
+        order.into_iter().map(|i| self.field_pair_movable(i)).unzip()
     }
 
-    /// Power-symbol Value (the rail name): beyond the symbol tip (below for
-    /// down-pointing GND-family rails, above otherwise), else right / left — so
-    /// adjacent rails never merge their names. `None` for `power:PWR_FLAG`,
-    /// whose Value is hidden and has nothing to place.
-    fn power_value_movable(&self, i: usize) -> Option<(sch_model::text::Movable, Apply)> {
-        use sch_model::text::Movable;
+    /// Seat every power-symbol rail name, ahead of all other movable text.
+    ///
+    /// A rail glyph with no name beside it is a power connection the reader
+    /// cannot identify, so this text is not optional: it is never hidden, and it
+    /// is solved FIRST — the boxes returned here become obstacles, so net labels
+    /// and field text move around a rail name rather than the reverse.
+    ///
+    /// Acceptance relaxes in tiers, nearest spot first within each, until every
+    /// name is seated. The tiers are exactly the obstacle classes, told apart by
+    /// their [`sch_model::text::Owner`]:
+    ///
+    /// 1. clear of everything;
+    /// 2. crossing a WIRE ([`Owner::Net`]) allowed — a name over a wire still reads;
+    /// 3. crossing a BODY ([`Owner::Symbol`]) allowed too, leaving only unowned
+    ///    ink — pin text, no-connects, fixed labels — to dodge. Two names merged
+    ///    into one unreadable run is the artifact worth avoiding longest.
+    ///
+    /// A name that clears nothing even then takes its nearest candidate anyway.
+    fn seat_rail_names(&mut self, obstacles: &[sch_model::text::Obstacle]) -> Vec<sch_model::text::Obstacle> {
+        use crate::label::GreedyText;
+        use sch_model::text::{Obstacle, Owner, TextSolver};
+
+        let mut order: Vec<usize> = (0..self.instances.len())
+            .filter(|&i| {
+                self.instances[i].refdes.starts_with('#')
+                    && self.instances[i].lib_id != "power:PWR_FLAG"
+            })
+            .collect();
+        order.sort_by(|&a, &b| self.instances[a].refdes.cmp(&self.instances[b].refdes));
+        let seats: Vec<Vec<(TextPos, Rect)>> =
+            order.iter().map(|&i| self.rail_name_seats(i)).collect();
+
+        let tiers: [fn(&Owner) -> bool; 3] = [
+            |_| true,
+            |o| !matches!(o, Owner::Net(_)),
+            |o| !matches!(o, Owner::Net(_) | Owner::Symbol(_)),
+        ];
+        let mut pending: Vec<usize> = (0..order.len()).collect();
+        let mut placed: Vec<Obstacle> = Vec::new();
+        for (tier, keeps) in tiers.iter().enumerate() {
+            if pending.is_empty() {
+                break;
+            }
+            let scene: Vec<Obstacle> = obstacles
+                .iter()
+                .filter(|o| o.owner.as_ref().is_none_or(|w| keeps(w)))
+                .chain(placed.iter())
+                .cloned()
+                .collect();
+            let movables: Vec<sch_model::text::Movable> = pending
+                .iter()
+                .map(|&k| sch_model::text::Movable {
+                    owner: Some(Owner::Symbol(self.instances[order[k]].refdes.clone())),
+                    candidates: seats[k].iter().map(|c| c.1).collect(),
+                })
+                .collect();
+            let picks = GreedyText.solve(&scene, &movables);
+            let last = tier + 1 == tiers.len();
+            let mut still = Vec::new();
+            for (&k, pick) in pending.iter().zip(picks) {
+                if !pick.fits && !last {
+                    still.push(k);
+                    continue;
+                }
+                let (pos, bbox) = seats[k][pick.candidate];
+                self.instances[order[k]].val_pos = Some(pos);
+                placed.push(Obstacle { bbox, owner: None });
+            }
+            pending = still;
+        }
+        placed
+    }
+
+    /// Which way a power symbol's GLYPH points out of its anchor: the opposite
+    /// of the direction its single pin connects.
+    ///
+    /// `power:GND` draws below its pin and `power:+3V3` above, both at instance
+    /// angle 0 — the instance angle alone cannot tell them apart, and guessing
+    /// from it seats half the rail names straight through the part they hang off.
+    fn rail_glyph_dir(&self, inst: &super::Instance) -> Dir {
+        use sch_model::geometry::quantize_dir;
+        self.sym_pins
+            .get(&inst.lib_id)
+            .and_then(|pins| pins.first())
+            .map(|pg| quantize_dir(pg.angle, inst.angle, inst.mirror).opposite())
+            .unwrap_or(Dir::North)
+    }
+
+    /// Candidate seats for one power symbol's rail name, nearest first: beyond
+    /// the glyph tip, then to either side of it, that ring repeated at two
+    /// further removes so a glyph in a crowd still has somewhere legible to put
+    /// its name.
+    ///
+    /// Offsets are measured from the DRAWN glyph — a stubby ~2.5 mm wedge on one
+    /// side of the anchor — not from the symbol's placement cell, which
+    /// `approx_size` floors to 10 mm square: seating off the cell strands the
+    /// name 5 mm out in open space and leaves two rails a hand's width apart
+    /// declaring each other blocked.
+    ///
+    /// Each candidate is the anchor the writer will emit, boxed by the model that
+    /// measures what KiCAD then draws there — so a spot the solver approves is a
+    /// spot the readability lint clears.
+    fn rail_name_seats(&self, i: usize) -> Vec<(TextPos, Rect)> {
         let r2 = |v: f64| (v * 100.0).round() / 100.0;
         let inst = &self.instances[i];
-        if inst.lib_id == "power:PWR_FLAG" {
-            return None;
-        }
-        let h = inst.half_extents.rotated_half_extents(inst.angle);
-        let (cx, cy) = (inst.at[0], inst.at[1]);
-        let (minx, miny, maxx, maxy) = (cx - h[0], cy - h[1], cx + h[0], cy + h[1]);
-        // Each candidate is the anchor the writer will emit, boxed by the model
-        // that measures what KiCAD then draws there — so a spot the solver
-        // approves is a spot the readability lint clears.
         let seat = |at: [f64; 2], justify: Justify| {
             let pos = TextPos {
                 at: [r2(at[0]), r2(at[1])],
@@ -599,25 +657,34 @@ impl SchematicWriter {
             };
             (pos, field_box(pos.at, justify, &inst.value))
         };
-        let above = seat([cx, miny - 0.64], Justify::Center);
-        let below = seat([cx, maxy + 2.24], Justify::Center);
-        let right = seat([maxx + 0.64, cy + 0.8], Justify::Left);
-        let left = seat([minx - 0.64, cy + 0.8], Justify::Right);
-        // A 180-rotated power symbol points down (GND family): the
-        // name goes below the graphic; otherwise above.
-        let cands = if inst.angle == 180.0 {
-            vec![below, right, left]
-        } else {
-            vec![above, right, left]
+        let (cx, cy) = (inst.at[0], inst.at[1]);
+        // The wedge reaches GLYPH_MM along its direction and half that across.
+        const GLYPH_MM: f64 = 2.54;
+        let out = self.rail_glyph_dir(inst);
+        // KiCAD anchors text on its BASELINE, so a name below its glyph needs the
+        // taller drop and one above it only the ascender's worth of clearance.
+        let tip = |d: f64| match out {
+            Dir::North => seat([cx, cy - GLYPH_MM - 0.64 - d], Justify::Center),
+            Dir::South => seat([cx, cy + GLYPH_MM + 2.24 + d], Justify::Center),
+            Dir::East => seat([cx + GLYPH_MM + 0.64 + d, cy + 0.8], Justify::Left),
+            Dir::West => seat([cx - GLYPH_MM - 0.64 - d, cy + 0.8], Justify::Right),
         };
-        let movable = Movable {
-            owner: Some(sch_model::text::Owner::Symbol(inst.refdes.clone())),
-            candidates: cands.iter().map(|c| c.1).collect(),
+        let side = |d: f64| match out {
+            Dir::North | Dir::South => [
+                seat([cx + 1.27 + d, cy + 0.8], Justify::Left),
+                seat([cx - 1.27 - d, cy + 0.8], Justify::Right),
+            ],
+            Dir::East | Dir::West => [
+                seat([cx, cy - 1.27 - d - 0.64], Justify::Center),
+                seat([cx, cy + 1.27 + d + 2.24], Justify::Center),
+            ],
         };
-        Some((
-            movable,
-            Apply::PowerVal(i, cands.into_iter().map(|c| c.0).collect()),
-        ))
+        let mut cands = Vec::new();
+        for step in [0.0, GRID_50_MIL.pitch(), 2.0 * GRID_50_MIL.pitch()] {
+            cands.push(tip(step));
+            cands.extend(side(step));
+        }
+        cands
     }
 
     /// Reference+Value field pair for a non-power instance: right / left / above
@@ -1283,7 +1350,7 @@ impl SchematicWriter {
                 // touch the pins they serve), but their visible Value text
                 // (the rail name) must not collide with anything: adjacent
                 // rails merging their names is a real artifact class.
-                if inst.lib_id != "power:PWR_FLAG" && !inst.val_hidden {
+                if inst.lib_id != "power:PWR_FLAG" {
                     let (_, vp) = field_anchors(inst);
                     items.push((
                         format!("value \"{}\" of {}", inst.value, inst.refdes),
@@ -1514,7 +1581,6 @@ mod tests {
             half_extents: Point2::new(10.0, 20.0),
             ref_pos: None,
             val_pos: None,
-            val_hidden: false,
             unit: 1,
         });
         w.sym_pins.insert(

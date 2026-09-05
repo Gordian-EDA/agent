@@ -115,12 +115,6 @@ pub(super) struct Instance {
     /// and as the fallback when the solver has not run).
     pub(super) ref_pos: Option<TextPos>,
     pub(super) val_pos: Option<TextPos>,
-    /// Solver-hidden Value: set when no collision-free spot exists for an
-    /// OPTIONAL text (a power symbol's rail name next to siblings of the same
-    /// rail — the first sibling shows the name, the rest hide). Connectivity
-    /// is unaffected: KiCAD reads a power port's net from the Value field
-    /// whether or not it is displayed.
-    pub(super) val_hidden: bool,
     /// 1-based symbol UNIT this instance draws. A multi-unit part (op-amp, FPGA,
     /// dual/quad pack) is placed as one instance PER unit, all sharing `refdes`
     /// but with distinct `unit` (and a unit-distinguished uuid). KiCAD then draws
