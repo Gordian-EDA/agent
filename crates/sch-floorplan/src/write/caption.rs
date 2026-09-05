@@ -8,6 +8,8 @@
 
 use geom::{GRID_50_MIL, Point2, Rect};
 
+use sch_flex::pack::FRAME_PAD;
+
 use super::{SchematicWriter, SheetText, field_anchors, field_box, label_rect};
 
 /// One block's decoration, as [`SchematicWriter::add_block_frames`] draws it.
@@ -20,8 +22,6 @@ pub struct BlockFrame<'a> {
     pub members: &'a [String],
 }
 
-/// Air between the block's outermost ink and its frame.
-const FRAME_PAD: f64 = 3.81;
 /// Air between a frame and the caption seated against it. A caption whose
 /// ascenders graze the dashed border reads as a mistake, so this is a clear
 /// line's worth rather than a hairline.

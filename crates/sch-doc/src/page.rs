@@ -373,7 +373,20 @@ impl SchDoc {
         // so content that reaches into the band is overprinted either way. This is what
         // `usable_pages` has always assumed.
         let band = TITLE_BLOCK_BAND;
-        let need = [bbox.max_x + PAGE_MARGIN, bbox.max_y + PAGE_MARGIN + band];
+        let free = frozen.is_empty();
+        // Slack the drawing could still be slid off, which the page must not be charged
+        // for: with nothing frozen the whole sheet may move, so what has to fit is the
+        // drawing's SPAN plus its margins, not wherever the drawing happens to start.
+        // Buying paper for the empty strip beside the content is buying paper the fit
+        // then centres itself away from.
+        let slack = match free {
+            true => [bbox.min_x - PAGE_MARGIN, bbox.min_y - PAGE_MARGIN],
+            false => [0.0, 0.0],
+        };
+        let need = [
+            bbox.max_x - slack[0] + PAGE_MARGIN,
+            bbox.max_y - slack[1] + PAGE_MARGIN + band,
+        ];
         let (page, standard) = match standard_page(need) {
             Some((name, size)) => {
                 self.set_paper(tagged("paper", vec![quoted(name)]));
@@ -392,7 +405,7 @@ impl SchDoc {
         // circuit stranded in the corner of a sheet too big for it, which is the defect the
         // visual critic names on every under-filled page. The page is already chosen, so
         // centring cannot buy a bigger one.
-        if frozen.is_empty() && standard && let Some(bbox) = self.content_bbox() {
+        if free && let Some(bbox) = self.content_bbox() {
             let middle = |lo: f64, hi: f64| GRID_50_MIL.snap((hi - lo) / 2.0).clamp(-lo, hi);
             let centre = [
                 middle(bbox.min_x - PAGE_MARGIN, page[0] - PAGE_MARGIN - bbox.max_x),
@@ -688,5 +701,37 @@ mod tests {
         let fit = doc.refit_page(&BTreeSet::new()).expect("content to fit");
         assert!(!fit.standard, "content this large has no standard page");
         assert!(fit.page[0] > 1400.0 && fit.page[1] > 900.0);
+    }
+
+    /// A drawing nothing pins down is charged for its own SIZE, not for where it
+    /// happens to start, and it ends up centred on the page it buys — on a `User`
+    /// page exactly as on a standard one.
+    #[test]
+    fn a_user_page_is_cut_to_the_drawing_and_centred_on_it() {
+        let mut doc = SchDoc::parse(
+            "(kicad_sch\n\
+             \t(version 20250114)\n\
+             \t(paper \"A4\")\n\
+             \t(wire (pts (xy 300 300) (xy 1700 1200)) (uuid \"w1\"))\n\
+             )\n",
+        )
+        .expect("parse");
+        let fit = doc.refit_page(&BTreeSet::new()).expect("content to fit");
+        assert!(!fit.standard, "content this large has no standard page");
+        let want = [
+            1400.0 + 2.0 * PAGE_MARGIN,
+            900.0 + 2.0 * PAGE_MARGIN + TITLE_BLOCK_BAND,
+        ];
+        assert!(
+            (fit.page[0] - want[0]).abs() < 0.01 && (fit.page[1] - want[1]).abs() < 0.01,
+            "the page is the drawing's span plus its margins, not its far corner: {:?}",
+            fit.page
+        );
+        let bbox = doc.content_bbox().expect("content");
+        assert!(
+            (bbox.min_x - PAGE_MARGIN).abs() < GRID_50_MIL.pitch()
+                && (bbox.min_y - PAGE_MARGIN).abs() < GRID_50_MIL.pitch(),
+            "the drawing sits at the margin it was cut to, not off the sheet: {bbox:?}"
+        );
     }
 }

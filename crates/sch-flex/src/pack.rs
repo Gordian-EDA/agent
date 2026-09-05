@@ -1,8 +1,8 @@
 //! The one block packer: where a box goes among the boxes already down.
 //!
 //! Both callers pack the same thing — a block's finished FRAME, the drawing plus the air
-//! the realiser's dashed rectangle and the field text need — onto the same corner
-//! lattice. The typesetter packs a page from nothing ([`corner_pack`]); a graft seats one
+//! the realiser's dashed rectangle needs around it and the band its title is seated in —
+//! onto the same corner lattice. The typesetter packs a page from nothing ([`corner_pack`]); a graft seats one
 //! more block among the frames a sheet already carries ([`landings`]). They share the
 //! candidate corners so that a sheet built one block at a time lands where the same
 //! blocks would have landed had they been packed together.
@@ -12,9 +12,21 @@ use sch_model::tree::UNIT_MM;
 
 /// Air between two block frames the typesetter packs onto a page of its own.
 pub const BLOCK_GAP: f64 = 6.0 * UNIT_MM;
-/// Room each block keeps outside its parts for the dashed frame the realiser draws around
-/// it and the field text the solver seats along its edge.
-pub const FRAME_PAD: f64 = 4.0 * UNIT_MM;
+/// Air a block keeps outside its drawing for the dashed frame the realiser draws around
+/// it.
+///
+/// This is the ONE frame pad: the realiser inflates a block's ink by exactly this to draw
+/// the border, so reserving anything else on a side is air nothing occupies — paid on
+/// every block on every sheet.
+pub const FRAME_PAD: f64 = 3.0 * UNIT_MM;
+
+/// Extra room a block keeps ABOVE its frame, where the realiser seats the block's title:
+/// a clear line, then the title itself.
+///
+/// It is reserved on that side alone. A title is the one thing a block draws outside its
+/// border, so charging every side for it — which is what a single fatter pad does — buys
+/// nothing but whitespace on the other three.
+pub const CAPTION_BAND: f64 = 3.0 * UNIT_MM;
 
 /// A placed block's rect grown by half `gap` on every side, so two blocks that merely
 /// respect the gap do not read as overlapping.
@@ -61,13 +73,16 @@ pub fn corner_pack(sizes: &[(f64, f64)], order: &[usize], limit: f64) -> (Vec<Po
     let mut origins = vec![Point2::new(MARGIN, MARGIN); sizes.len()];
     let (mut used_w, mut used_h) = (0.0f64, 0.0f64);
     for &i in order {
+        // What is packed is the block's frame WITH its caption band on top; what is
+        // returned is where the frame itself goes, the band's height below it.
         let (w, h) = sizes[i];
+        let h = h + CAPTION_BAND;
         let at = landings(&placed, (w, h), limit, BLOCK_GAP)
             .first()
             .copied()
             .unwrap_or(Point2::new(MARGIN, used_h + MARGIN + BLOCK_GAP));
         placed.push(Rect::new(at.x, at.y, at.x + w, at.y + h));
-        origins[i] = at;
+        origins[i] = Point2::new(at.x, at.y + CAPTION_BAND);
         used_w = used_w.max(at.x + w - MARGIN);
         used_h = used_h.max(at.y + h - MARGIN);
     }
@@ -87,7 +102,10 @@ mod tests {
         assert_eq!(origins[1].y, origins[0].y, "the short block sits beside the tall one");
         assert_eq!(origins[2].x, origins[1].x, "and the third tucks under it");
         assert!(origins[2].y > origins[1].y);
-        assert_eq!(height, 90.0, "all three inside the tall block's own band");
+        assert!(
+            height <= 90.0 + 2.0 * CAPTION_BAND,
+            "all three inside the tall block's own band, captions included: {height}"
+        );
     }
 
     /// A block seated among frames already down can fill the hole a short one leaves:

@@ -23,7 +23,7 @@ use sch_model::item::{Incidence, Item};
 use sch_model::place::PlaceResult;
 
 use crate::floorplan::place::{RoutedEvaluator, RoutedSheetRealizer, incidence};
-use sch_flex::pack::{BLOCK_GAP, FRAME_PAD, landings};
+use sch_flex::pack::{BLOCK_GAP, CAPTION_BAND, FRAME_PAD, landings};
 use sch_model::geometry::{body_rect, item_rect};
 
 /// The width-to-height ratio a sheet aims for: a landscape page's usable area.
@@ -99,7 +99,8 @@ impl<'a> RegionProblem<'a> {
 /// and the air the realiser's dashed rectangle needs around a block.
 ///
 /// Packing to bare bodies is what puts two blocks' label columns on top of each other, so
-/// what a graft packs is the same rectangle the typesetter measured its own blocks by.
+/// what a graft packs is the same rectangle the typesetter measured its own blocks by —
+/// [`sch_flex::pack::corner_pack`] reserves exactly this.
 fn frame_of(it: &Item) -> Rect {
     let r = item_rect(it, it.at);
     Rect::new(
@@ -197,7 +198,9 @@ fn seat_beside(movable: &mut [Item], taken: &[Rect], drawn: &[Rect]) {
     let (Some(here), false) = (hull(&frames), taken.is_empty()) else {
         return;
     };
-    let size = (here.width(), here.height());
+    // The band above the block, where its title is seated: reserved for the group, not
+    // for each part in it, and only on the side the title is drawn on.
+    let size = (here.width(), here.height() + CAPTION_BAND);
     // The sheet is what is DRAWN on it. An obstacle is something to keep off, not sheet
     // the drawing claims: pricing the label columns and wire keepouts into the extent
     // made a strip beside them look free and stretched the sheet into a ribbon.
@@ -241,7 +244,7 @@ fn seat_beside(movable: &mut [Item], taken: &[Rect], drawn: &[Rect]) {
     // them by different amounts and break the arrangement the typesetter just computed.
     let delta = Point2::new(
         geom::GRID_50_MIL.snap(at.x - here.min_x),
-        geom::GRID_50_MIL.snap(at.y - here.min_y),
+        geom::GRID_50_MIL.snap(at.y + CAPTION_BAND - here.min_y),
     );
     for it in movable {
         it.at = Point2::new(it.at.x + delta.x, it.at.y + delta.y);
