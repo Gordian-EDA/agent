@@ -117,7 +117,7 @@ pub fn typeset(items: &mut [Item], trees: &Trees, pages: &[[f64; 2]]) -> Report 
         .iter()
         .map(|(_, b)| (b.width() + 2.0 * FRAME_PAD, b.height() + 2.0 * FRAME_PAD))
         .collect();
-    for (origin, (placed, bbox)) in pack(&sizes, pages).into_iter().zip(&drawings) {
+    for (origin, (placed, bbox)) in pack_blocks(&sizes, pages).into_iter().zip(&drawings) {
         let shift = block_shift(origin, *bbox);
         for p in placed {
             let item = &mut items[p.part];
@@ -334,7 +334,8 @@ fn drawing_bbox(placed: &[measure::Placed], parts: &[Part]) -> Rect {
     Rect::bounding(&corners).unwrap_or_else(|| Rect::new(0.0, 0.0, 0.0, 0.0))
 }
 
-/// Shelf-pack the blocks onto the smallest page they fill.
+/// Pack block frames of `sizes` onto the smallest of `pages` they fill, returning one
+/// origin per block in input order.
 ///
 /// A pack that does not know which page it is filling optimises for a sheet nobody will
 /// print: it shelves a wide drawing into a narrow column, and the writer then buys the
@@ -344,7 +345,7 @@ fn drawing_bbox(placed: &[measure::Placed], parts: &[Part]) -> Rect {
 ///
 /// The widths worth trying are exactly the ones a shelf boundary can fall on: the total
 /// width of each contiguous run of blocks. Anything between two of those packs identically.
-fn pack(sizes: &[(f64, f64)], pages: &[[f64; 2]]) -> Vec<Point2> {
+pub fn pack_blocks(sizes: &[(f64, f64)], pages: &[[f64; 2]]) -> Vec<Point2> {
     pages
         .iter()
         .find_map(|page| fills(sizes, *page, true))
@@ -442,7 +443,7 @@ mod tests {
     /// overflows loses to a taller sheet even when its proportions are better.
     #[test]
     fn a_graft_never_overflows_the_page_to_look_squarer() {
-        let origins = pack(&[(200.0, 40.0), (200.0, 40.0)], &[]);
+        let origins = pack_blocks(&[(200.0, 40.0), (200.0, 40.0)], &[]);
         assert!(origins[1].y > origins[0].y);
     }
 
@@ -458,7 +459,7 @@ mod tests {
             fills(&blocks, a4, true).is_none(),
             "nothing this size fits A4"
         );
-        let origins = pack(&blocks, &[a4, a3]);
+        let origins = pack_blocks(&blocks, &[a4, a3]);
         let shelves: BTreeSet<i64> = origins.iter().map(|o| (o.y * 100.0) as i64).collect();
         assert_eq!(
             shelves.len(),

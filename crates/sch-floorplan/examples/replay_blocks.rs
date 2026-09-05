@@ -152,9 +152,28 @@ fn report(
     // only what is already down, so this is the other seam defect the whole-sheet corpus
     // cannot show.
     let overlaps = sch_floorplan::visual::measure(doc).body_overlaps;
+    // How much of the sheet the drawing actually uses: the pieces' own frames against
+    // the hull they span. A sheet built one call at a time is sparse precisely here.
+    let pieces = sch_floorplan::reseat::pieces(doc).unwrap_or_default();
+    let area = |r: &geom::Rect| r.width() * r.height();
+    let ink: f64 = pieces.iter().map(|p| area(&p.frame)).sum();
+    let hull = doc.content_bbox().map(|r| area(&r)).unwrap_or(0.0);
+    let fill = if hull > 0.0 { 100.0 * ink / hull } else { 0.0 };
+    let rects = doc
+        .items()
+        .iter()
+        .filter(|item| matches!(item, sch_doc::Item::Rectangle(_)))
+        .count();
+    let captions = doc
+        .items()
+        .iter()
+        .filter(|item| matches!(item, sch_doc::Item::Text(_)))
+        .count();
     print!(
-        "{name}: blocks={blocks} symbols={symbols} page={page} labels={labels} wires={wires} \
+        "{name}: blocks={blocks} symbols={symbols} page={page} hull={hull:.0} fill={fill:.0}% \
+         pieces={} frames={rects} captions={captions} labels={labels} wires={wires} \
          scattered={} shorted={} body_overlaps={}",
+        pieces.len(),
         mismatch.scattered.len(),
         mismatch.shorted.len(),
         overlaps.len()
