@@ -7,7 +7,7 @@
 //! ([`SchematicWriter::layout_warnings`]). All passes are idempotent so they may
 //! run early (to lint final geometry) and again in `finish` harmlessly.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use geom::{Dir, EPS, GRID_50_MIL, Point2, Rect, Segment};
 
@@ -843,6 +843,78 @@ impl SchematicWriter {
         self.wires.retain(|w| seen.insert(w.uuid_key.clone()));
     }
 
+    /// Join two segments that only continue one another into the one wire they draw.
+    ///
+    /// The router lays a run down in pieces — a lead-out, a riser, a tap split — and
+    /// the boundary between two pieces of a straight run is a seam a reader has to
+    /// work out is not a branch. Where no CONDUCTOR lands on that boundary — no pin,
+    /// no drawn dot, no third wire ending on or passing through it — the two pieces
+    /// are one segment, and saying so takes the seam off the sheet. A seam something
+    /// does meet is a real T and stays; the dots are decided before this runs, so a
+    /// drawn dot is what says which.
+    fn coalesce_collinear_runs(&mut self) {
+        let key = super::build::point_key;
+        let mut blocked: BTreeSet<(i64, i64)> = BTreeSet::new();
+        blocked.extend(self.pin_points().iter().map(|p| key(*p)));
+        blocked.extend(self.junctions.iter().filter(|j| j.dot).map(|j| key(j.at)));
+        let beside = self.beside_wires();
+        for (segment, _) in &beside {
+            blocked.insert(key(segment.a));
+            blocked.insert(key(segment.b));
+        }
+        while let Some((i, j, at)) = self.next_seam(&blocked, &beside) {
+            let (a, b) = (self.wires[i].clone(), self.wires[j].clone());
+            let far = |w: &Wire| if key(w.a) == key(at) { w.b } else { w.a };
+            let (p, q) = (far(&a), far(&b));
+            self.wires[i] = Wire {
+                a: p,
+                b: q,
+                uuid_key: format!("{}:{}:{}:{}", p[0], p[1], q[0], q[1]),
+                net: a.net.clone(),
+            };
+            self.wires.remove(j);
+            // The recorded tap that split the run here is not a dot and no longer a
+            // wire end; leaving it would have the next `prepare` split the run again.
+            self.junctions.retain(|junction| key(junction.at) != key(at));
+        }
+    }
+
+    /// The first seam [`Self::coalesce_collinear_runs`] may close: the two wires that
+    /// meet there and the point, in the sheet's own order so the pass is deterministic.
+    fn next_seam(
+        &self,
+        blocked: &BTreeSet<(i64, i64)>,
+        beside: &[(Segment, String)],
+    ) -> Option<(usize, usize, Point2)> {
+        let key = super::build::point_key;
+        let mut ends: BTreeMap<(i64, i64), (Point2, Vec<usize>)> = BTreeMap::new();
+        for (i, w) in self.wires.iter().enumerate() {
+            for end in [w.a, w.b] {
+                ends.entry(key(end)).or_insert((end, Vec::new())).1.push(i);
+            }
+        }
+        ends.into_iter().find_map(|(k, (at, meeting))| {
+            let [i, j] = meeting[..] else { return None };
+            if blocked.contains(&k) || self.wires[i].net != self.wires[j].net {
+                return None;
+            }
+            let far = |w: &Wire| if key(w.a) == k { w.b } else { w.a };
+            let (p, q) = (far(&self.wires[i]), far(&self.wires[j]));
+            let (u, v) = ((p.x - at.x, p.y - at.y), (q.x - at.x, q.y - at.y));
+            let straight = (u.0 * v.1 - u.1 * v.0).abs() < EPS && u.0 * v.0 + u.1 * v.1 < 0.0;
+            let crossed = self
+                .wires
+                .iter()
+                .enumerate()
+                .filter(|(k, _)| *k != i && *k != j)
+                .any(|(_, w)| Segment::new(w.a, w.b).contains_point(at))
+                || beside
+                    .iter()
+                    .any(|(segment, _)| segment.contains_point(at));
+            (straight && !crossed).then_some((i, j, at))
+        })
+    }
+
     /// Decide which taps are DRAWN as junction dots, from the FINAL sheet geometry.
     ///
     /// KiCAD's rule, applied once everything that can meet at a point has been
@@ -1065,6 +1137,9 @@ impl SchematicWriter {
         self.split_wires_at_nodes();
         // Only now, on geometry nothing else will move, decide which taps are dots.
         self.place_junction_dots();
+        // A run the router drew in pieces is one wire. The dots are decided first
+        // because a drawn dot is what says a seam is a real branch.
+        self.coalesce_collinear_runs();
         // Then place movable text (fields, stub labels) collision-free against
         // the final geometry.
         self.solve_text_positions();

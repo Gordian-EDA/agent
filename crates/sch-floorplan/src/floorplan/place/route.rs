@@ -2172,10 +2172,11 @@ mod tests {
         assert_eq!(writer.wires_with_nets().len(), 1);
         assert_eq!(scene.segments.len(), 1);
 
-        // The reused run recorded a tap, so the covering wire splits there — a plain
-        // collinear split, which is why no dot is drawn.
+        // The reused run recorded a tap, so the covering wire splits there — and, since
+        // nothing else lands on the split, `prepare` closes the seam again and the run
+        // stays the one wire it draws. No dot either way.
         writer.prepare();
-        assert_eq!(writer.wires_with_nets().len(), 2);
+        assert_eq!(writer.wires_with_nets().len(), 1);
         assert!(writer.junction_positions().is_empty());
     }
 

@@ -1729,3 +1729,41 @@ fn connect_puts_one_pin_on_a_named_net() {
     let message = bad["error"].as_str().unwrap_or_default();
     assert!(message.contains("`net`"), "{bad}");
 }
+
+/// The one local name that welds a local group onto the global rail stays.
+#[test]
+fn the_local_label_that_bridges_onto_the_rail_stays() {
+    let Some(ctx) = sheet() else {
+        eprintln!("SKIP: no KiCad detected");
+        return;
+    };
+    for r in ["R1", "R2"] {
+        let added = call(
+            &ctx,
+            "add_symbols",
+            json!({"parts": [{"lib_id": "Device:R", "ref": r, "value": "DNP"}]}),
+        );
+        assert!(added.get("error").is_none(), "{added}");
+    }
+    for pin in ["R1.1", "R2.1"] {
+        let named = call(
+            &ctx,
+            "label",
+            json!({"pin": pin, "net": "VRAIL", "kind": "local"}),
+        );
+        assert!(named.get("error").is_none(), "{named}");
+    }
+
+    let powered = call(&ctx, "add_power", json!({"pin": "R1.1", "net": "VRAIL"}));
+
+    assert!(powered.get("error").is_none(), "{powered}");
+    let doc = sch_doc::SchDoc::read(ctx.sch_path()).unwrap();
+    let on = |refdes: &str| {
+        sch_doc::connect::extract(&doc)
+            .nets
+            .into_iter()
+            .find(|net| net.pins.iter().any(|pin| pin.refdes == refdes))
+            .map(|net| net.name)
+    };
+    assert_eq!(on("R1"), on("R2"), "the bridge label went: {}", doc.to_text());
+}
