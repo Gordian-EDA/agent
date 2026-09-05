@@ -51,7 +51,7 @@ impl SchematicWriter {
         let framed: Vec<(usize, Rect)> = blocks
             .iter()
             .enumerate()
-            .filter_map(|(i, b)| Some((i, self.member_bbox(b.members)?.inflate(FRAME_PAD))))
+            .filter_map(|(i, b)| Some((i, self.block_frame(b.members)?)))
             .collect();
         for (i, frame) in &framed {
             self.add_rect(
@@ -100,6 +100,53 @@ impl SchematicWriter {
         }
     }
 
+    /// The rectangle drawn around one block: its parts' bodies and fields, reaching out
+    /// over the net labels they carry wherever that reach stays off ANOTHER block's ink.
+    ///
+    /// Reaching without that check is how a frame ends up drawn straight through the
+    /// neighbouring column's capacitor, which says that part is in a block it is not in —
+    /// worse than clipping a label of its own. Only the strip a side actually gains is
+    /// tested, and only against real PARTS: the rails and flags a `#` reference marks
+    /// belong to no block, and testing against them would be circular, since the ones a
+    /// member's own pins carry sit in exactly the strip the growth exists to cover.
+    ///
+    /// One block at a time is all an incremental call holds, so on that path there are no
+    /// foreign parts to test and the reach is taken on trust.
+    fn block_frame(&self, members: &[String]) -> Option<Rect> {
+        let tight = self.member_bbox(members)?.inflate(FRAME_PAD);
+        let Some(labels) = self.member_label_bbox(members) else {
+            return Some(tight);
+        };
+        let want = labels.inflate(FRAME_PAD);
+        let foreign = self.foreign_part_ink(members);
+        let mut frame = tight;
+        for side in 0..4 {
+            let mut wider = frame;
+            let strip = match side {
+                0 => {
+                    wider.min_x = frame.min_x.min(want.min_x);
+                    Rect::new(wider.min_x, wider.min_y, frame.min_x, wider.max_y)
+                }
+                1 => {
+                    wider.min_y = frame.min_y.min(want.min_y);
+                    Rect::new(wider.min_x, wider.min_y, wider.max_x, frame.min_y)
+                }
+                2 => {
+                    wider.max_x = frame.max_x.max(want.max_x);
+                    Rect::new(frame.max_x, wider.min_y, wider.max_x, wider.max_y)
+                }
+                _ => {
+                    wider.max_y = frame.max_y.max(want.max_y);
+                    Rect::new(wider.min_x, frame.max_y, wider.max_x, wider.max_y)
+                }
+            };
+            if foreign.iter().all(|o| strip.intersection(o).is_none()) {
+                frame = wider;
+            }
+        }
+        Some(frame)
+    }
+
     /// The box around a block's parts: their bodies and their solved field text.
     fn member_bbox(&self, members: &[String]) -> Option<Rect> {
         let mut bbox: Option<Rect> = None;
@@ -133,6 +180,53 @@ impl SchematicWriter {
             }
         }
         bbox
+    }
+
+    /// The box around the net labels a block's parts carry — the ink a frame drawn to
+    /// the bodies alone cuts through, which is what a mirrored connector's label column
+    /// runs into. A pin label's uuid key names the part it hangs off.
+    fn member_label_bbox(&self, members: &[String]) -> Option<Rect> {
+        self.labels
+            .iter()
+            .filter(|label| {
+                members
+                    .iter()
+                    .any(|refdes| label.uuid_key.starts_with(&format!("{refdes}:")))
+            })
+            .map(|label| super::label_rect(label, label.at, label.dir))
+            .reduce(|a, b| {
+                Rect::new(
+                    a.min_x.min(b.min_x),
+                    a.min_y.min(b.min_y),
+                    a.max_x.max(b.max_x),
+                    a.max_y.max(b.max_y),
+                )
+            })
+    }
+
+    /// Ink drawn by a real part this block does not hold: its body and field text.
+    fn foreign_part_ink(&self, members: &[String]) -> Vec<Rect> {
+        let mut out = Vec::new();
+        for inst in self
+            .instances
+            .iter()
+            .filter(|i| !i.refdes.starts_with('#') && !members.contains(&i.refdes))
+        {
+            let h = inst.half_extents.rotated_half_extents(inst.angle);
+            out.push(Rect::new(
+                inst.at.x - h[0],
+                inst.at.y - h[1],
+                inst.at.x + h[0],
+                inst.at.y + h[1],
+            ));
+            let (r, v) = field_anchors(inst);
+            for (pos, text) in [(r, &inst.refdes), (v, &inst.value)] {
+                if !text.is_empty() {
+                    out.push(field_box(pos.at, pos.justify, text));
+                }
+            }
+        }
+        out
     }
 
     /// Every piece of ink a caption must not sit on: symbol bodies and their pin
