@@ -628,6 +628,19 @@ impl SchematicWriter {
             })
             .collect();
         order.sort_by(|&a, &b| self.instances[a].refdes.cmp(&self.instances[b].refdes));
+        // A symbol's duplicate power pins land on ONE endpoint, so a part with
+        // ten grounds gets ten GND symbols stacked on the same point. They draw
+        // as a SINGLE glyph and take a single name; the rest would pile ten
+        // copies of "GND" on top of each other and each other's neighbours.
+        let mut seen: BTreeSet<((u64, u64), String)> = BTreeSet::new();
+        order.retain(|&i| {
+            let inst = &self.instances[i];
+            seen.insert((bits(inst.at), inst.value.clone()))
+        });
+        for i in 0..self.instances.len() {
+            self.instances[i].val_hidden =
+                self.instances[i].refdes.starts_with('#') && !order.contains(&i);
+        }
         let seats: Vec<Vec<(TextPos, Rect)>> =
             order.iter().map(|&i| self.rail_name_seats(i)).collect();
 
@@ -718,34 +731,40 @@ impl SchematicWriter {
             (pos, field_box(pos.at, justify, &inst.value))
         };
         let (cx, cy) = (inst.at[0], inst.at[1]);
-        // The wedge reaches GLYPH_MM along its direction and half that across.
-        const GLYPH_MM: f64 = 2.54;
         let out = self.rail_glyph_dir(inst);
-        // KiCAD anchors text on its BASELINE, so a name below its glyph needs the
-        // taller drop and one above it only the ascender's worth of clearance.
+        // Where KiCAD's own power symbols carry their Value: 3.556 mm past an
+        // up-arrow's head, 3.81 mm past a ground bar's last rung. The box is
+        // CENTRED on the anchor, so a glyph reaching 2.54 mm out leaves barely a
+        // quarter millimetre of air at these offsets — seating the name any
+        // nearer draws the glyph through it.
+        const TIP_MM: f64 = 3.81;
+        const ARROW_MM: f64 = 3.556;
         let tip = |d: f64| match out {
-            Dir::North => seat([cx, cy - GLYPH_MM - 0.64 - d], Justify::Center),
-            Dir::South => seat([cx, cy + GLYPH_MM + 2.24 + d], Justify::Center),
-            Dir::East => seat([cx + GLYPH_MM + 0.64 + d, cy + 0.8], Justify::Left),
-            Dir::West => seat([cx - GLYPH_MM - 0.64 - d, cy + 0.8], Justify::Right),
+            Dir::North => seat([cx, cy - ARROW_MM - d], Justify::Center),
+            Dir::South => seat([cx, cy + TIP_MM + d], Justify::Center),
+            Dir::East => seat([cx + TIP_MM + d, cy + 0.8], Justify::Left),
+            Dir::West => seat([cx - TIP_MM - d, cy + 0.8], Justify::Right),
         };
+        // Beside the glyph rather than beyond it, for a rail with no room ahead.
+        // Clear of the wedge's WIDTH (1.27 mm) plus the same air the tip leaves,
+        // or the text butts against the glyph outline.
+        const SIDE_MM: f64 = 2.54;
         let side = |d: f64| match out {
             Dir::North | Dir::South => [
-                seat([cx + 1.27 + d, cy + 0.8], Justify::Left),
-                seat([cx - 1.27 - d, cy + 0.8], Justify::Right),
+                seat([cx + SIDE_MM + d, cy + 0.8], Justify::Left),
+                seat([cx - SIDE_MM - d, cy + 0.8], Justify::Right),
             ],
             Dir::East | Dir::West => [
-                seat([cx, cy - 1.27 - d - 0.64], Justify::Center),
-                seat([cx, cy + 1.27 + d + 2.24], Justify::Center),
+                seat([cx, cy - SIDE_MM - d], Justify::Center),
+                seat([cx, cy + SIDE_MM + d], Justify::Center),
             ],
         };
-        let mut cands = Vec::new();
-        for ring in 0..RAIL_NAME_RINGS {
-            let step = f64::from(ring) * GRID_50_MIL.pitch();
-            cands.push(tip(step));
-            cands.extend(side(step));
-        }
-        cands
+        // Every tip before any side: a name further out along the glyph's own
+        // axis still reads as that glyph's, where one tucked beside the wedge
+        // reads as the neighbour's. Only when the whole axis is taken does the
+        // name step aside.
+        let rings = || (0..RAIL_NAME_RINGS).map(|r| f64::from(r) * GRID_50_MIL.pitch());
+        rings().map(tip).chain(rings().flat_map(side)).collect()
     }
 
     /// Reference+Value field pair for a non-power instance: right / left / above
@@ -1410,7 +1429,7 @@ impl SchematicWriter {
                 // touch the pins they serve), but their visible Value text
                 // (the rail name) must not collide with anything: adjacent
                 // rails merging their names is a real artifact class.
-                if inst.lib_id != "power:PWR_FLAG" {
+                if inst.lib_id != "power:PWR_FLAG" && !inst.val_hidden {
                     let (_, vp) = field_anchors(inst);
                     items.push((
                         format!("value \"{}\" of {}", inst.value, inst.refdes),
@@ -1634,6 +1653,7 @@ mod tests {
             half_extents: Point2::new(10.0, 20.0),
             ref_pos: None,
             val_pos: None,
+            val_hidden: false,
             unit: 1,
         });
         w.sym_pins.insert(
@@ -1716,7 +1736,8 @@ mod tests {
     }
 
     /// Rail names crowded onto one pitch still ALL get drawn: the seat degrades
-    /// outward, but a glyph is never left unnamed.
+    /// outward, but a glyph is never left unnamed. Only an exact DUPLICATE — a
+    /// symbol stacked on another with the same name — gives its name up.
     #[test]
     fn crowded_rail_names_are_all_seated() {
         let Some(env) = detect_env() else { return };
@@ -1735,8 +1756,32 @@ mod tests {
         }
         w.solve_text_positions();
         assert!(
-            w.instances.iter().all(|i| i.val_pos.is_some()),
-            "every crowded rail keeps a seated name"
+            w.instances
+                .iter()
+                .all(|i| i.val_pos.is_some() && !i.val_hidden),
+            "every crowded rail keeps a seated, visible name"
+        );
+
+        // Stack four grounds on ONE point, as a part's duplicate GND pins do:
+        // that is a single drawn glyph, so it carries a single name.
+        let mut stack = SchematicWriter::new();
+        for i in 0..4 {
+            stack
+                .add_symbol(
+                    &env,
+                    "power:GND",
+                    &format!("#PWR_S{i}"),
+                    "GND",
+                    [127.0, 63.5],
+                    0.0,
+                )
+                .unwrap();
+        }
+        stack.solve_text_positions();
+        assert_eq!(
+            stack.instances.iter().filter(|i| !i.val_hidden).count(),
+            1,
+            "a coincident rail stack draws its name once"
         );
     }
 

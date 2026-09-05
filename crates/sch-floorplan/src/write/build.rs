@@ -129,6 +129,7 @@ impl SchematicWriter {
             half_extents,
             ref_pos: None,
             val_pos: None,
+            val_hidden: false,
             unit: 1,
         });
         Ok(())

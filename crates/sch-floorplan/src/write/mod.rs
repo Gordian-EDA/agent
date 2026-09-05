@@ -115,6 +115,12 @@ pub(super) struct Instance {
     /// and as the fallback when the solver has not run).
     pub(super) ref_pos: Option<TextPos>,
     pub(super) val_pos: Option<TextPos>,
+    /// Suppressed Value, for a power symbol drawn exactly on top of another that
+    /// carries the same rail name. The stack renders as ONE glyph, so it takes
+    /// one name; drawing the other four (or ten) piles identical text on itself.
+    /// This is the only reason a rail name is ever undrawn — the glyph the reader
+    /// sees always has its name.
+    pub(super) val_hidden: bool,
     /// 1-based symbol UNIT this instance draws. A multi-unit part (op-amp, FPGA,
     /// dual/quad pack) is placed as one instance PER unit, all sharing `refdes`
     /// but with distinct `unit` (and a unit-distinguished uuid). KiCAD then draws
