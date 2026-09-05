@@ -257,9 +257,19 @@ impl LabelPolicy {
     /// readable mint like `D1_K` keeps it too — was measured and answered NO: it
     /// converted four label pairs per corpus into wires drawn THROUGH a symbol body or
     /// around its perimeter, because neither the length gate nor the shape budget could
-    /// see a body. That reason has since gone: [`sch_model::route::SymbolInk`] states
-    /// the drawn ink and `path_ok` refuses to cross it, so the question is open again
-    /// and unmeasured.
+    /// see a body. That reason has since gone ([`sch_model::route::SymbolInk`] states
+    /// the drawn ink and `path_ok` refuses to cross it), and the wider form of the same
+    /// question — should the exemption follow a net's BLOCK, so that any net whose pins
+    /// all sit in one section is drawn rather than named, as the connector-heavy
+    /// reference sheets are — was then measured on the whole corpus and answered NO
+    /// again. Of the same-block hops this policy refuses today, NONE is a clean route:
+    /// every one is a two- or three-bend detour, a crossing, or both, because a hop
+    /// between adjacent parts already passes on shape. Drawing them anyway added 47
+    /// wires and two fresh classes of defect — a wire struck through a net label, and
+    /// two nets run a millimetre apart reading as a short — and two independent
+    /// reviewers called the sheets worse. The wire-per-part gap against the reference is
+    /// upstream of this judgement: it is where the parts are PLACED. A cap seated beside
+    /// the pin it decouples is five millimetres from it, and the question never arises.
     fn keeps(
         &self,
         net: &str,
