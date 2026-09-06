@@ -296,3 +296,16 @@ stranded away from the block they belong to and blocks flung apart. Fixed at the
 source in 5c5d11b9: a part joining a block a call later lands within a block gap of
 that block's own frame (the MCU across the page from its own reset/clock box was this).
 Do not tune the typesetter's gaps for this.
+
+## Run 20 — main 85da857b (frames hold rails, one caption, home seat, align), 8 cases
+
+stm32 8.14 PASS (look 7, 0 ERC); blue-pill 6.86 (look 7, 0 ERC, no duplicates);
+arduino 7.14; hbridge 7.00; 555 6.86; bjt-preamp 6.71; rp2040 6.57 with the netlist
+BROKEN by the model (removed R8–R11 unprompted, then looped eight times on a
+`connect J1.A4 → J1.A9` repair the tool answered "already connected" — the planner
+now offers no repair for a pin the extraction already has on a net); sallen-key 6.43.
+The critic's remaining majors are inter-block: "power block far from the active
+circuitry", "U2 with its caps on a distant lower row", "USB passives far above" — the
+seat-beside landing puts a later block on another row when the first row is full, and
+the re-seat only fires when it wins a page. Next lever: the landing cost should price
+distance from the blocks a new block shares nets with, not only the sheet's hull.
