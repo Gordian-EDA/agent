@@ -27,6 +27,9 @@ const CAPTION_REACH: f64 = 12.7;
 const TITLE_BAND: f64 = 2.54;
 /// The line a rail glyph's name takes beyond its arrow.
 const RAIL_NAME_LINE: f64 = 2.54;
+/// How far beyond its parts a block's own rail glyph may stand — a bank's rail is a
+/// lane out, its glyph a line beyond that.
+const FURNITURE_REACH: f64 = 12.7;
 /// The caption's text size, and the width one of its characters takes.
 const TITLE_SIZE: f64 = 2.54;
 const TITLE_EM: f64 = 1.9;
@@ -92,16 +95,17 @@ pub fn reframe(doc: &mut SchDoc) -> Vec<String> {
 /// [`reframe`], writing a block's caption from `titles` when the sheet has lost it.
 pub fn reframe_titled(doc: &mut SchDoc, titles: &BTreeMap<String, String>) -> Vec<String> {
     let mut members: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+    let mut furniture: BTreeMap<String, Vec<usize>> = BTreeMap::new();
     for (i, item) in doc.items().iter().enumerate() {
         let Item::Symbol(s) = item else { continue };
-        if s.refdes().starts_with('#') {
-            continue;
-        }
         let Some(block) = s.fields.get(sch_model::result::AP_BLOCK) else { continue };
         if sch_model::result::synthesized_block(&block.value) {
             continue;
         }
-        members.entry(block.value.clone()).or_default().push(i);
+        match s.refdes().starts_with('#') {
+            true => furniture.entry(block.value.clone()).or_default().push(i),
+            false => members.entry(block.value.clone()).or_default().push(i),
+        }
     }
     let mut done = Vec::new();
     let all: Vec<(String, Point2)> = members
@@ -117,7 +121,8 @@ pub fn reframe_titled(doc: &mut SchDoc, titles: &BTreeMap<String, String>) -> Ve
         if indices.len() < FRAMED_MIN_PARTS {
             continue;
         }
-        let Some(frame) = block_frame(doc, indices) else { continue };
+        let glyphs = furniture.get(block).map(Vec::as_slice).unwrap_or(&[]);
+        let Some(frame) = block_frame(doc, indices, glyphs) else { continue };
         // A block whose parts were scattered by later calls has no outline worth
         // drawing: the honest rectangle around them would swallow its neighbours.
         let holds_foreign = all.iter().any(|(other, at)| {
@@ -139,22 +144,37 @@ pub fn reframe_titled(doc: &mut SchDoc, titles: &BTreeMap<String, String>) -> Ve
 
 /// The outline around a block's parts: their bodies and fields, the labels and stubs
 /// within reach of them, padded and snapped to the grid.
-fn block_frame(doc: &SchDoc, indices: &[usize]) -> Option<Rect> {
+fn block_frame(doc: &SchDoc, indices: &[usize], glyphs: &[usize]) -> Option<Rect> {
     let items = doc.items();
-    // A rail glyph's name is written a line beyond its arrow, outside the symbol's
-    // own box; the outline has to clear it or the caption lands on it.
-    let mut hull = union(indices.iter().filter_map(|i| {
+    let parts = union(indices.iter().filter_map(|i| doc.item_bbox(&items[*i])))?;
+    // The block's own rail glyphs and flags sit a lane or two beyond its parts, and a
+    // glyph's name is written a line beyond its arrow, outside the symbol's own box:
+    // the outline has to hold them, or the rail runs under the frame line.
+    let mut hull = union(std::iter::once(parts).chain(glyphs.iter().filter_map(|i| {
         let bbox = doc.item_bbox(&items[*i])?;
-        Some(match &items[*i] {
-            Item::Symbol(s) if s.lib_id.starts_with("power:") => grow(bbox, RAIL_NAME_LINE),
-            _ => bbox,
-        })
-    }))?;
-    let near = items
+        (rect_gap(&parts, &bbox) <= FURNITURE_REACH).then(|| grow(bbox, RAIL_NAME_LINE))
+    })))?;
+    // Labels on stubs, markers, junctions — and the wires that reach from the parts to
+    // the glyphs, a bank's rail among them. A wire is taken only when it starts within
+    // reach of the parts: one that merely passes by belongs to a neighbour.
+    let near: Vec<Rect> = items
         .iter()
-        .filter(|item| matches!(item, Item::Label(_) | Item::NoConnect(_) | Item::Junction(_)))
-        .filter_map(|item| doc.item_bbox(item))
-        .filter(|b| rect_gap(&hull, b) <= REACH);
+        .filter(|item| {
+            matches!(
+                item,
+                Item::Label(_) | Item::NoConnect(_) | Item::Junction(_) | Item::Wire(_)
+            )
+        })
+        .filter_map(|item| {
+            let b = doc.item_bbox(item)?;
+            let reach = match item {
+                Item::Wire(_) => 0.0,
+                _ => REACH,
+            };
+            (rect_gap(&hull, &b) <= reach + geom::EPS && contains(&grow(hull, FURNITURE_REACH), &b))
+                .then_some(b)
+        })
+        .collect();
     hull = union(std::iter::once(hull).chain(near))?;
     let padded = grow(hull, FRAME_PAD);
     Some(Rect::new(
@@ -214,7 +234,40 @@ fn replace_frame(doc: &mut SchDoc, title: &str, frame: Rect) {
         Point2::new(frame.min_x, frame.min_y),
         Point2::new(frame.max_x, frame.max_y),
     );
-    let caption = title;
+    // The caption's wording: the one seated on the frame if there is one, else the
+    // title the caller remembered, else the block's name.
+    let text_of = |uuid: &str| {
+        doc.items().iter().find_map(|item| match item {
+            Item::Text(t) if t.uuid == uuid => Some(t.text.clone()),
+            _ => None,
+        })
+    };
+    let caption: String = found
+        .as_ref()
+        .and_then(|(_, uuid, _)| text_of(uuid))
+        .unwrap_or_else(|| title.to_string());
+    // A block may carry its caption twice — one left far from its parts by an earlier
+    // seat, one drawn again with a later call. It is found by its wording, and every
+    // copy but one goes.
+    let by_text: Vec<(String, Point2)> = doc
+        .items()
+        .iter()
+        .filter_map(|item| match item {
+            Item::Text(t) if unwrapped(&t.text) == unwrapped(&caption) => {
+                Some((t.uuid.clone(), t.at.point()))
+            }
+            _ => None,
+        })
+        .collect();
+    let found = found.or_else(|| by_text.first().map(|(uuid, at)| (0.0, uuid.clone(), *at)));
+    if by_text.len() > 1 {
+        let keep = found.as_ref().map(|(_, uuid, _)| uuid.clone());
+        doc.retain_drawing(|item| match item {
+            Item::Text(t) => unwrapped(&t.text) != unwrapped(&caption) || Some(&t.uuid) == keep.as_ref(),
+            _ => true,
+        });
+    }
+    let caption = caption.as_str();
     let title = found.or_else(|| {
         // A caption lost with an emptied frame is written again.
         let at = Point2::new(frame.min_x, frame.min_y - 1.27);
@@ -263,6 +316,10 @@ fn caption_seat(doc: &SchDoc, own: &str, frame: Rect, chars: usize) -> Point2 {
             !ink.iter().any(|b| b.intersection(&text).is_some())
         })
         .unwrap_or(corners[0])
+}
+
+fn unwrapped(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 fn union(rects: impl Iterator<Item = Rect>) -> Option<Rect> {
