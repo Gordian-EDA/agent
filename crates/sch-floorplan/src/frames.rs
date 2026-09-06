@@ -31,9 +31,66 @@ const RAIL_NAME_LINE: f64 = 2.54;
 const TITLE_SIZE: f64 = 2.54;
 const TITLE_EM: f64 = 1.9;
 
+/// Each block's caption as the sheet has it now, keyed by block name — read BEFORE a
+/// redraw that erases and re-seats a block, so a title the page-fit drops with an
+/// emptied frame comes back as itself and not as the block's bare name.
+pub fn titles(doc: &SchDoc) -> BTreeMap<String, String> {
+    let mut members: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+    for (i, item) in doc.items().iter().enumerate() {
+        let Item::Symbol(s) = item else { continue };
+        if s.refdes().starts_with('#') {
+            continue;
+        }
+        if let Some(block) = s.fields.get(sch_model::result::AP_BLOCK) {
+            members.entry(block.value.clone()).or_default().push(i);
+        }
+    }
+    let texts: Vec<(String, Point2)> = doc
+        .items()
+        .iter()
+        .filter_map(|item| match item {
+            Item::Text(t) => Some((t.text.clone(), t.at.point())),
+            _ => None,
+        })
+        .collect();
+    let frames: Vec<Rect> = doc
+        .items()
+        .iter()
+        .filter_map(|item| match item {
+            Item::Rectangle(r) => Some(Rect::from_points(r.start, r.end)),
+            _ => None,
+        })
+        .collect();
+    let mut out = BTreeMap::new();
+    for (block, indices) in members {
+        let Some(hull) = union(indices.iter().filter_map(|i| doc.item_bbox(&doc.items()[*i])))
+        else {
+            continue;
+        };
+        let anchor = frames
+            .iter()
+            .find(|f| contains(f, &hull))
+            .copied()
+            .unwrap_or(hull);
+        let title = texts
+            .iter()
+            .filter(|(_, at)| gap(&anchor, *at) <= CAPTION_REACH)
+            .min_by(|a, b| gap(&anchor, a.1).total_cmp(&gap(&anchor, b.1)));
+        if let Some((text, _)) = title {
+            out.insert(block, text.clone());
+        }
+    }
+    out
+}
+
 /// Redraw every block's frame around the parts it has on the sheet. Returns the blocks
 /// reframed.
 pub fn reframe(doc: &mut SchDoc) -> Vec<String> {
+    reframe_titled(doc, &BTreeMap::new())
+}
+
+/// [`reframe`], writing a block's caption from `titles` when the sheet has lost it.
+pub fn reframe_titled(doc: &mut SchDoc, titles: &BTreeMap<String, String>) -> Vec<String> {
     let mut members: BTreeMap<String, Vec<usize>> = BTreeMap::new();
     for (i, item) in doc.items().iter().enumerate() {
         let Item::Symbol(s) = item else { continue };
@@ -73,7 +130,8 @@ pub fn reframe(doc: &mut SchDoc) -> Vec<String> {
         if holds_foreign {
             continue;
         }
-        replace_frame(doc, block, frame);
+        let title = titles.get(block).map(String::as_str).unwrap_or(block);
+        replace_frame(doc, title, frame);
         done.push(block.clone());
     }
     done
@@ -108,8 +166,8 @@ fn block_frame(doc: &SchDoc, indices: &[usize]) -> Option<Rect> {
 }
 
 /// Drop the rectangles this block's parts sit in, draw `frame`, and seat the block's
-/// title on its top-left corner.
-fn replace_frame(doc: &mut SchDoc, block: &str, frame: Rect) {
+/// title on its top-left corner — written as `title` when the sheet has none.
+fn replace_frame(doc: &mut SchDoc, title: &str, frame: Rect) {
     let core = grow(frame, -FRAME_PAD);
     let stale: Vec<String> = doc
         .items()
@@ -141,7 +199,7 @@ fn replace_frame(doc: &mut SchDoc, block: &str, frame: Rect) {
     // The caption nearest the frame being replaced — or, for a block that never had
     // one drawn, nearest the parts themselves — is this block's title.
     let anchors: Vec<Rect> = if stale_rects.is_empty() { vec![core] } else { stale_rects };
-    let title = titles
+    let found = titles
         .iter()
         .filter_map(|(uuid, at)| {
             let gap = anchors.iter().map(|r| gap(r, *at)).fold(f64::MAX, f64::min);
@@ -156,6 +214,13 @@ fn replace_frame(doc: &mut SchDoc, block: &str, frame: Rect) {
         Point2::new(frame.min_x, frame.min_y),
         Point2::new(frame.max_x, frame.max_y),
     );
+    let caption = title;
+    let title = found.or_else(|| {
+        // A caption lost with an emptied frame is written again.
+        let at = Point2::new(frame.min_x, frame.min_y - 1.27);
+        let uuid = doc.add_text(caption, at, TITLE_SIZE, true);
+        Some((0.0, uuid, at))
+    });
     if let Some((_, uuid, at)) = title {
         let text_len = doc
             .items()
@@ -169,7 +234,6 @@ fn replace_frame(doc: &mut SchDoc, block: &str, frame: Rect) {
         let moved: BTreeSet<String> = std::iter::once(uuid).collect();
         doc.translate_items(&moved, target.x - at.x, target.y - at.y);
     }
-    let _ = block;
 }
 
 /// Where the title goes: a line above the frame at its left corner, else the right,

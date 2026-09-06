@@ -103,6 +103,24 @@ impl<'a> RegionProblem<'a> {
 /// recover the block reads the same on a tight block and quite differently on a loose
 /// one, and neither is the rectangle the drawing ends up carrying — which is the only one
 /// a seat may be trusted to keep clear.
+/// The frame of the block already on the sheet that the movable parts belong to — when
+/// they all belong to one block, and it is drawn.
+fn home_frame(all: &[Item], movable: usize) -> Option<Rect> {
+    let mut names = all[..movable].iter().map(|it| it.block.as_str());
+    let name = names.next()?;
+    if names.any(|other| other != name) {
+        return None;
+    }
+    // Furniture — rail glyphs, flags — carries the block's name but is not the block.
+    let members: Vec<usize> = (movable..all.len())
+        .filter(|i| all[*i].block == name && !all[*i].refdes.starts_with('#'))
+        .collect();
+    if members.is_empty() {
+        return None;
+    }
+    sch_flex::pack::block_frame(all, &members)
+}
+
 fn block_frames(all: &[Item], which: impl Iterator<Item = usize>) -> Vec<Rect> {
     let mut blocks: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
     for i in which {
@@ -205,7 +223,13 @@ fn beside_pages(there: Rect) -> Vec<[f64; 2]> {
 /// claim is an upper bound and comes out 18.4% larger in area than the frame the realiser
 /// then draws inside it. That is [`crate::reseat`]'s to reclaim, once the block is drawn
 /// and its frame is known exactly.
-fn seat_beside(movable: &mut [Item], frames: &[Rect], taken: &[Rect], drawn: &[Rect]) {
+fn seat_beside(
+    movable: &mut [Item],
+    frames: &[Rect],
+    taken: &[Rect],
+    drawn: &[Rect],
+    home: Option<Rect>,
+) {
     let (Some(here), false) = (hull(frames), taken.is_empty()) else {
         return;
     };
@@ -224,22 +248,44 @@ fn seat_beside(movable: &mut [Item], frames: &[Rect], taken: &[Rect], drawn: &[R
         let aspect = ((r.width() / r.height().max(1.0)) / SHEET_ASPECT).ln().abs();
         r.width() * r.height() * (1.0 + aspect)
     };
-    let best = |limit: f64, page: Option<[f64; 2]>| {
+    let fits = |at: &Point2, page: Option<[f64; 2]>| {
+        page.is_none_or(|p| {
+            let s = sheet(at);
+            s.max_x <= geom::PAGE_MARGIN + p[0] + geom::EPS
+                && s.max_y <= geom::PAGE_MARGIN + p[1] + geom::EPS
+        })
+    };
+    // Parts joining a block already drawn belong beside THAT block, not wherever the
+    // sheet has a hole: a cap added to the regulator's block a call later is part of
+    // the regulator's drawing, and a landing across the sheet is what strands it.
+    let beside_home = |at: &Point2| {
+        home.is_none_or(|h| {
+            let r = Rect::new(at.x, at.y, at.x + size.0, at.y + size.1);
+            let dx = (h.min_x - r.max_x).max(r.min_x - h.max_x).max(0.0);
+            let dy = (h.min_y - r.max_y).max(r.min_y - h.max_y).max(0.0);
+            dx.max(dy) <= BLOCK_GAP + geom::EPS
+        })
+    };
+    let best = |limit: f64, page: Option<[f64; 2]>, near_home: bool| {
         landings(taken, size, limit, BLOCK_GAP)
             .into_iter()
-            .filter(|at| {
-                page.is_none_or(|p| {
-                    let s = sheet(at);
-                    s.max_x <= geom::PAGE_MARGIN + p[0] + geom::EPS
-                        && s.max_y <= geom::PAGE_MARGIN + p[1] + geom::EPS
-                })
-            })
+            .filter(|at| fits(at, page))
+            .filter(|at| !near_home || beside_home(at))
             .min_by(|a, b| cost(&sheet(a)).total_cmp(&cost(&sheet(b))))
     };
-    let landed = crate::write::usable_pages()
-        .into_iter()
-        .find_map(|page| best(page[0], Some(page)))
-        .or_else(|| best(f64::INFINITY, None));
+    let landed = (home.is_some())
+        .then(|| {
+            crate::write::usable_pages()
+                .into_iter()
+                .find_map(|page| best(page[0], Some(page), true))
+        })
+        .flatten()
+        .or_else(|| {
+            crate::write::usable_pages()
+                .into_iter()
+                .find_map(|page| best(page[0], Some(page), false))
+        })
+        .or_else(|| best(f64::INFINITY, None, false));
     // No landing at all — the corner lattice had nothing clear on any page. Leaving the
     // group where the typesetter drew it, which is what this did, drops the whole block
     // on top of the sheet: the block draws from its own origin, so "unmoved" means "on
@@ -384,7 +430,8 @@ pub fn arrange(problem: RegionProblem) -> RegionOutput {
     // On a sheet that already has content, that is on top of what is there, so the group
     // is seated in the free sheet among the blocks already down.
     let ours = block_frames(&all, 0..movable);
-    seat_beside(&mut all[..movable], &ours, &taken, &drawn);
+    let home = home_frame(&all, movable);
+    seat_beside(&mut all[..movable], &ours, &taken, &drawn, home);
 
     // With nothing to avoid, the typeset arrangement is authoritative — walking parts
     // apart here would only undo the alignment it just computed. A collision the

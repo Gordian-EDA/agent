@@ -760,6 +760,7 @@ fn rearrange_inner(
         }
         ir.trees.insert(block, tree);
     }
+    let titles = crate::frames::titles(doc);
     let snapshot = doc.snapshot();
     let overlaps_before = crate::visual::body_overlaps(doc);
     // Read before the erase: a net whose only labels belong to the selection would
@@ -868,7 +869,7 @@ fn rearrange_inner(
         return Err(Error::BodyOverlap(Overlaps(landed_on)));
     }
     if laid_out {
-        crate::frames::reframe(doc);
+        crate::frames::reframe_titled(doc, &titles);
     }
     Ok(ArrangeReport {
         // The restore put every benched symbol back on the bench too.

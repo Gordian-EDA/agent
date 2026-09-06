@@ -8,6 +8,7 @@ use crate::doc::SchDoc;
 use crate::error::{Error, Result};
 use crate::libsyms::SymbolSource;
 use crate::model::{
+    Text,
     Rectangle,
     Item, Junction, Label, LabelKind, Mirror, NoConnect, Pose, Retained, SymbolInst, Wire,
     instance_path, instance_paths, new_field, property_node, retarget_instances,
@@ -689,6 +690,41 @@ impl SchDoc {
             kind,
             text,
             at,
+            raw: Retained::owned(node),
+        }));
+        uuid
+    }
+
+    /// Write a free-standing line of text — a block's caption. `at` is the text's
+    /// left-bottom corner. Returns its UUID.
+    pub fn add_text(&mut self, text: &str, at: Point2, size: f64, bold: bool) -> String {
+        let uuid = self.derive_uuid("text", &format!("{text}|{},{}", at.x, at.y));
+        let mut font = vec![tagged("size", vec![num(size), num(size)])];
+        if bold {
+            font.push(sym("bold"));
+        }
+        let node = list(vec![
+            sym("text"),
+            quoted(text.to_string()),
+            tagged("exclude_from_sim", vec![sym("no")]),
+            tagged("at", vec![num(at.x), num(at.y), num(0.0)]),
+            tagged(
+                "effects",
+                vec![
+                    tagged("font", font),
+                    tagged("justify", vec![sym("left"), sym("bottom")]),
+                ],
+            ),
+            tagged("uuid", vec![quoted(uuid.clone())]),
+        ]);
+        self.insert_item(Item::Text(Text {
+            uuid: uuid.clone(),
+            text: text.to_string(),
+            at: Pose {
+                x: at.x,
+                y: at.y,
+                rot: 0.0,
+            },
             raw: Retained::owned(node),
         }));
         uuid
