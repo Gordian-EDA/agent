@@ -8,6 +8,7 @@ use crate::doc::SchDoc;
 use crate::error::{Error, Result};
 use crate::libsyms::SymbolSource;
 use crate::model::{
+    Rectangle,
     Item, Junction, Label, LabelKind, Mirror, NoConnect, Pose, Retained, SymbolInst, Wire,
     instance_path, instance_paths, new_field, property_node, retarget_instances,
     set_instance_reference, set_pin_uuid, yes_no,
@@ -688,6 +689,35 @@ impl SchDoc {
             kind,
             text,
             at,
+            raw: Retained::owned(node),
+        }));
+        uuid
+    }
+
+    /// Draw a dashed frame — the outline a block is drawn in. Returns its UUID.
+    pub fn add_rectangle(&mut self, start: Point2, end: Point2) -> String {
+        let uuid = self.derive_uuid(
+            "rectangle",
+            &format!("{},{}|{},{}", start.x, start.y, end.x, end.y),
+        );
+        let node = list(vec![
+            sym("rectangle"),
+            tagged("start", vec![num(start.x), num(start.y)]),
+            tagged("end", vec![num(end.x), num(end.y)]),
+            tagged(
+                "stroke",
+                vec![
+                    tagged("width", vec![num(0.1524)]),
+                    tagged("type", vec![sym("dash")]),
+                ],
+            ),
+            tagged("fill", vec![tagged("type", vec![sym("none")])]),
+            tagged("uuid", vec![quoted(uuid.clone())]),
+        ]);
+        self.insert_item(Item::Rectangle(Rectangle {
+            uuid: uuid.clone(),
+            start,
+            end,
             raw: Retained::owned(node),
         }));
         uuid

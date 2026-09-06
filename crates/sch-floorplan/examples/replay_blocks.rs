@@ -133,6 +133,9 @@ fn main() {
                 Ok(report) => rolled_back.push(format!("{block}: {:?}", report.mismatch)),
                 Err(error) => rolled_back.push(format!("{block}: {error}")),
             }
+            if std::env::var_os("REPLAY_STEPS").is_some() {
+                doc.write(&out.join(format!("{name}.{i}.kicad_sch"))).unwrap();
+            }
         }
 
         let path = out.join(format!("{name}.kicad_sch"));
