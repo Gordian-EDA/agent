@@ -271,3 +271,18 @@ and arrange, unless the outline would hold another block's parts. Live, one atte
 prompt-blue-pill **9.0** (look 8, 0 ERC, 33 requests; v14 7.0, v15 6.0 before the
 foreign-parts rule), rp2040 7.71 (v14 6.86, v15 5.43), stm32 7.00 (v15 8.29 — swing).
 Replay: text collisions 5 → 6, grid-demo/uart A4 → A5, oneshot-bluepill A3 → A2.
+
+## Suite 17 — main 9de606f1 binary; critic prompt changed mid-run (2026-09-06)
+
+Mean 7.11 (v14 7.32), look 5.93, 4/14 pass; requests 536. The first five cases were
+scored by the old critic (current-sense 8.7, ddr 8.3, ecg 9.4, ibm 9.0), the rest by
+the composition-aware one (db78fab9): it read the sheet as a design and its "major"
+findings are what a person says — the MCU outside the block that holds its reset and
+clock (blue-pill 5.0, look 3), the gain stage boxed far from the filter that feeds it
+(sallen-key 6.4), J2 grouped with headers instead of the output it serves
+(light-accessory 6.0), notes and connectors stranded across a gap (rp2040 5.7, look 4),
+two headings stacked over one box (three-phase 6.3). hbridge 8.1 and the dataset
+cases above pass. Attribution: these are the MODEL's block composition and the
+engine's block placement, not the critic — and the old critic was hiding them.
+ddr carried 18 ERC errors from the checker's port-pin no_connect advice (fixed
+8dd44fcd, after this run).
