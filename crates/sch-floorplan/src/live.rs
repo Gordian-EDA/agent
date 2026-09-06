@@ -1985,6 +1985,13 @@ fn obstacles(doc: &SchDoc, owned: &[Rect]) -> Vec<Rect> {
             symbol.at.y + 2.54,
         ));
     }
+    // A block's drawn outline is the block's: a part of another block landing inside
+    // it reads as a member of that block, whatever its own frame later says.
+    for item in doc.items() {
+        if let sch_doc::Item::Rectangle(r) = item {
+            out.push(Rect::from_points(r.start, r.end));
+        }
+    }
     out.retain(|r| !owned.iter().any(|o| o.overlaps(r)));
     out
 }
