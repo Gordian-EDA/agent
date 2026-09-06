@@ -456,6 +456,16 @@ impl FixPlanner {
                 ),
                 false => why,
             };
+        } else if is_bare_pin_rule(&code)
+            && self.affected_pin(finding).is_some_and(|pin| !pin.unconnected)
+        {
+            finding.severity = "warning".to_string();
+            finding.advisory = true;
+            finding.why = "KiCAD reads this pin as bare while the sheet's own extraction has it \
+                           on a net: a stacked pin whose twin carries the wire, or a rail a \
+                           flag reaches. Nothing to connect; if it must show a wire, land one \
+                           on the pin's own tip."
+                .to_string();
         } else if is_connection_finding(&code, &message) {
             finding.why =
                 "No same-net or same-function endpoint proves the intended connection.".to_string();
@@ -589,6 +599,15 @@ impl FixPlanner {
                     )
                 },
             ));
+        }
+        // KiCAD reports the pin bare while the sheet's own extraction has it on a net —
+        // a stacked pin whose twin carries the wire, or a rail the flag reaches. No
+        // `connect` changes that: it answers "already connected" and the finding stays,
+        // which is a loop with no exit. Say what is seen instead of offering a repair.
+        if is_bare_pin_rule(&finding.code.to_ascii_lowercase().replace('_', "-"))
+            && !from.unconnected
+        {
+            return None;
         }
         let desired_net = finding.nets.first().or(from.net.as_ref());
         let Some(to) = desired_net
@@ -2023,6 +2042,16 @@ mod tests {
                 args: json!({"pin": "U6.B3"}),
             }
         );
+    }
+
+    #[test]
+    fn a_pin_the_sheet_already_has_on_a_net_is_offered_no_connect_repair() {
+        let planner = planner(vec![
+            pin("J1.A4", "VBUS", "passive", Some("VBUS"), 10.0),
+            pin("J1.A9", "VBUS", "passive", Some("VBUS"), 10.0),
+        ]);
+        let finding = finding("pin_not_connected", &["J1.A4"], &["VBUS"], "Pin not connected");
+        assert!(planner.connection(&finding).is_none());
     }
 
     #[test]
