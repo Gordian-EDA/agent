@@ -234,3 +234,12 @@ netlist oracle green, reviewer KEEP:
 Live agent runs on the merged engine (one attempt): dataset-stm32 7.86 PASS (0 ERC, 55
 requests, A3, framed); prompt-blue-pill 6.57 (101 requests, A2, blocks in the corners —
 the model's arrange/remove churn is what the engine cannot pack).
+
+## Suite 14 — main 6e280724, 14 renders (one attempt), 7-sample mean
+
+Passing all checks: current-sense 8, ecg 9, ibm 9, bjt-preamp 8, sallen-key 9 (5 of 14;
+v10: 5). Critic 7 on ddr, light-accessory, rp2040, three-phase, 555, blue-pill, hbridge;
+6 on stm32 and arduino. ERC: only the ibm case carries an error (1, reference 4) and
+three-phase 4 (reference 6); everything else 0. Sallen-key 5.7–6.0 → 9; stm32 ran 7.86
+two hours earlier on this engine and 6 here — attempt variance is what the loop still
+leaves on the table.
