@@ -23,6 +23,7 @@
 //! in `geom`; live `.kicad_sch` editing lives in `sch-doc`.
 
 pub mod bench;
+pub mod blocks;
 pub mod floorplan;
 pub mod frames;
 pub mod label;

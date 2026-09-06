@@ -17,6 +17,7 @@
 //! the live obstacle scene and falls back to a matched pair of labels, saying
 //! so; that is the only way copper is drawn.
 
+mod blocks;
 mod bulk;
 mod check;
 mod edit;
@@ -34,10 +35,12 @@ use gordian_runtime::AgentRuntime;
 use serde_json::{Value, json};
 
 /// The tools that write the schematic.
-pub const MUTATORS: [&str; 18] = [
+pub const MUTATORS: [&str; 20] = [
     "place_parts",
     "add_parts",
     "arrange",
+    "create_and_update_block",
+    "arrange_blocks",
     "rewire",
     "add_symbols",
     "remove_symbols",
@@ -105,6 +108,16 @@ pub fn tool_defs() -> Vec<Tool> {
             "arrange",
             "Re-place selected symbols and redraw their wiring FROM THE NETLIST, while every unselected symbol stays frozen. This is also how a symbol leaves the bench. Select by `refs` (bench included), `bbox`, or `block`; `layout` gives the selection's row/col tree and `intent` its rails and ports, exactly as in place_parts. The typesetter owns all coordinates; a net it cannot draw as a wire is left as a matching label and reported.",
             bulk::selection_schema(true),
+        ),
+        (
+            "create_and_update_block",
+            "Make the listed placed parts one block: outline them and write the title inside the outline's bottom edge. The parts must stand alone — every drawn wire from one of them ends on another of them (blocks meet only through net labels) — and connect to each other. A title the sheet already has is redefined with these parts. Standalone parts outside every block are allowed.",
+            blocks::create_block_schema(),
+        ),
+        (
+            "arrange_blocks",
+            "Lay the blocks out as a grid: `rows` of block titles, top to bottom, each left to right. Every block moves rigidly, its outline is re-fitted to its cell with the contents centred, columns share a width and rows a height, and the page is sized to the grid. Call it once the blocks exist; call it again after a block changes.",
+            blocks::arrange_blocks_schema(),
         ),
         (
             "rewire",
@@ -501,6 +514,8 @@ pub fn run(name: &str, input: Value, ctx: &AgentRuntime) -> Option<Result<Value>
         "place_parts" => bulk::place_parts(input, ctx),
         "add_parts" => bulk::add_parts(input, ctx),
         "arrange" => bulk::arrange(input, ctx),
+        "create_and_update_block" => blocks::create_and_update_block(input, ctx),
+        "arrange_blocks" => blocks::arrange_blocks(input, ctx),
         "rewire" => bulk::rewire(input, ctx),
         "read_schematic" => query::read_schematic(input, ctx),
         "get_symbol" => query::get_symbol(input, ctx),

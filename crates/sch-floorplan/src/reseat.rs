@@ -1,35 +1,13 @@
-//! `reseat` — re-pack the blocks a sheet already carries.
+//! The pieces of a sheet: what moves together when a block is moved.
 //!
-//! A sheet built one `place_parts` at a time is seated block by block: each call packs
-//! its own block and then lands it beside whatever is already down
-//! ([`crate::region::arrange`]). No call ever moves what came before, so the arrangement
-//! is only ever as good as the order the blocks arrived in — four good blocks strewn
-//! across the top of an A2 with 60% of the paper blank is what that looks like.
-//!
-//! This is the pass that reclaims it. Once a block is DRAWN its frame is known exactly,
-//! where a seat could only work from an upper-bound claim, so the whole sheet is packed
-//! again from the frames as drawn ([`sch_flex::pack_blocks`], the same packer a
-//! whole-sheet typeset uses) and each block is moved rigidly onto its new seat.
-//!
-//! ## Why a rigid move is safe
-//!
-//! Blocks meet through net labels, so moving one whole block changes no connectivity —
-//! but only if "one whole block" is the truth. What actually moves together is a
-//! CONNECTED PIECE of the drawing: every item reachable from a block's symbols through a
-//! shared point or a wire. Two blocks a seam stitch wired together are one such piece and
-//! travel as one. Nothing is ever moved away from something it touches.
-//!
-//! The proof is still checked rather than argued: the extracted partition before and
-//! after must be identical, and no symbol may land on another. A re-seat that fails
-//! either — or that does not make the sheet smaller — is rolled back and the sheet keeps
-//! the arrangement it had.
+//! A piece is everything reachable from a block's symbols through a shared point or a
+//! wire, joined with everything carrying the same block tag, plus the frame and caption
+//! that name it — the unit [`crate::blocks::arrange_blocks`] moves rigidly.
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use geom::{GRID_50_MIL, Point2, Rect};
-use sch_doc::{Item, SchDoc, connect};
-use sch_flex::pack::BLOCK_GAP;
-use sch_model::text::TextKind;
+use geom::{Point2, Rect};
+use sch_doc::{Item, SchDoc};
 
 /// How far a caption may sit from the frame it names, in mm — the same reach
 /// [`crate::realize`] pairs one by.
@@ -46,15 +24,6 @@ pub struct Piece {
     pub uuids: BTreeSet<String>,
     /// The rectangle it draws, text and frame included.
     pub frame: Rect,
-}
-
-/// What [`reseat`] did.
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
-pub struct Reseat {
-    /// Pieces moved. Zero means the sheet was left exactly as it was.
-    pub moved: usize,
-    /// The hull the drawing occupied before and after, in mm².
-    pub hull: [f64; 2],
 }
 
 /// Quantise to 1 µm, as the connectivity extractor does, so float dust never splits a
@@ -77,14 +46,14 @@ fn on_segment(p: Point2, a: Point2, b: Point2) -> bool {
 }
 
 /// Disjoint sets over item indices.
-struct Sets(Vec<usize>);
+pub(crate) struct Sets(Vec<usize>);
 
 impl Sets {
     fn new(n: usize) -> Self {
         Sets((0..n).collect())
     }
 
-    fn find(&mut self, i: usize) -> usize {
+    pub(crate) fn find(&mut self, i: usize) -> usize {
         let mut root = i;
         while self.0[root] != root {
             root = self.0[root];
@@ -130,6 +99,35 @@ fn anchors(item: &Item, pins: &BTreeMap<String, Vec<Point2>>) -> Vec<Point2> {
 /// would leave behind.
 pub fn pieces(doc: &SchDoc) -> Option<Vec<Piece>> {
     let items = doc.items();
+    let (joinable, mut sets) = wired(doc)?;
+    // A block is rigid whether or not its parts are wired to each other: two halves of
+    // one block joined only by a net label still have to travel together. A part the
+    // payload put in no block of its own joins the sheet's default region, so an
+    // undivided sheet is ONE piece and is never taken apart here. A rail glyph carries
+    // no region at all and travels with whatever it is wired to.
+    let mut first: BTreeMap<&str, usize> = BTreeMap::new();
+    for &i in &joinable {
+        let Item::Symbol(s) = &items[i] else { continue };
+        if s.refdes().starts_with('#') {
+            continue;
+        }
+        let block = s
+            .fields
+            .get(sch_model::result::AP_BLOCK)
+            .map(|field| field.value.as_str())
+            .unwrap_or(sch_model::result::DEFAULT_BLOCK);
+        if let Some(j) = first.insert(block, i) {
+            sets.union(i, j);
+        }
+    }
+    pieces_of(doc, &joinable, &mut sets, &first)
+}
+
+/// What the drawing joins by touching: symbols, wires, junctions, markers and labels,
+/// in disjoint sets over item indices, before any block is read. `None` when the
+/// sheet carries something this cannot account for.
+pub(crate) fn wired(doc: &SchDoc) -> Option<(Vec<usize>, Sets)> {
+    let items = doc.items();
     if items.iter().any(|item| matches!(item, Item::Sheet(_))) {
         return None;
     }
@@ -168,32 +166,22 @@ pub fn pieces(doc: &SchDoc) -> Option<Vec<Piece>> {
             }
         }
     }
-    // A block is rigid whether or not its parts are wired to each other: two halves of
-    // one block joined only by a net label still have to travel together. A part the
-    // payload put in no block of its own joins the sheet's default region, so an
-    // undivided sheet is ONE piece and is never taken apart here. A rail glyph carries
-    // no region at all and travels with whatever it is wired to.
-    let mut first: BTreeMap<&str, usize> = BTreeMap::new();
-    for &i in &joinable {
-        let Item::Symbol(s) = &items[i] else { continue };
-        if s.refdes().starts_with('#') {
-            continue;
-        }
-        let block = s
-            .fields
-            .get(sch_model::result::AP_BLOCK)
-            .map(|field| field.value.as_str())
-            .unwrap_or(sch_model::result::DEFAULT_BLOCK);
-        if let Some(j) = first.insert(block, i) {
-            sets.union(i, j);
-        }
-    }
+    Some((joinable, sets))
+}
 
+/// The pieces, given the joined sets and each block's first symbol.
+fn pieces_of(
+    doc: &SchDoc,
+    joinable: &[usize],
+    sets: &mut Sets,
+    first: &BTreeMap<&str, usize>,
+) -> Option<Vec<Piece>> {
+    let items = doc.items();
     // Frames and captions carry no connection, so they follow the drawing they name: a
     // rectangle the piece whose parts it encloses, a caption the piece of the nearest
     // frame — the pairing the realiser drew them with.
     let mut owner: BTreeMap<usize, usize> = BTreeMap::new();
-    for &i in &joinable {
+    for &i in joinable {
         owner.insert(i, sets.find(i));
     }
     let parts: Vec<(usize, Point2)> = joinable
@@ -217,7 +205,7 @@ pub fn pieces(doc: &SchDoc) -> Option<Vec<Piece>> {
             .into_iter()
             .max_by_key(|(root, n)| (*n, std::cmp::Reverse(*root)))
             .map(|(root, _)| root)
-            .or_else(|| nearest(&frame, &parts, &mut sets))
+            .or_else(|| nearest(&frame, &parts, sets))
         else {
             continue;
         };
@@ -240,7 +228,7 @@ pub fn pieces(doc: &SchDoc) -> Option<Vec<Piece>> {
                     .min_by(|a, b| a.0.total_cmp(&b.0))
                     .map(|(_, root)| root)
             })
-            .or_else(|| nearest(&Rect::new(at.x, at.y, at.x, at.y), &parts, &mut sets));
+            .or_else(|| nearest(&Rect::new(at.x, at.y, at.x, at.y), &parts, sets));
         if let Some(root) = near {
             owner.insert(i, root);
         }
@@ -307,270 +295,6 @@ fn union(a: &Rect, b: &Rect) -> Rect {
     )
 }
 
-/// The smallest standard page holding a drawing that spans `r`, margins and the band a
-/// title block prints in included.
-fn page_for(r: &Rect) -> Option<[f64; 2]> {
-    sch_doc::standard_page([
-        r.max_x + geom::PAGE_MARGIN,
-        r.max_y + geom::PAGE_MARGIN + sch_doc::TITLE_BLOCK_BAND,
-    ])
-    .map(|(_, page)| page)
-}
-
-/// The one rectangle a set of rectangles spans. Empty is impossible here: a piece is
-/// built from at least one drawn item.
-fn span(rects: impl IntoIterator<Item = Rect>) -> Rect {
-    rects
-        .into_iter()
-        .reduce(|a, b| union(&a, &b))
-        .unwrap_or_else(|| Rect::new(0.0, 0.0, 0.0, 0.0))
-}
-
-/// Wire segments running through a net label that is not their own.
-///
-/// Packing blocks closer leaves the router less air, and the ink it then has least room
-/// for is the label column between two blocks. This is that cost, counted so a re-seat
-/// that buys its page with unreadable labels is refused.
-fn label_hits(doc: &SchDoc) -> usize {
-    let labels: Vec<sch_model::text::DrawnText> = sch_doc::drawn_texts(doc)
-        .into_iter()
-        .filter(|t| matches!(t.kind, TextKind::Label | TextKind::PortLabel))
-        .collect();
-    sch_doc::connect::scene(doc)
-        .segments
-        .into_iter()
-        .map(|(a, b, net)| {
-            let seg = geom::Segment::new(a, b);
-            labels
-                .iter()
-                .filter(|t| t.text != net && seg.axis_aligned_hits_rect_interior(&t.bbox))
-                .count()
-        })
-        .sum()
-}
-
-/// How big the sheet is, ranked the way a reader sees it: the paper first, and how much
-/// of the drawing's own hull is air only within one paper size. A wide ribbon has the
-/// smaller hull and buys the bigger sheet, so hull alone is the wrong objective.
-fn sheet_size(doc: &SchDoc) -> (f64, f64) {
-    let page = doc.page().map_or(f64::INFINITY, |p| p[0] * p[1]);
-    let hull = doc
-        .content_bbox()
-        .map_or(f64::INFINITY, |r| r.width() * r.height());
-    (page, hull)
-}
-
-/// Pack the sheet's pieces again from the frames they DREW, move each rigidly onto its
-/// new seat, and size the paper to what is left.
-///
-/// Kept only if the sheet can prove it is better: a smaller page — or the same page with
-/// less air — the same extracted partition, and no new symbol-on-symbol. Otherwise the
-/// document is restored exactly as it was and this reports `moved: 0`. A re-seat is an
-/// optimisation, never a risk to a drawing that is already correct.
-pub fn reseat(doc: &mut SchDoc) -> Reseat {
-    let Some(pieces) = pieces(doc) else {
-        return Reseat::default();
-    };
-    let was = sheet_size(doc);
-    let held = Reseat {
-        moved: 0,
-        hull: [was.1; 2],
-    };
-    if pieces.len() < 2 {
-        return held;
-    }
-    let sizes: Vec<(f64, f64)> = pieces
-        .iter()
-        .map(|p| (p.frame.width(), p.frame.height()))
-        .collect();
-    let origins = sch_flex::pack_blocks(&sizes, &crate::write::usable_pages());
-    let seats: Vec<Point2> = origins
-        .iter()
-        .zip(&pieces)
-        .map(|(at, piece)| {
-            Point2::new(
-                GRID_50_MIL.snap(at.x - piece.frame.min_x),
-                GRID_50_MIL.snap(at.y - piece.frame.min_y),
-            )
-        })
-        .collect();
-    // Re-drawing the sheet has to buy something a reader can see: a smaller page, or a
-    // full block gap of reclaimed width or height. Anything less is the same arrangement
-    // slid across the paper, and moving every part of it for that is churn.
-    let here = span(pieces.iter().map(|p| p.frame));
-    let there = span(
-        origins
-            .iter()
-            .zip(&sizes)
-            .map(|(at, (w, h))| Rect::new(at.x, at.y, at.x + w, at.y + h)),
-    );
-    let smaller_page = page_for(&there).is_some_and(|page| {
-        doc.page()
-            .is_some_and(|now| page[0] * page[1] < now[0] * now[1] - geom::EPS)
-    });
-    let roomier = there.width() <= here.width() - BLOCK_GAP
-        || there.height() <= here.height() - BLOCK_GAP;
-    if !smaller_page && !roomier {
-        return held;
-    }
-
-    let partition = connect::extract(doc).partition();
-    let overlaps = crate::visual::body_overlaps(doc).len();
-    let over_labels = label_hits(doc);
-    let snapshot = doc.snapshot();
-    let moved = pieces
-        .iter()
-        .zip(&seats)
-        .filter(|(piece, delta)| {
-            let move_it = delta.x != 0.0 || delta.y != 0.0;
-            if move_it {
-                doc.translate_items(&piece.uuids, delta.x, delta.y);
-            }
-            move_it
-        })
-        .count();
-    // Every piece moved, so the sheet as a whole is brought to the corner before the
-    // page is chosen: a drawing that starts a block's width from the margin takes a
-    // paper size it does not fill.
-    if let Some(bbox) = doc.content_bbox() {
-        doc.translate(
-            GRID_50_MIL.snap(geom::PAGE_MARGIN - bbox.min_x),
-            GRID_50_MIL.snap(geom::PAGE_MARGIN - bbox.min_y),
-        );
-    }
-    doc.refit_page(&BTreeSet::new());
-    let now = sheet_size(doc);
-    let kept = now < was
-        && connect::extract(doc).partition() == partition
-        && crate::visual::body_overlaps(doc).len() <= overlaps
-        && label_hits(doc) <= over_labels;
-    if !kept {
-        tracing::debug!(?was, ?now, "the re-seated sheet was no better; kept the seats");
-        let _ = doc.restore(snapshot);
-        return held;
-    }
-    Reseat {
-        moved,
-        hull: [was.1, now.1],
-    }
-}
-
-/// How far apart two blocks' edges may sit and still be meant as one row or column.
-/// Within it the packer's landings and the typesetter's frames differ by air, not by
-/// intent; beyond it the blocks are on different rows.
-const ALIGN_BAND: f64 = 15.24;
-
-/// Line the blocks up: pieces whose top edges sit within [`ALIGN_BAND`] of each other
-/// take the same top, and pieces whose left edges do take the same left. Rigid moves,
-/// each by less than a band, kept only when no frame lands on another, the partition
-/// is unchanged and nothing new overlaps. Returns the pieces moved.
-///
-/// A seat lands a block beside its neighbours by corner, so two blocks meant as one
-/// row end a few lines apart wherever their frames differ; the eye reads that as
-/// arbitrary where a person would have drawn one line across the top of both.
-pub fn align(doc: &mut SchDoc) -> usize {
-    let Some(pieces) = pieces(doc) else {
-        return 0;
-    };
-    let blocks: Vec<&Piece> = pieces.iter().filter(|p| !p.blocks.is_empty()).collect();
-    if blocks.len() < 2 {
-        return 0;
-    }
-    // The edge the eye lines up is the drawn outline's, where there is one; a piece
-    // without a frame lines up by everything it draws.
-    let edges: Vec<Rect> = blocks
-        .iter()
-        .map(|p| {
-            doc.items()
-                .iter()
-                .find_map(|item| match item {
-                    Item::Rectangle(r) if p.uuids.contains(&r.uuid) => {
-                        Some(Rect::from_points(r.start, r.end))
-                    }
-                    _ => None,
-                })
-                .unwrap_or(p.frame)
-        })
-        .collect();
-    let mut delta: Vec<Point2> = vec![Point2::new(0.0, 0.0); blocks.len()];
-    for (axis, edge) in [(1usize, 0usize), (0usize, 1usize)] {
-        // Pieces sorted by the edge, walked into bands: a band closes where the next
-        // edge is more than a band from the band's first.
-        let mut order: Vec<usize> = (0..blocks.len()).collect();
-        let at = |i: usize| match axis {
-            1 => edges[i].min_y,
-            _ => edges[i].min_x,
-        };
-        order.sort_by(|a, b| at(*a).total_cmp(&at(*b)));
-        let mut band: Vec<usize> = Vec::new();
-        let close = |band: &mut Vec<usize>, delta: &mut Vec<Point2>| {
-            if band.len() >= 2 {
-                let target = at(band[0]);
-                for &i in band.iter() {
-                    let shift = GRID_50_MIL.snap(target - at(i));
-                    match axis {
-                        1 => delta[i].y = shift,
-                        _ => delta[i].x = shift,
-                    }
-                }
-            }
-            band.clear();
-        };
-        for i in order {
-            if band.first().is_some_and(|&f| at(i) - at(f) > ALIGN_BAND) {
-                close(&mut band, &mut delta);
-            }
-            band.push(i);
-        }
-        close(&mut band, &mut delta);
-        let _ = edge;
-    }
-    if delta.iter().all(|d| d.x == 0.0 && d.y == 0.0) {
-        return 0;
-    }
-    // Frames after the move may not touch: a block pulled up onto its neighbour is
-    // worse than one a few lines low.
-    let moved: Vec<Rect> = blocks
-        .iter()
-        .zip(&delta)
-        .map(|(p, d)| {
-            Rect::new(
-                p.frame.min_x + d.x,
-                p.frame.min_y + d.y,
-                p.frame.max_x + d.x,
-                p.frame.max_y + d.y,
-            )
-        })
-        .collect();
-    for (i, a) in moved.iter().enumerate() {
-        for b in moved.iter().skip(i + 1) {
-            if a.overlaps(b) {
-                return 0;
-            }
-        }
-    }
-    let partition = connect::extract(doc).partition();
-    let overlaps = crate::visual::body_overlaps(doc).len();
-    let over_labels = label_hits(doc);
-    let snapshot = doc.snapshot();
-    let mut count = 0;
-    for (p, d) in blocks.iter().zip(&delta) {
-        if d.x != 0.0 || d.y != 0.0 {
-            doc.translate_items(&p.uuids, d.x, d.y);
-            count += 1;
-        }
-    }
-    doc.refit_page(&BTreeSet::new());
-    let kept = connect::extract(doc).partition() == partition
-        && crate::visual::body_overlaps(doc).len() <= overlaps
-        && label_hits(doc) <= over_labels;
-    if !kept {
-        let _ = doc.restore(snapshot);
-        return 0;
-    }
-    count
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -591,28 +315,5 @@ mod tests {
         let doc = sheet();
         let pieces = pieces(&doc).expect("a flat sheet");
         assert_eq!(pieces.len(), 2, "{pieces:#?}");
-    }
-
-    /// Re-seating shrinks the hull and leaves the netlist alone.
-    #[test]
-    fn a_reseat_shrinks_the_sheet_without_changing_the_netlist() {
-        let mut doc = sheet();
-        let before = connect::extract(&doc).partition();
-        let out = reseat(&mut doc);
-        assert!(out.moved > 0, "nothing moved: {out:?}");
-        assert!(out.hull[1] < out.hull[0], "{out:?}");
-        assert_eq!(connect::extract(&doc).partition(), before);
-    }
-
-    /// It settles: a sheet already packed is left exactly as it is.
-    #[test]
-    fn a_reseat_is_idempotent() {
-        let mut doc = sheet();
-        reseat(&mut doc);
-        let once: Vec<geom::Point2> = doc.wires().flat_map(|w| w.points.clone()).collect();
-        let again = reseat(&mut doc);
-        assert_eq!(again.moved, 0, "{again:?}");
-        let twice: Vec<geom::Point2> = doc.wires().flat_map(|w| w.points.clone()).collect();
-        assert_eq!(once, twice);
     }
 }

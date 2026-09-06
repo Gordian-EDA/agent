@@ -60,46 +60,7 @@ pub fn realize_block(
     add_orphan_label_columns(&mut writer, design, inc);
     writer.set_frame(draw.frame);
     writer.prepare();
-    draw_block_frames(&mut writer, design, items);
-    // Re-run the (idempotent) finalize so the reframe sees the frames it must keep on
-    // the page; the text solve and wire splitting are unchanged by decoration.
-    writer.prepare();
     Ok(writer)
-}
-
-/// Draw one dashed frame per design region that has parts on this sheet, captioned with
-/// the region's title and carrying its note.
-///
-/// A region the tools synthesized ([`sch_model::result::synthesized_block`]) is not a
-/// functional block — it is everything the author did not divide up — so it gets no
-/// frame; the drawing frame and title block already delimit the sheet.
-fn draw_block_frames(writer: &mut SchematicWriter, design: &Design, items: &[Item]) {
-    let members: Vec<(&String, Vec<String>)> = design
-        .blocks
-        .keys()
-        .filter(|name| !sch_model::result::synthesized_block(name))
-        .map(|name| {
-            let refs = items
-                .iter()
-                .filter(|it| &it.block == name)
-                .map(|it| it.refdes.clone())
-                .collect();
-            (name, refs)
-        })
-        .collect();
-    let frames: Vec<crate::write::BlockFrame<'_>> = members
-        .iter()
-        .filter(|(_, refs)| !refs.is_empty())
-        .map(|(name, refs)| {
-            let block = &design.blocks[*name];
-            crate::write::BlockFrame {
-                title: block.title.as_deref().unwrap_or(name),
-                note: block.note.as_deref(),
-                members: refs,
-            }
-        })
-        .collect();
-    writer.add_block_frames(&frames);
 }
 
 /// Render a finished writer as a standalone document.

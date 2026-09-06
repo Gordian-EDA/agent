@@ -16,7 +16,7 @@ Work in small, legal blocks. Partial states are fine. After EVERY block call `re
 
 Discover symbols once with `search_symbols({queries})`; top hits carry pins, alternates and a validated footprint. Search footprints BY SYMBOL with `search_footprints({symbol, query?})`; use only compatible hits. Never invent IDs or pins.
 
-Compose 2-6 functional blocks (POWER, MCU, CLOCK, USB, DEBUG, CONNECTORS...), each holding ALL the parts of one sub-circuit; a crystal with its caps is never a block alone. Blocks meet only through net labels, so neither over-split a small circuit nor let one block span the sheet. Use `place_parts({parts, layout, name?, intent?, block?, blocks?})` for only the current block, then `connect`, `label`, `no_connect` and `arrange({refs|bbox|block, layout})` for corrections. Pin keys accept number, name or alternate, any case; `"nc"` means no-connect. Rails and ports take left/right/top/bottom. YOU compose the layout, the engine only measures: pass `layout: {<block>: <tree>}` per block, naming only its parts. A node is `{part, unit?, rot?, mirror?}`, `{row: [...]}` or `{col: [...]}`, with `gap` (1.27 mm grid units). A row is ONE signal path: neighbours must share a net; unrelated parts never sit side by side. A part that SERVES one pin — decoupler, pull-up, reset cap, shunt — goes in the `col` beside that part, on the side that pin leaves from; anywhere else needs a label. A crystal's load caps sit in one `row` under it. An IC sits between its input- and output-side cols, its decoupling caps a further col. 3-12 parts per block; gaps 4-6 in a chain, 6-8 round an IC. Omit `rot`. Always pass `name` (sheet title); name each `block` and give it `blocks: {<block>: {title?, note?}}` with a one-line `note` where a human would explain a choice.
+Work one sub-circuit at a time, 3-12 parts: `place_parts({parts, layout, name?, intent?})` places and wires it as one group beside the sheet's content; `arrange({refs|bbox, layout})` corrects it. Then `create_and_update_block({parts, title, note?})` outlines that group and writes its title — the parts must stand alone (drawn wires stay inside; sub-circuits meet only through net labels) — and, once every block exists, `arrange_blocks({rows: [[title, ...], ...]})` tiles the blocks as an aligned grid, rows top to bottom. Compose 2-6 functional blocks (POWER, MCU, USB, DEBUG...), each holding ALL the parts of one sub-circuit; a crystal with its caps is never a block alone. Pin keys accept number, name or alternate, any case; `"nc"` means no-connect. Rails and ports take left/right/top/bottom. YOU compose the layout, the engine only measures: `layout` is one row/col tree over the payload's parts. A node is `{part, unit?, rot?, mirror?}`, `{row: [...]}` or `{col: [...]}`, with `gap` (1.27 mm grid units). A row is ONE signal path: neighbours must share a net; unrelated parts never sit side by side. A part that SERVES one pin — decoupler, pull-up, reset cap, shunt — goes in the `col` beside that part, on the side that pin leaves from; anywhere else needs a label. An IC sits between its input- and output-side cols, its decoupling caps a further col. Pass `name` (sheet title); give a block a one-line `note` where a human would explain a choice.
 
 `place_parts` never refuses a whole payload: unresolvable parts return as `unplaced` ({ref, reason, did_you_mean}) with their nets open, everything else is placed, and it appends, so resubmit only what it names. A block that cannot be drawn truthfully is BENCHED (`benched`: wired by name, no layout); `add_parts({parts})` benches directly; `arrange({refs|block, layout})` lays them out and empties the bench. Checks report `bench: n`; `sync_board`/`export_fab` refuse while it is non-empty.
 
@@ -68,7 +68,9 @@ mod tests {
         ] {
             assert!(prompt.contains(tool), "prompt missing `{tool}`");
         }
-        assert!(prompt.contains("for only the current block"));
+        assert!(prompt.contains("one sub-circuit at a time"));
+        assert!(prompt.contains("create_and_update_block"));
+        assert!(prompt.contains("arrange_blocks"));
         assert!(!prompt.contains("one complete `place_parts`"));
         assert!(prompt.contains("Search footprints BY SYMBOL"));
         assert!(prompt.contains("never provide wire coordinates"));
@@ -165,6 +167,7 @@ mod tests {
             assert!(prompt.contains(phase), "prompt missing `{phase}`");
         }
         assert!(prompt.contains("After EVERY block"));
+        assert!(prompt.contains("stand alone"));
         assert!(prompt.contains("`render_schematic` and `check_schematic`"));
     }
 

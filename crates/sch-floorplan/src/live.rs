@@ -448,15 +448,6 @@ fn place_parts_inner(
     // it, and only a pass over the drawn frames can give that back. It runs last, after
     // the seams are wired, because a seam decided on the packed sheet is a long wire
     // drawn where the two blocks used to be far apart.
-    crate::frames::reframe(doc);
-    let reseated = crate::reseat::reseat(doc);
-    if reseated.moved > 0 {
-        tracing::info!(?reseated, "re-seated the sheet around the block just drawn");
-    }
-    let aligned = crate::reseat::align(doc);
-    if aligned > 0 {
-        tracing::info!(aligned, "lined the blocks up");
-    }
 
     let mut mismatch = live_phase("verify", placed.len(), inc.len(), || {
         verify(doc, &design)
@@ -764,7 +755,6 @@ fn rearrange_inner(
         }
         ir.trees.insert(block, tree);
     }
-    let titles = crate::frames::titles(doc);
     let snapshot = doc.snapshot();
     let overlaps_before = crate::visual::body_overlaps(doc);
     // Read before the erase: a net whose only labels belong to the selection would
@@ -871,10 +861,6 @@ fn rearrange_inner(
     if !landed_on.is_empty() {
         doc.restore(snapshot)?;
         return Err(Error::BodyOverlap(Overlaps(landed_on)));
-    }
-    if laid_out {
-        crate::frames::reframe_titled(doc, &titles);
-        crate::reseat::align(doc);
     }
     Ok(ArrangeReport {
         // The restore put every benched symbol back on the bench too.

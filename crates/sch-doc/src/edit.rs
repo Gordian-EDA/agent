@@ -743,6 +743,20 @@ impl SchDoc {
         uuid
     }
 
+    /// Move a frame's corners: the outline a block is drawn in, re-fitted.
+    pub fn set_rectangle(&mut self, uuid: &str, start: Point2, end: Point2) -> Result<()> {
+        for item in self.items_mut() {
+            if let Item::Rectangle(r) = item
+                && r.uuid == uuid
+            {
+                r.start = start;
+                r.end = end;
+                return Ok(());
+            }
+        }
+        Err(Error::UnknownRectangle(uuid.to_string()))
+    }
+
     /// Draw a dashed frame — the outline a block is drawn in. Returns its UUID.
     pub fn add_rectangle(&mut self, start: Point2, end: Point2) -> String {
         let uuid = self.derive_uuid(

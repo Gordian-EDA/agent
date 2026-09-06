@@ -1038,7 +1038,7 @@ fn closest_ref<'a>(refdes: &str, candidates: impl Iterator<Item = &'a str>) -> O
 ///
 /// The schema is recursive by `$ref`, and its description carries the composition rules —
 /// they are what separates a readable block from a merely correct one.
-fn layout_tree_schema() -> Value {
+pub fn layout_tree_schema() -> Value {
     json!({
         "$ref": "#/$defs/node",
         "$defs": {
@@ -1157,19 +1157,15 @@ pub fn place_parts_input_schema() -> Value {
             "layout": {
                 "type": "object",
                 "description":
-                    "Region -> its layout TREE: how that region is drawn. This is the layout; \
-                     compose one for every region. A design is SEVERAL regions of 3-12 parts, \
-                     never one big one — a reader takes a region in as one idea, and twenty \
-                     parts under one name draw as a field of components joined by their names \
-                     instead of a circuit. Split by function: power entry, regulator, MCU core, \
-                     each interface, each repeated channel. Worked example, a 12-part board in \
-                     three regions:\n\
-                     {\"power_entry\": {\"row\": [{\"part\": \"J1\"}, {\"part\": \"F1\"}, \
-                     {\"col\": [{\"part\": \"D1\"}, {\"part\": \"C1\"}]}]},\n\
-                     \"regulator\": {\"row\": [{\"col\": [{\"part\": \"C2\"}]}, {\"part\": \"U1\"}, \
-                     {\"col\": [{\"part\": \"C3\"}, {\"part\": \"C4\"}]}]},\n\
-                     \"status_led\": {\"row\": [{\"part\": \"R1\"}, {\"part\": \"D2\"}]}}",
-                "additionalProperties": layout_tree_schema()
+                    "The layout TREE of this payload's parts: how they are drawn, flexbox-style. \
+                     A node is {part, unit?, rot?, mirror?}, {row: [...]} or {col: [...]}; a row \
+                     is one signal path (neighbours share a net), a col stacks the parts that \
+                     hang off one node. Place one sub-circuit of 3-12 parts per call and give \
+                     it one tree, e.g. {\"row\": [{\"col\": [{\"part\": \"C2\"}]}, \
+                     {\"part\": \"U1\"}, {\"col\": [{\"part\": \"C3\"}, {\"part\": \"C4\"}]}]}. \
+                     Blocks — outlines and titles — are made afterwards with \
+                     create_and_update_block and tiled with arrange_blocks.",
+                "additionalProperties": true
             },
             "blocks": {
                 "type": "object",

@@ -11,6 +11,8 @@ pub enum Error {
     NotSchematic(String),
     #[error("no symbol with uuid {0}")]
     UnknownSymbol(String),
+    #[error("no rectangle with uuid {0}")]
+    UnknownRectangle(String),
     #[error("no symbol with reference {0}")]
     UnknownReference(String),
     #[error("no symbol field named {0}")]

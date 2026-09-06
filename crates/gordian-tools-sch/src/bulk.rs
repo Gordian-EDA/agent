@@ -98,9 +98,7 @@ pub(crate) fn selection_schema(engine: bool) -> Value {
     if engine {
         properties["intent"] =
             sch_check::place_parts_input_schema()["properties"]["intent"].clone();
-        properties["layout"] =
-            sch_check::place_parts_input_schema()["properties"]["layout"]["additionalProperties"]
-                .clone();
+        properties["layout"] = sch_check::place_parts::layout_tree_schema();
         properties["layout"]["description"] =
             json!("How the selection is arranged: one row/col tree over its parts.");
     }
@@ -118,6 +116,19 @@ pub(crate) fn selection_schema(engine: bool) -> Value {
 
 pub(crate) fn place_parts(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let mut input = input;
+    // One tree for the whole payload is the common case now that blocks are made
+    // afterwards: file it under the payload's own region name.
+    if let Some(Value::Object(tree)) = input.get("layout")
+        && (tree.contains_key("row") || tree.contains_key("col") || tree.contains_key("part"))
+    {
+        let region = input
+            .get("block")
+            .and_then(Value::as_str)
+            .unwrap_or(sch_check::place_parts::DEFAULT_BLOCK)
+            .to_string();
+        let tree = input["layout"].take();
+        input["layout"] = json!({ region: tree });
+    }
     let mut warnings = sanitize_place_parts_input(&mut input);
     let mut payload: sch_check::PlacePartsInput = typed(input, "place_parts")?;
     // The exact payload is what reproduces a placement; nothing else in the log does.

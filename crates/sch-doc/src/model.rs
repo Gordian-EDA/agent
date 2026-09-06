@@ -443,6 +443,15 @@ impl Text {
         }
     }
 
+    /// The font size the text is set in, in mm — 1.27 when the node does not say.
+    pub fn size(&self) -> f64 {
+        child(&self.raw.node, "effects")
+            .and_then(|effects| child(effects, "font"))
+            .and_then(|font| child(font, "size"))
+            .and_then(|size| items(size).get(1).and_then(sexpr::number))
+            .unwrap_or(1.27)
+    }
+
     pub(crate) fn encode(&self) -> Node {
         let mut node = self.raw.node.clone();
         set_positional(&mut node, 1, quoted(self.text.clone()));
