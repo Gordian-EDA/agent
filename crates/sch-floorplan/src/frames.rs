@@ -25,6 +25,11 @@ const REACH: f64 = 5.08;
 const CAPTION_REACH: f64 = 12.7;
 /// The line above the outline the title is written on.
 const TITLE_BAND: f64 = 2.54;
+/// The line a rail glyph's name takes beyond its arrow.
+const RAIL_NAME_LINE: f64 = 2.54;
+/// The caption's text size, and the width one of its characters takes.
+const TITLE_SIZE: f64 = 2.54;
+const TITLE_EM: f64 = 1.9;
 
 /// Redraw every block's frame around the parts it has on the sheet. Returns the blocks
 /// reframed.
@@ -57,7 +62,15 @@ pub fn reframe(doc: &mut SchDoc) -> Vec<String> {
 /// within reach of them, padded and snapped to the grid.
 fn block_frame(doc: &SchDoc, indices: &[usize]) -> Option<Rect> {
     let items = doc.items();
-    let mut hull = union(indices.iter().filter_map(|i| doc.item_bbox(&items[*i])))?;
+    // A rail glyph's name is written a line beyond its arrow, outside the symbol's
+    // own box; the outline has to clear it or the caption lands on it.
+    let mut hull = union(indices.iter().filter_map(|i| {
+        let bbox = doc.item_bbox(&items[*i])?;
+        Some(match &items[*i] {
+            Item::Symbol(s) if s.lib_id.starts_with("power:") => grow(bbox, RAIL_NAME_LINE),
+            _ => bbox,
+        })
+    }))?;
     let near = items
         .iter()
         .filter(|item| matches!(item, Item::Label(_) | Item::NoConnect(_) | Item::Junction(_)))
@@ -123,11 +136,48 @@ fn replace_frame(doc: &mut SchDoc, block: &str, frame: Rect) {
         Point2::new(frame.max_x, frame.max_y),
     );
     if let Some((_, uuid, at)) = title {
-        let target = Point2::new(frame.min_x, frame.min_y - 1.27);
+        let text_len = doc
+            .items()
+            .iter()
+            .find_map(|item| match item {
+                Item::Text(t) if t.uuid == uuid => Some(t.text.chars().count()),
+                _ => None,
+            })
+            .unwrap_or(8);
+        let target = caption_seat(doc, &uuid, frame, text_len);
         let moved: BTreeSet<String> = std::iter::once(uuid).collect();
         doc.translate_items(&moved, target.x - at.x, target.y - at.y);
     }
     let _ = block;
+}
+
+/// Where the title goes: a line above the frame at its left corner, else the right,
+/// else below — the first corner whose text box lands on nothing already drawn.
+fn caption_seat(doc: &SchDoc, own: &str, frame: Rect, chars: usize) -> Point2 {
+    let width = chars as f64 * TITLE_EM;
+    let corners = [
+        Point2::new(frame.min_x, frame.min_y - 1.27),
+        Point2::new(frame.max_x - width, frame.min_y - 1.27),
+        Point2::new(frame.min_x, frame.max_y + TITLE_SIZE + 1.27),
+        Point2::new(frame.max_x - width, frame.max_y + TITLE_SIZE + 1.27),
+    ];
+    let ink: Vec<Rect> = doc
+        .items()
+        .iter()
+        .filter(|item| match item {
+            Item::Text(t) => t.uuid != own,
+            Item::Rectangle(_) => false,
+            _ => true,
+        })
+        .filter_map(|item| doc.item_bbox(item))
+        .collect();
+    corners
+        .into_iter()
+        .find(|at| {
+            let text = Rect::new(at.x, at.y - TITLE_SIZE, at.x + width, at.y);
+            !ink.iter().any(|b| b.intersection(&text).is_some())
+        })
+        .unwrap_or(corners[0])
 }
 
 fn union(rects: impl Iterator<Item = Rect>) -> Option<Rect> {
