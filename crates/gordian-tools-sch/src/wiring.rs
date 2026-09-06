@@ -193,7 +193,8 @@ fn connect_one(input: Value, ctx: &AgentRuntime) -> Result<Value> {
                 && to_net.as_deref() != Some(wanted)
             {
                 let scope = sheet_scope(&edit.doc, wanted).unwrap_or(LabelKind::Local);
-                edit.doc.add_label(scope, wanted, pose(a));
+                edit.doc
+                    .add_label(scope, wanted, outward_pose(&edit.doc, a));
             }
             let changed = format!(
                 "wired {} to {} with {} segment(s)",
@@ -271,7 +272,8 @@ fn connect_one(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             }
             let scope = sheet_scope(&edit.doc, &net).unwrap_or(LabelKind::Local);
             for target in [&from, &to] {
-                edit.doc.add_label(scope, &net, pose(target.at()));
+                edit.doc
+                    .add_label(scope, &net, outward_pose(&edit.doc, target.at()));
             }
             edit.warn(format!(
                 "{reason}; {} and {} were joined by a `{net}` label at each end",
@@ -381,7 +383,8 @@ fn resolve_tool_net(
         at,
     } = &found
     {
-        edit.doc.add_label(LabelKind::Local, net, pose(*at));
+        edit.doc
+            .add_label(LabelKind::Local, net, outward_pose(&edit.doc, *at));
         let mut allowed = vec![net.clone()];
         if let Some(was) = refs::net_of(edit.before(), refdes, number) {
             allowed.push(was.to_string());
@@ -479,7 +482,12 @@ fn fallback_name(doc: &SchDoc, ends: [&sch_doc::PlacedPin; 2]) -> String {
         .map(|pin| sheet.anchor(&pin.refdes, &pin.number))
         .collect();
     let mut namer = Namer::new();
-    namer.hold_all(connect::extract(doc).nets.iter().map(|net| net.name.clone()));
+    namer.hold_all(
+        connect::extract(doc)
+            .nets
+            .iter()
+            .map(|net| net.name.clone()),
+    );
     // Labels this batch has already hung are not in the netlist yet, and two
     // connections in a row must not be given the one name.
     namer.hold_all(doc.labels().map(|label| sch_doc::unescape(&label.text)));
@@ -488,6 +496,17 @@ fn fallback_name(doc: &SchDoc, ends: [&sch_doc::PlacedPin; 2]) -> String {
 
 pub(crate) fn pose(at: Point2) -> sch_doc::Pose {
     sch_doc::Pose::new(at.x, at.y, 0.0)
+}
+
+/// Where a label seated on the pin at `at` sits and which way it reads: outward, away
+/// from the body, as [`sch_doc::PlacedPin::label_pose`] has it. A point that is no
+/// pin's tip takes the default angle.
+pub(crate) fn outward_pose(doc: &SchDoc, at: Point2) -> sch_doc::Pose {
+    sch_doc::placed_pins(doc)
+        .into_iter()
+        .find(|pin| (pin.at.x - at.x).abs() < geom::EPS && (pin.at.y - at.y).abs() < geom::EPS)
+        .map(|pin| pin.label_pose())
+        .unwrap_or_else(|| pose(at))
 }
 
 /// Name the net at one pin.
@@ -548,7 +567,8 @@ pub fn label_tool(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let kind = asked
         .or_else(|| sheet_scope(&edit.doc, net))
         .unwrap_or(LabelKind::Local);
-    edit.doc.add_label(kind, net, pose(pin.at));
+    edit.doc
+        .add_label(kind, net, outward_pose(&edit.doc, pin.at));
     let result = edit.commit(
         with_cleared(format!("named {spec} `{net}`"), cleared),
         Allow::nothing()
@@ -1036,9 +1056,9 @@ fn stand_off(
     // A global name reaches the rail on its own, so only the pin needs one; a local
     // name does not merge with the rail's global net, so both ends carry it.
     let kind = sheet_scope(doc, net).unwrap_or(LabelKind::Global);
-    doc.add_label(kind, net, pose(pin.at));
+    doc.add_label(kind, net, outward_pose(doc, pin.at));
     let labels_added = if kind == LabelKind::Local {
-        doc.add_label(kind, net, pose(rail.at));
+        doc.add_label(kind, net, outward_pose(doc, rail.at));
         2
     } else {
         1

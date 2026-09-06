@@ -8,10 +8,8 @@ use crate::doc::SchDoc;
 use crate::error::{Error, Result};
 use crate::libsyms::SymbolSource;
 use crate::model::{
-    Text,
-    Rectangle,
-    Item, Junction, Label, LabelKind, Mirror, NoConnect, Pose, Retained, SymbolInst, Wire,
-    instance_path, instance_paths, new_field, property_node, retarget_instances,
+    Item, Junction, Label, LabelKind, Mirror, NoConnect, Pose, Rectangle, Retained, SymbolInst,
+    Text, Wire, instance_path, instance_paths, new_field, property_node, retarget_instances,
     set_instance_reference, set_pin_uuid, yes_no,
 };
 use crate::sexpr::{list, num, quoted, sym, tagged};
@@ -665,8 +663,23 @@ impl SchDoc {
     /// Attach a label. `text` is plain text: characters KiCAD cannot store
     /// literally, `/` among them, are escaped on the way in. Returns its UUID.
     pub fn add_label(&mut self, kind: LabelKind, text: &str, at: Pose) -> String {
-        let uuid = self.derive_uuid(kind.head(), &format!("{text}|{},{}", at.x, at.y));
         let text = crate::text::escape(text);
+        // The same name on the same point is one label, however many times it is
+        // asked for: a second copy prints over the first and reads as a smudge.
+        if let Some(existing) = self.items().iter().find_map(|item| match item {
+            Item::Label(l)
+                if l.kind == kind
+                    && l.text == text
+                    && (l.at.x - at.x).abs() < EPS
+                    && (l.at.y - at.y).abs() < EPS =>
+            {
+                Some(l.uuid.clone())
+            }
+            _ => None,
+        }) {
+            return existing;
+        }
+        let uuid = self.derive_uuid(kind.head(), &format!("{text}|{},{}", at.x, at.y));
         let node = list(vec![
             sym(kind.head()),
             quoted(text.clone()),
