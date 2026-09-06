@@ -92,10 +92,15 @@ not let a long list of nitpicks compound into a low score; the score follows the
 worst defect, not the count.
 
 == PROCEDURE (follow in order) ==
-1) In a "reasoning" section, walk the sheet methodically: list the components you see,
-   then for EACH candidate (A) or (B) defect, TRACE the segment/endpoint and state your
-   verdict (real / false-positive) with the reason. Be skeptical of your own first
-   impression on (A) and (B).
+1) In a "reasoning" section, walk the sheet methodically. FIRST take inventory: under
+   each heading, list the refdes you can read. Then COUNT, across the whole sheet, the
+   reset buttons, boot/config jumpers, crystals, regulators, USB/power connectors,
+   indicator LEDs and pull-up/pull-down straps you found: any function that appears
+   more times than the circuit needs (two reset buttons, two BOOT0 jumpers, three user
+   LEDs) is a composition defect — write it down with both refdes. Then for EACH
+   candidate (A) or (B) defect, TRACE the segment/endpoint and state your verdict
+   (real / false-positive) with the reason. Be skeptical of your own first impression
+   on (A) and (B).
 2) Then output the final verdict as STRICT JSON, on its own, after the exact marker
    line `FINAL_JSON:`. No markdown fences. Shape:
 
