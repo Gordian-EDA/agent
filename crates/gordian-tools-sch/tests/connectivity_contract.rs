@@ -150,3 +150,49 @@ fn connector_swap_reflows_fields_without_moving_the_part() {
     let added: Vec<_> = collisions(&ctx).difference(&before).cloned().collect();
     assert!(added.is_empty(), "new collisions: {added:?}");
 }
+
+/// A name put on a pin by `connect` reads outward from the pin, the way the pin's own
+/// label pose has it — never back across the symbol — and asking twice writes it once.
+#[test]
+fn a_named_pin_reads_outward_and_a_repeat_writes_no_second_label() {
+    let Some(ctx) = passive_fixture() else {
+        eprintln!("SKIP: no KiCad detected");
+        return;
+    };
+    let placed = tool(
+        &ctx,
+        "place_parts",
+        json!({
+            "block": "probe",
+            "parts": [{
+                "ref": "R5",
+                "part": "Device:R",
+                "value": "10k",
+                "pins": {"1": "N$9", "2": "GND"}
+            }]
+        }),
+    );
+    assert_success("place_parts", &placed);
+    let named = tool(&ctx, "connect", json!({"from": "R5.1", "net": "PROBE_A"}));
+    assert_success("connect", &named);
+    // Asked again the tool may decline (the pin already carries the name) or comply;
+    // either way the sheet holds one label.
+    let _ = tool(&ctx, "connect", json!({"from": "R5.1", "net": "PROBE_A"}));
+    let mut doc = sch_doc::SchDoc::read(ctx.sch_path()).unwrap();
+    let at = doc
+        .labels()
+        .find(|label| sch_doc::unescape(&label.text) == "PROBE_A")
+        .map(|label| label.at)
+        .expect("PROBE_A is labelled");
+    doc.add_label(sch_doc::LabelKind::Local, "PROBE_A", at);
+    let pin = sch_doc::placed_pins(&doc)
+        .into_iter()
+        .find(|pin| pin.refdes == "R5" && pin.number == "1")
+        .expect("R5.1 is on the sheet");
+    let labels: Vec<&sch_doc::Label> = doc
+        .labels()
+        .filter(|label| sch_doc::unescape(&label.text) == "PROBE_A")
+        .collect();
+    assert_eq!(labels.len(), 1, "{labels:?}");
+    assert_eq!(labels[0].at.rot, pin.label_pose().rot, "label reads back over the body");
+}
