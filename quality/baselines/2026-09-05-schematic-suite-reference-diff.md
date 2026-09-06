@@ -309,3 +309,14 @@ circuitry", "U2 with its caps on a distant lower row", "USB passives far above" 
 seat-beside landing puts a later block on another row when the first row is full, and
 the re-seat only fires when it wins a page. Next lever: the landing cost should price
 distance from the blocks a new block shares nets with, not only the sheet's hull.
+
+## While the gateway is out of credits (2026-09-06 05:00–)
+
+Deterministic fixes, each measured on a live sheet the reviewer or the user flagged:
+labels the tools seat on a pin read outward (7 of 15 collisions on sallen-key were
+names run back over op-amp pin names); a label asked for twice on one point is one
+label; naming a pin already on that net adds nothing (R8/R9 on the Blue Pill carried
+each net twice, tip and stub); landings priced by wire pull to the blocks a new block
+feeds; a block's outline is an obstacle to other blocks' seats; captions seated clear
+of later ink. Main 4f241a64+; workspace 131/0; replay 0/0/0. Unmeasured live until
+credits return — run the four lowest prompt cases, then the suite.
