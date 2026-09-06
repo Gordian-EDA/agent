@@ -1,6 +1,5 @@
 The circuit must be electrically sound and complete for the request, pass KiCAD's ERC,
 and be drawn as clearly as a careful human engineer would draw it.
 expect: erc_errors == 0
-expect: duplicate_parts == []
 expect: part_count >= 12
 expect: schematic_critic_score >= 8

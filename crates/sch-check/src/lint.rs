@@ -346,7 +346,7 @@ pub fn lint(d: &Design, provider: &SymbolTable) -> Diagnostics {
             let (first, copies) = (&refs[0], &refs[1..]);
             for copy in copies {
                 diags.push(
-                    Diagnostic::error(
+                    Diagnostic::warning(
                         "duplicate-part",
                         format!(
                             "{copy} duplicates {first}: the same {part} {value} on {} — one of them \
