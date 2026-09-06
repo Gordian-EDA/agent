@@ -243,3 +243,23 @@ v10: 5). Critic 7 on ddr, light-accessory, rp2040, three-phase, 555, blue-pill, 
 three-phase 4 (reference 6); everything else 0. Sallen-key 5.7–6.0 → 9; stm32 ran 7.86
 two hours earlier on this engine and 6 here — attempt variance is what the loop still
 leaves on the table.
+
+## After suite 14: the wall of 7s, measured
+
+Critic's dominant complaint on every 7: "spacing" — related parts and blocks spread
+across a page with empty space. Measured on the v14 sheets: 40–55 % of parts sit
+OUTSIDE any block frame although tagged with a block (Blue Pill: POWER 7 parts, USB 6
+— no frame at all). Root cause, reproduced in three calls: a frame drawn around three
+parts is deleted the moment a later call adds one part to that block
+(`realize::replace_frames` takes the old frame with the bare caption), and `arrange`
+never redraws it. Density: ours 0.2–0.8 parts/1000 mm² on A2/A3 vs the humans'
+0.7–1.9 on A4; inside frames ours is comparable — the gap is the unframed stragglers.
+
+`lane/reframe` (not merged): a pass that redraws every block's frame from the parts it
+has on the sheet after place_parts and arrange (test `block_frames.rs` passes; replay
+0/0/0; netlist oracle green). Residuals that keep it off main: text collisions 5 → 7
+(captions on rail-glyph names — a power symbol's name is outside `item_bbox`), and the
+re-seat leaves the packed sheet offset from the corner so oneshot-bluepill takes A2.
+Also seen: `place_parts` reporting `gaps` with suggestions on every call drives the
+model to add one cap per call (five single-part calls on the Blue Pill) — which is
+exactly the pattern that loses frames.
