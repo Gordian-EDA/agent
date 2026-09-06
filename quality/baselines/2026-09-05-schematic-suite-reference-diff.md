@@ -286,3 +286,13 @@ cases above pass. Attribution: these are the MODEL's block composition and the
 engine's block placement, not the critic — and the old critic was hiding them.
 ddr carried 18 ERC errors from the checker's port-pin no_connect advice (fixed
 8dd44fcd, after this run).
+
+## Spacing, measured (2026-09-06 02:00)
+
+Nearest-neighbour distance between part origins: humans 10 mm median (p90 15);
+ours 18–23 mm (p90 28–33). But the reference tool's Blue Pill, which scores 9, sits at
+33 mm median — sparser than ours. So the critic's "spacing" is not pitch; it is parts
+stranded away from the block they belong to and blocks flung apart. Fixed at the
+source in 5c5d11b9: a part joining a block a call later lands within a block gap of
+that block's own frame (the MCU across the page from its own reset/clock box was this).
+Do not tune the typesetter's gaps for this.
