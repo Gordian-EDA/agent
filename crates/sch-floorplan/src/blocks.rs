@@ -108,8 +108,19 @@ pub fn create_block(
             .map_err(|e| BlockError::Doc(e.to_string()))?;
     }
 
-    // The outline: parts, their labels and stubs, their rail glyphs, padded, and no
-    // narrower than the title, which takes a band inside the bottom edge.
+    drop_outline_of(doc, &symbols, name);
+    let frame = outline(doc, &symbols, title.unwrap_or(name));
+    Ok(BlockReport {
+        name: name.to_string(),
+        parts: members.into_iter().collect(),
+        frame,
+    })
+}
+
+/// Draw the outline of the parts at `symbols` — parts, their labels and stubs, their
+/// rail glyphs, padded, no narrower than the title — with the title in a band inside
+/// its bottom edge.
+fn outline(doc: &mut SchDoc, symbols: &[usize], title: &str) -> Rect {
     let glyphs: Vec<usize> = doc
         .items()
         .iter()
@@ -119,10 +130,13 @@ pub fn create_block(
             _ => None,
         })
         .collect();
-    let Some(inner) = block_frame(doc, &symbols, &glyphs) else {
-        return Err(BlockError::Doc("the parts draw nothing".into()));
-    };
-    let title = title.unwrap_or(name);
+    let inner = block_frame(doc, symbols, &glyphs).unwrap_or_else(|| {
+        let at = match &doc.items()[symbols[0]] {
+            Item::Symbol(s) => s.at.point(),
+            _ => Point2::new(0.0, 0.0),
+        };
+        Rect::new(at.x - 5.08, at.y - 5.08, at.x + 5.08, at.y + 5.08)
+    });
     let slack = ((title.chars().count() as f64 * TITLE_EM + 2.54 - inner.width()) / 2.0).max(0.0);
     let frame = Rect::new(
         GRID_50_MIL.snap(inner.min_x - slack),
@@ -130,17 +144,69 @@ pub fn create_block(
         GRID_50_MIL.snap(inner.max_x + slack),
         GRID_50_MIL.snap(inner.max_y + CAPTION_BAND),
     );
-    drop_outline_of(doc, &symbols, name);
     doc.add_rectangle(
         Point2::new(frame.min_x, frame.min_y),
         Point2::new(frame.max_x, frame.max_y),
     );
     write_caption(doc, frame, title);
-    Ok(BlockReport {
-        name: name.to_string(),
-        parts: members.into_iter().collect(),
-        frame,
-    })
+    frame
+}
+
+/// Redraw the outline of every outlined block among `refs` around where its parts
+/// now are: the outline follows the parts a re-typeset moved, instead of standing
+/// empty where they were. Returns the blocks redrawn.
+pub fn refit_outlines(doc: &mut SchDoc, refs: &[String]) -> Vec<String> {
+    let names: BTreeSet<String> = doc
+        .items()
+        .iter()
+        .filter_map(|item| match item {
+            Item::Symbol(s) if refs.iter().any(|r| r == s.refdes()) => s
+                .fields
+                .get(sch_model::result::AP_BLOCK)
+                .map(|f| f.value.clone())
+                .filter(|name| !sch_model::result::synthesized_block(name)),
+            _ => None,
+        })
+        .collect();
+    let mut redrawn = Vec::new();
+    for name in names {
+        let Some(caption) = doc.items().iter().find_map(|item| match item {
+            Item::Text(t) if t.text == name && t.size() >= TITLE_SIZE - 0.01 => Some(t.at.point()),
+            _ => None,
+        }) else {
+            continue;
+        };
+        let stale: Vec<String> = doc
+            .items()
+            .iter()
+            .filter_map(|item| match item {
+                Item::Rectangle(r) if Rect::from_points(r.start, r.end).contains(caption) => Some(r.uuid.clone()),
+                Item::Text(t) if t.text == name && t.size() >= TITLE_SIZE - 0.01 => Some(t.uuid.clone()),
+                _ => None,
+            })
+            .collect();
+        doc.remove_drawing(&stale);
+        let symbols: Vec<usize> = doc
+            .items()
+            .iter()
+            .enumerate()
+            .filter_map(|(i, item)| match item {
+                Item::Symbol(s)
+                    if !s.refdes().starts_with('#')
+                        && s.fields.get(sch_model::result::AP_BLOCK).is_some_and(|f| f.value == name) =>
+                {
+                    Some(i)
+                }
+                _ => None,
+            })
+            .collect();
+        if symbols.is_empty() {
+            continue;
+        }
+        outline(doc, &symbols, &name);
+        redrawn.push(name);
+    }
+    redrawn
 }
 
 /// A drawn wire from a member's pin must end on a member's pin: a wire that reaches

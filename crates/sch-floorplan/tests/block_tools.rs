@@ -96,3 +96,35 @@ fn a_set_a_wire_leaves_is_no_block() {
     let err = blocks::create_block(&mut doc, "HALF", &["R2".to_string(), "R3".to_string()], None).unwrap_err();
     assert!(matches!(err, blocks::BlockError::WiredAcross { .. }), "{err}");
 }
+
+/// A re-typeset of a block's parts moves them; the outline and title follow, so the
+/// block is never an empty box beside its own parts.
+#[test]
+fn an_arrange_of_a_blocks_parts_takes_the_outline_along() {
+    let Some(env) = KicadInstallation::detect() else {
+        eprintln!("SKIP: no KiCad environment detected");
+        return;
+    };
+    let mut doc = sheet(&env);
+    let refs = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    blocks::create_block(&mut doc, "TIMER", &refs(&["U2", "R2", "R3", "C3"]), Some("TIMER")).unwrap();
+    let tree: sch_model::tree::Tree = serde_json::from_value(serde_json::json!(
+        {"col": [{"part": "U2"}, {"row": [{"part": "R2"}, {"part": "R3"}, {"part": "C3"}]}]}
+    ))
+    .unwrap();
+    let report = live::arrange(&env, &mut doc, &live::Selection::Refs(refs(&["U2", "R2", "R3", "C3"])), None, Some(tree)).unwrap();
+    assert!(report.committed, "{:?}", report.warnings);
+
+    let frames = rects(&doc);
+    let timer: Vec<&geom::Rect> = frames.iter().filter(|f| f.contains(at(&doc, "U2"))).collect();
+    assert_eq!(timer.len(), 1, "exactly one outline holds U2: {frames:?}");
+    for part in ["R2", "R3", "C3"] {
+        assert!(timer[0].contains(at(&doc, part)), "{part} left its outline");
+    }
+    let captions = doc
+        .items()
+        .iter()
+        .filter(|item| matches!(item, sch_doc::Item::Text(t) if t.text == "TIMER"))
+        .count();
+    assert_eq!(captions, 1);
+}

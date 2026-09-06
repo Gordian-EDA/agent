@@ -862,6 +862,10 @@ fn rearrange_inner(
         doc.restore(snapshot)?;
         return Err(Error::BodyOverlap(Overlaps(landed_on)));
     }
+    if laid_out {
+        let moved: Vec<String> = placed.iter().map(|it| it.refdes.clone()).collect();
+        crate::blocks::refit_outlines(doc, &moved);
+    }
     Ok(ArrangeReport {
         // The restore put every benched symbol back on the bench too.
         left_bench: match laid_out {
