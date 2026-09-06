@@ -438,6 +438,10 @@ impl FixPlanner {
         if let Some((fix, why)) = planned {
             finding.fix = Some(fix);
             finding.why = why;
+        } else if code == "pin-not-driven" {
+            finding.why = "The pin's net leaves this sheet under its own name; what drives it \
+                           is drawn elsewhere, and a marker here would cut the port."
+                .to_string();
         } else if is_connection_finding(&code, &message) {
             finding.why =
                 "No same-net or same-function endpoint proves the intended connection.".to_string();
@@ -732,7 +736,10 @@ impl FixPlanner {
             .iter()
             .filter(|other| other.net.as_deref() == Some(net))
             .count();
-        if sharing != 1 {
+        // A lone pin on a name the author wrote is a port: the net goes on to
+        // another sheet, and nothing on this one can or should drive it. Only a
+        // name a tool derived marks a pin that is truly left alone.
+        if sharing != 1 || !sch_doc::netname::is_derived(net) {
             return None;
         }
         Some((
@@ -750,14 +757,6 @@ impl FixPlanner {
         ))
     }
 
-    /// A label anchored where nothing conducts names nothing, so it is ink the
-    /// sheet can lose without losing a connection — that is the whole content of
-    /// KiCAD's `label_dangling`. One call takes every one of them, because they
-    /// all fail the same test and the netlist is the same afterwards either way.
-    ///
-    /// Re-drawing the wire the label was meant to sit on is the better repair
-    /// when the connection was intended, and the reason says so; but only the
-    /// author knows that, and no reading of the sheet can supply it.
     /// A part drawn twice goes: the finding names the copy, the original stays.
     fn duplicate_part(&self, finding: &Finding) -> Option<(ToolFix, String)> {
         let copy = finding.refs.first()?;
@@ -769,6 +768,15 @@ impl FixPlanner {
             format!("{copy} is a second copy of a part already on the sheet."),
         ))
     }
+
+    /// A label anchored where nothing conducts names nothing, so it is ink the
+    /// sheet can lose without losing a connection — that is the whole content of
+    /// KiCAD's `label_dangling`. One call takes every one of them, because they
+    /// all fail the same test and the netlist is the same afterwards either way.
+    ///
+    /// Re-drawing the wire the label was meant to sit on is the better repair
+    /// when the connection was intended, and the reason says so; but only the
+    /// author knows that, and no reading of the sheet can supply it.
 
     fn stray_label(&self) -> Option<(ToolFix, String)> {
         if self.stray_labels.is_empty() {
@@ -1986,6 +1994,24 @@ mod tests {
         assert!(!is_output_conflict(code, message));
         assert!(!is_assignable_footprint(code, message));
         assert!(!code.contains("polarity"));
+    }
+
+    #[test]
+    fn an_undriven_port_pin_gets_no_marker_but_a_derived_dead_end_does() {
+        let planner = planner(vec![
+            pin("U6.B2", "DQ0", "bidirectional", Some("DDR_DQ0_A"), 10.0),
+            pin("U6.B3", "DQ1", "bidirectional", Some("Net-(U6-DQ1)"), 20.0),
+        ]);
+        let port = finding("pin_not_driven", &["U6.B2"], &["DDR_DQ0_A"], "Input pin not driven");
+        assert!(planner.undriven_dead_end(&port).is_none());
+        let dead = finding("pin_not_driven", &["U6.B3"], &["Net-(U6-DQ1)"], "Input pin not driven");
+        assert_eq!(
+            planner.undriven_dead_end(&dead).unwrap().0,
+            ToolFix {
+                tool: "no_connect",
+                args: json!({"pin": "U6.B3"}),
+            }
+        );
     }
 
     #[test]
