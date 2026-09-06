@@ -47,13 +47,34 @@ pub fn reframe(doc: &mut SchDoc) -> Vec<String> {
         members.entry(block.value.clone()).or_default().push(i);
     }
     let mut done = Vec::new();
-    for (block, indices) in members {
+    let all: Vec<(String, Point2)> = members
+        .iter()
+        .flat_map(|(block, indices)| {
+            indices.iter().filter_map(|i| match &doc.items()[*i] {
+                Item::Symbol(s) => Some((block.clone(), s.at.point())),
+                _ => None,
+            })
+        })
+        .collect();
+    for (block, indices) in &members {
         if indices.len() < FRAMED_MIN_PARTS {
             continue;
         }
-        let Some(frame) = block_frame(doc, &indices) else { continue };
-        replace_frame(doc, &block, frame);
-        done.push(block);
+        let Some(frame) = block_frame(doc, indices) else { continue };
+        // A block whose parts were scattered by later calls has no outline worth
+        // drawing: the honest rectangle around them would swallow its neighbours.
+        let holds_foreign = all.iter().any(|(other, at)| {
+            other != block
+                && at.x >= frame.min_x
+                && at.x <= frame.max_x
+                && at.y >= frame.min_y
+                && at.y <= frame.max_y
+        });
+        if holds_foreign {
+            continue;
+        }
+        replace_frame(doc, block, frame);
+        done.push(block.clone());
     }
     done
 }
