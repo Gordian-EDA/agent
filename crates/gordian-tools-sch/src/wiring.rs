@@ -562,6 +562,17 @@ pub fn label_tool(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             },
         }));
     }
+    // A pin already on the net under that name is named: a second label on it — at
+    // the tip when the first sits on the stub — prints the name over itself.
+    if was.as_deref() == Some(net.as_str()) {
+        return Ok(with_resolved_net(
+            json!({
+                "changed": format!("{spec} is already on `{net}`; nothing to add"),
+                "net_delta": "connectivity unchanged",
+            }),
+            Some(&resolved_net),
+        ));
+    }
     // A net has one scope on the sheet: a plain label on a net the sheet names with
     // a pennant does not join it, it shadows it. The caller may still say which.
     let kind = asked
