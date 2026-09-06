@@ -33,6 +33,9 @@ const FURNITURE_REACH: f64 = 12.7;
 /// The caption's text size, and the width one of its characters takes.
 const TITLE_SIZE: f64 = 2.54;
 const TITLE_EM: f64 = 1.9;
+/// A note's text size and character width.
+const NOTE_SIZE: f64 = 1.27;
+const NOTE_EM: f64 = 1.0;
 
 /// Each block's caption as the sheet has it now, keyed by block name — read BEFORE a
 /// redraw that erases and re-seats a block, so a title the page-fit drops with an
@@ -118,11 +121,15 @@ pub fn reframe_titled(doc: &mut SchDoc, titles: &BTreeMap<String, String>) -> Ve
         })
         .collect();
     for (block, indices) in &members {
-        if indices.len() < FRAMED_MIN_PARTS {
-            continue;
-        }
         let glyphs = furniture.get(block).map(Vec::as_slice).unwrap_or(&[]);
         let Some(frame) = block_frame(doc, indices, glyphs) else { continue };
+        if indices.len() < FRAMED_MIN_PARTS {
+            // Too small for an outline, but its caption still has to sit clear of
+            // everything drawn since — the writer seated it against its own parts
+            // alone, and a later block's title can land on it.
+            reseat_bare_caption(doc, frame);
+            continue;
+        }
         // A block whose parts were scattered by later calls has no outline worth
         // drawing: the honest rectangle around them would swallow its neighbours.
         let holds_foreign = all.iter().any(|(other, at)| {
@@ -183,6 +190,29 @@ fn block_frame(doc: &SchDoc, indices: &[usize], glyphs: &[usize]) -> Option<Rect
         GRID_50_MIL.snap(padded.max_x),
         GRID_50_MIL.snap(padded.max_y),
     ))
+}
+
+/// Move a small block's bare caption to a clear corner of the parts it names.
+fn reseat_bare_caption(doc: &mut SchDoc, hull: Rect) {
+    let found = doc
+        .items()
+        .iter()
+        .filter_map(|item| match item {
+            Item::Text(t) => {
+                let at = t.at.point();
+                let g = gap(&hull, at);
+                (g <= CAPTION_REACH && t.text.chars().count() <= 48)
+                    .then_some((g, t.uuid.clone(), at, t.text.chars().count()))
+            }
+            _ => None,
+        })
+        .min_by(|a, b| a.0.total_cmp(&b.0));
+    let Some((_, uuid, at, chars)) = found else { return };
+    let target = caption_seat(doc, &uuid, hull, chars);
+    if target != at {
+        let moved: BTreeSet<String> = std::iter::once(uuid).collect();
+        doc.translate_items(&moved, target.x - at.x, target.y - at.y);
+    }
 }
 
 /// Drop the rectangles this block's parts sit in, draw `frame`, and seat the block's
@@ -299,15 +329,16 @@ fn caption_seat(doc: &SchDoc, own: &str, frame: Rect, chars: usize) -> Point2 {
         Point2::new(frame.min_x, frame.max_y + TITLE_SIZE + 1.27),
         Point2::new(frame.max_x - width, frame.max_y + TITLE_SIZE + 1.27),
     ];
+    // A text item's box is not in `item_bbox` — its anchor is — so the box is taken
+    // from its wording: a caption is one bold line, a note a few small ones.
     let ink: Vec<Rect> = doc
         .items()
         .iter()
-        .filter(|item| match item {
-            Item::Text(t) => t.uuid != own,
-            Item::Rectangle(_) => false,
-            _ => true,
+        .filter_map(|item| match item {
+            Item::Text(t) if t.uuid != own => Some(text_box(&t.text, t.at.point())),
+            Item::Text(_) | Item::Rectangle(_) => None,
+            _ => doc.item_bbox(item),
         })
-        .filter_map(|item| doc.item_bbox(item))
         .collect();
     corners
         .into_iter()
@@ -316,6 +347,19 @@ fn caption_seat(doc: &SchDoc, own: &str, frame: Rect, chars: usize) -> Point2 {
             !ink.iter().any(|b| b.intersection(&text).is_some())
         })
         .unwrap_or(corners[0])
+}
+
+/// The box a free-standing text takes, from its left-bottom anchor: a single line of
+/// title size, or the lines of a note at note size.
+fn text_box(text: &str, at: Point2) -> Rect {
+    let lines: Vec<&str> = text.lines().collect();
+    let (size, em) = match lines.len() {
+        1 => (TITLE_SIZE, TITLE_EM),
+        _ => (NOTE_SIZE, NOTE_EM),
+    };
+    let width = lines.iter().map(|l| l.chars().count()).max().unwrap_or(0) as f64 * em;
+    let height = lines.len().max(1) as f64 * size * 1.4;
+    Rect::new(at.x, at.y - height, at.x + width, at.y)
 }
 
 fn unwrapped(text: &str) -> String {
