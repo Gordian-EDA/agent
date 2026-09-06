@@ -103,6 +103,37 @@ impl<'a> RegionProblem<'a> {
 /// recover the block reads the same on a tight block and quite differently on a loose
 /// one, and neither is the rectangle the drawing ends up carrying — which is the only one
 /// a seat may be trusted to keep clear.
+/// For every movable part and every net it shares with a part already down, the pair
+/// of origins (movable, nearest fixed) — what a landing is priced against.
+fn net_pulls(all: &[Item], movable: usize, incidence: &Incidence) -> Vec<(Point2, Point2)> {
+    let mut out = Vec::new();
+    for (net, pins) in incidence {
+        // A rail is drawn as a glyph at each pin, never as a wire to follow: only a
+        // signal pulls.
+        if circuit_graph::netclass::is_power_net(net) {
+            continue;
+        }
+        let mine: Vec<usize> = pins.iter().map(|(i, _)| *i).filter(|i| *i < movable).collect();
+        let theirs: Vec<usize> = pins.iter().map(|(i, _)| *i).filter(|i| *i >= movable).collect();
+        if mine.is_empty() || theirs.is_empty() {
+            continue;
+        }
+        for i in mine {
+            let m = all[i].at;
+            let nearest = theirs
+                .iter()
+                .map(|j| all[*j].at)
+                .min_by(|a, b| {
+                    ((a.x - m.x).abs() + (a.y - m.y).abs())
+                        .total_cmp(&((b.x - m.x).abs() + (b.y - m.y).abs()))
+                })
+                .expect("theirs is not empty");
+            out.push((m, nearest));
+        }
+    }
+    out
+}
+
 /// The frame of the block already on the sheet that the movable parts belong to — when
 /// they all belong to one block, and it is drawn.
 fn home_frame(all: &[Item], movable: usize) -> Option<Rect> {
@@ -229,6 +260,7 @@ fn seat_beside(
     taken: &[Rect],
     drawn: &[Rect],
     home: Option<Rect>,
+    pulls: &[(Point2, Point2)],
 ) {
     let (Some(here), false) = (hull(frames), taken.is_empty()) else {
         return;
@@ -247,6 +279,18 @@ fn seat_beside(
     let cost = |r: &Rect| {
         let aspect = ((r.width() / r.height().max(1.0)) / SHEET_ASPECT).ln().abs();
         r.width() * r.height() * (1.0 + aspect)
+    };
+    // How far the group's parts would sit from the parts already down that they share
+    // nets with, for a landing at `at`: the wire a reader has to follow across the
+    // sheet. Counted in bands of a block gap, so it decides between landings that
+    // differ by a block's width and leaves the finer choice to the sheet's shape.
+    let pull = |at: &Point2| -> f64 {
+        let (dx, dy) = (at.x - here.min_x, at.y - here.min_y);
+        let total: f64 = pulls
+            .iter()
+            .map(|(m, f)| (m.x + dx - f.x).abs() + (m.y + dy - f.y).abs())
+            .sum();
+        (total / BLOCK_GAP).floor()
     };
     let fits = |at: &Point2, page: Option<[f64; 2]>| {
         page.is_none_or(|p| {
@@ -267,11 +311,18 @@ fn seat_beside(
         })
     };
     let best = |limit: f64, page: Option<[f64; 2]>, near_home: bool| {
-        landings(taken, size, limit, BLOCK_GAP)
+        let cands: Vec<Point2> = landings(taken, size, limit, BLOCK_GAP)
             .into_iter()
             .filter(|at| fits(at, page))
             .filter(|at| !near_home || beside_home(at))
-            .min_by(|a, b| cost(&sheet(a)).total_cmp(&cost(&sheet(b))))
+            .collect();
+        cands
+            .into_iter()
+            .min_by(|a, b| {
+                pull(a)
+                    .total_cmp(&pull(b))
+                    .then_with(|| cost(&sheet(a)).total_cmp(&cost(&sheet(b))))
+            })
     };
     let landed = (home.is_some())
         .then(|| {
@@ -431,7 +482,8 @@ pub fn arrange(problem: RegionProblem) -> RegionOutput {
     // is seated in the free sheet among the blocks already down.
     let ours = block_frames(&all, 0..movable);
     let home = home_frame(&all, movable);
-    seat_beside(&mut all[..movable], &ours, &taken, &drawn, home);
+    let pulls = net_pulls(&all, movable, &incidence);
+    seat_beside(&mut all[..movable], &ours, &taken, &drawn, home, &pulls);
 
     // With nothing to avoid, the typeset arrangement is authoritative — walking parts
     // apart here would only undo the alignment it just computed. A collision the
