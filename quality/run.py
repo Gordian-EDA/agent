@@ -362,6 +362,39 @@ def normalize_partition(groups):
     return sorted(group for group in kept if len(group) >= 2)
 
 
+def duplicate_parts(facts):
+    """Parts drawn twice: the same symbol and value on the same set of nets,
+    where at least one net is a signal. Two 100 nF caps between the rails are a
+    bank on purpose; two reset buttons on NRST/GND are one button drawn twice.
+    Named after the copies, so the count is the number of parts to remove."""
+    net_of = {}
+    for i, group in enumerate(facts.get("partition", [])):
+        for pin in group:
+            net_of[pin] = i
+    rails = {
+        i
+        for i, group in enumerate(facts.get("partition", []))
+        if any(pin.startswith("#PWR") for pin in group)
+    }
+    seen = {}
+    copies = []
+    for symbol in facts.get("symbols", []):
+        ref = symbol["ref"]
+        if ref.startswith("#") or symbol.get("dnp"):
+            continue
+        pins = sorted(
+            net_of[p] for p in net_of if p.rsplit(".", 1)[0] == ref
+        )
+        nets = tuple(sorted(set(pins)))
+        if len(nets) < 2 or all(n in rails for n in nets):
+            continue
+        key = (symbol["lib_id"], symbol.get("fields", {}).get("Value", ""), nets)
+        if key in seen and seen[key] != ref:
+            copies.append(ref)
+        seen.setdefault(key, ref)
+    return sorted(set(copies))
+
+
 def symbol_table(facts):
     table = {}
     for symbol in facts.get("symbols", []):
@@ -482,6 +515,7 @@ def schematic_facts(project, before_project, artifacts):
             "part_count": after["part_count"],
             "extractor_warnings": after["extractor_warnings"],
             "unconnected_pins": after["unconnected_pins"],
+            "duplicate_parts": duplicate_parts(after),
             # An empty partition matches an empty partition; that is agreement
             # about nothing, not evidence the extractor tracks KiCAD.
             "partition_matches_kicad": bool(kicad) and kicad == extracted,

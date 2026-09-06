@@ -304,6 +304,62 @@ pub fn lint(d: &Design, provider: &SymbolTable) -> Diagnostics {
             }
         }
     }
+    if !allow("duplicate-part") {
+        // Two parts of one kind and value on the same named nets are one part drawn
+        // twice — a reset button placed again with the MCU block, a boot strap the
+        // model re-added after a remove. A decoupler on rails alone is not: a bank
+        // of 100 nF between +3V3 and GND is a bank on purpose.
+        let mut same: indexmap::IndexMap<(String, String, Vec<String>), Vec<String>> =
+            indexmap::IndexMap::new();
+        for block in d.blocks.values() {
+            for (refdes, comp) in &block.components {
+                if refdes.starts_with('#') || comp.dnp {
+                    continue;
+                }
+                let mut nets: Vec<String> = comp
+                    .pins
+                    .values()
+                    .chain(comp.units.values().flatten().map(|(_, t)| t))
+                    .filter_map(|t| match t {
+                        PinTarget::Net(n) => Some(n.clone()),
+                        _ => None,
+                    })
+                    .collect();
+                nets.sort();
+                nets.dedup();
+                let signal = nets.iter().any(|n| {
+                    !d.nets.get(n).map(|a| a.power).unwrap_or(false) && !is_power_like_net_name(n)
+                });
+                if nets.len() < 2 || !signal {
+                    continue;
+                }
+                let value = comp.value.clone().unwrap_or_default();
+                same.entry((comp.part.clone(), value, nets))
+                    .or_default()
+                    .push(refdes.clone());
+            }
+        }
+        for ((part, value, nets), refs) in same {
+            if refs.len() < 2 {
+                continue;
+            }
+            let (first, copies) = (&refs[0], &refs[1..]);
+            for copy in copies {
+                diags.push(
+                    Diagnostic::error(
+                        "duplicate-part",
+                        format!(
+                            "{copy} duplicates {first}: the same {part} {value} on {} — one of them \
+                             was drawn twice; remove it",
+                            nets.join(", ")
+                        ),
+                    )
+                    .with_refs([copy.clone()])
+                    .with_nets(nets.clone()),
+                );
+            }
+        }
+    }
     if !allow("near-name") {
         // Compare against the dedup union of referenced and declared-only nets,
         // so a typo'd `nets:` entry one edit away from a wired net still warns.

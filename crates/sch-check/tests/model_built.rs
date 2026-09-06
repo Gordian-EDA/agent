@@ -383,3 +383,24 @@ fn erc_reads_both_spellings_identically() {
         assert_eq!(by_name, by_number, "case {i}");
     }
 }
+
+/// Two reset buttons on NRST/GND is one button drawn twice; a bank of decouplers
+/// between the rails is a bank on purpose.
+#[test]
+fn a_part_drawn_twice_on_the_same_signal_nets_is_a_duplicate() {
+    let mut sw1 = part("Switch:SW_Push", &[("1", "NRST"), ("2", "GND")]);
+    sw1.value = Some("RESET".into());
+    let sw2 = sw1.clone();
+    let c1 = part("Device:C", &[("1", "+3V3"), ("2", "GND")]);
+    let c2 = c1.clone();
+    let d = design(&[("SW1", sw1), ("SW2", sw2), ("C1", c1), ("C2", c2)]);
+    let diags = lint::lint(&d, &provider());
+    let dups: Vec<&String> = diags
+        .0
+        .iter()
+        .filter(|x| x.code == "duplicate-part")
+        .map(|x| &x.message)
+        .collect();
+    assert_eq!(dups.len(), 1, "{dups:?}");
+    assert!(dups[0].starts_with("SW2 duplicates SW1"), "{dups:?}");
+}

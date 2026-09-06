@@ -412,7 +412,9 @@ impl FixPlanner {
         let code = finding.code.to_ascii_lowercase().replace('_', "-");
         let message = finding.message.to_ascii_lowercase();
         let planned =
-            if code == "library-no-connect-wired" || message.contains("library no-connect pin") {
+            if code == "duplicate-part" {
+                self.duplicate_part(finding)
+            } else if code == "library-no-connect-wired" || message.contains("library no-connect pin") {
                 self.library_no_connect(finding)
             } else if is_power_finding(&code, &message) {
                 self.power(finding)
@@ -756,6 +758,18 @@ impl FixPlanner {
     /// Re-drawing the wire the label was meant to sit on is the better repair
     /// when the connection was intended, and the reason says so; but only the
     /// author knows that, and no reading of the sheet can supply it.
+    /// A part drawn twice goes: the finding names the copy, the original stays.
+    fn duplicate_part(&self, finding: &Finding) -> Option<(ToolFix, String)> {
+        let copy = finding.refs.first()?;
+        Some((
+            ToolFix {
+                tool: "remove_symbols",
+                args: json!({"refs": [copy]}),
+            },
+            format!("{copy} is a second copy of a part already on the sheet."),
+        ))
+    }
+
     fn stray_label(&self) -> Option<(ToolFix, String)> {
         if self.stray_labels.is_empty() {
             return None;
