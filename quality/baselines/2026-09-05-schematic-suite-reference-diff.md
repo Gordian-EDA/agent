@@ -263,3 +263,11 @@ re-seat leaves the packed sheet offset from the corner so oneshot-bluepill takes
 Also seen: `place_parts` reporting `gaps` with suggestions on every call drives the
 model to add one cap per call (five single-part calls on the Blue Pill) — which is
 exactly the pattern that loses frames.
+
+## Reframe merged (9de606f1): live results
+
+A block's frame is redrawn from the parts it has on the sheet after every place_parts
+and arrange, unless the outline would hold another block's parts. Live, one attempt:
+prompt-blue-pill **9.0** (look 8, 0 ERC, 33 requests; v14 7.0, v15 6.0 before the
+foreign-parts rule), rp2040 7.71 (v14 6.86, v15 5.43), stm32 7.00 (v15 8.29 — swing).
+Replay: text collisions 5 → 6, grid-demo/uart A4 → A5, oneshot-bluepill A3 → A2.
