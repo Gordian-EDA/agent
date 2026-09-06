@@ -448,6 +448,7 @@ fn place_parts_inner(
     // it, and only a pass over the drawn frames can give that back. It runs last, after
     // the seams are wired, because a seam decided on the packed sheet is a long wire
     // drawn where the two blocks used to be far apart.
+    crate::frames::reframe(doc);
     let reseated = crate::reseat::reseat(doc);
     if reseated.moved > 0 {
         tracing::info!(?reseated, "re-seated the sheet around the block just drawn");
@@ -866,6 +867,9 @@ fn rearrange_inner(
         doc.restore(snapshot)?;
         return Err(Error::BodyOverlap(Overlaps(landed_on)));
     }
+    if laid_out {
+        crate::frames::reframe(doc);
+    }
     Ok(ArrangeReport {
         // The restore put every benched symbol back on the bench too.
         left_bench: match laid_out {
@@ -1012,19 +1016,14 @@ fn stale_frames(doc: &SchDoc, chosen: &BTreeSet<String>) -> BTreeSet<String> {
         .iter()
         .filter(|item| match item {
             sch_doc::Item::Rectangle(r) => stale.contains(&Rect::from_points(r.start, r.end)),
-            // A caption sits just above its frame and a note just below it, so both are
-            // caught by an inflated test rather than by containment.
-            sch_doc::Item::Text(t) => stale
-                .iter()
-                .any(|f| f.inflate(FRAME_TEXT_REACH).contains(t.at.point())),
+            // A caption is the block's, not the frame's: the reframe that follows
+            // the redraw seats it on the new outline.
             _ => false,
         })
         .map(drawing_key)
         .collect()
 }
 
-/// How far outside its frame a block's caption or note is drawn.
-const FRAME_TEXT_REACH: f64 = 6.35;
 
 /// Quantise to 1 um, as the connectivity extractor does, so float dust never splits a
 /// join.

@@ -24,6 +24,7 @@
 
 pub mod bench;
 pub mod floorplan;
+pub mod frames;
 pub mod label;
 pub mod live;
 pub mod realize;

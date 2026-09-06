@@ -37,6 +37,11 @@ fn main() {
             facts.body_overlaps.len(),
             facts.wires_through_bodies.len()
         );
+        if std::env::var_os("VERBOSE").is_some() {
+            for c in &facts.text_collisions {
+                println!("    text: {c:?}");
+            }
+        }
         texts += facts.text_collisions.len();
         bodies += facts.body_overlaps.len();
         wires += facts.wires_through_bodies.len();

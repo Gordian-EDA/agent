@@ -429,6 +429,15 @@ pub fn reseat(doc: &mut SchDoc) -> Reseat {
             move_it
         })
         .count();
+    // Every piece moved, so the sheet as a whole is brought to the corner before the
+    // page is chosen: a drawing that starts a block's width from the margin takes a
+    // paper size it does not fill.
+    if let Some(bbox) = doc.content_bbox() {
+        doc.translate(
+            GRID_50_MIL.snap(geom::PAGE_MARGIN - bbox.min_x),
+            GRID_50_MIL.snap(geom::PAGE_MARGIN - bbox.min_y),
+        );
+    }
     doc.refit_page(&BTreeSet::new());
     let now = sheet_size(doc);
     let kept = now < was
