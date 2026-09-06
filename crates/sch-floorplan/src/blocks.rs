@@ -534,3 +534,27 @@ fn union(a: &Rect, b: &Rect) -> Rect {
         a.max_y.max(b.max_y),
     )
 }
+
+/// The parts standing outside every outline, once the sheet draws any: a part left
+/// out of the blocks is placed wherever the sheet had room, which is where the
+/// composition breaks. `None` while no block has been outlined yet.
+pub fn parts_outside_blocks(doc: &SchDoc) -> Option<Vec<String>> {
+    let outlines: Vec<Rect> = doc
+        .items()
+        .iter()
+        .filter_map(|item| match item {
+            Item::Rectangle(r) => Some(Rect::from_points(r.start, r.end)),
+            _ => None,
+        })
+        .collect();
+    if outlines.is_empty() {
+        return None;
+    }
+    Some(
+        doc.symbols()
+            .filter(|s| !s.refdes().starts_with('#'))
+            .filter(|s| !outlines.iter().any(|r| r.contains(s.at.point())))
+            .map(|s| s.refdes().to_string())
+            .collect(),
+    )
+}

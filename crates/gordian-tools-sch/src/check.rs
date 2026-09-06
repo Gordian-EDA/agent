@@ -1783,12 +1783,36 @@ fn inspect_schematic(path: &Path, ctx: &AgentRuntime) -> Result<Inspection> {
         });
     }
 
+    if let Some(outside) = sch_floorplan::blocks::parts_outside_blocks(&doc).filter(|o| !o.is_empty()) {
+        let message = format!(
+            "{} part(s) stand outside every block: {}",
+            outside.len(),
+            outside.join(", ")
+        );
+        let (refs, nets, at) = locator.locate(&message, outside.iter().cloned(), std::iter::empty::<String>());
+        findings.push(Finding {
+            severity: "warning".to_string(),
+            source: "composition",
+            code: "outside-block".to_string(),
+            message,
+            refs,
+            nets,
+            at,
+            fix: None,
+            why: "A part outside the blocks sits wherever the sheet had room. Put it in its \
+                  sub-circuit's block with create_and_update_block (the block's full part \
+                  list), then arrange_blocks again."
+                .to_string(),
+            advisory: true,
+        });
+    }
+
     if let Some(Ok(fidelity)) = &fidelity {
         findings.extend(fidelity_findings(&locator, fidelity));
     }
 
     let advisory_source =
-        |finding: &&Finding| matches!(finding.source, "completeness" | "netlist_fidelity");
+        |finding: &&Finding| matches!(finding.source, "completeness" | "netlist_fidelity" | "composition");
     let local_errors = findings
         .iter()
         .filter(|finding| !advisory_source(finding) && finding.severity == "error")

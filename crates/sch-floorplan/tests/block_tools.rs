@@ -128,3 +128,19 @@ fn an_arrange_of_a_blocks_parts_takes_the_outline_along() {
         .count();
     assert_eq!(captions, 1);
 }
+
+/// Once any block is outlined, the parts left outside every outline are named.
+#[test]
+fn parts_outside_every_block_are_named_once_a_block_exists() {
+    let Some(env) = KicadInstallation::detect() else {
+        eprintln!("SKIP: no KiCad environment detected");
+        return;
+    };
+    let mut doc = sheet(&env);
+    assert_eq!(blocks::parts_outside_blocks(&doc), None);
+    let refs = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    blocks::create_block(&mut doc, "POWER", &refs(&["U1", "C1", "C2"]), Some("Power")).unwrap();
+    let mut outside = blocks::parts_outside_blocks(&doc).unwrap();
+    outside.sort();
+    assert_eq!(outside, refs(&["C3", "D1", "R1", "R2", "R3", "U2"]));
+}
