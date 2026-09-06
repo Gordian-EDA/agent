@@ -296,6 +296,12 @@ pub(crate) fn place_parts(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         return Ok(value);
     }
     value["placement"] = placement;
+    if let Some(blocks) = outlined_blocks(ctx) {
+        value["next"] = json!(format!(
+            "the sheet already has {blocks} outlined block(s); put these parts in a block with \
+             create_and_update_block and call arrange_blocks again so they are tiled with the rest"
+        ));
+    }
     let refs = report.placed.join(" ");
     attach_connectivity(&mut value, ctx, report.placed, &format!("PLACED  {refs}"))?;
     let value = with_check(value, ctx).context("checking placed parts")?;
@@ -1534,4 +1540,15 @@ mod block_size_tests {
         );
         assert!(said[0].contains("remove_region"), "{said:?}");
     }
+}
+
+/// How many block outlines the sheet draws, when it draws any.
+fn outlined_blocks(ctx: &AgentRuntime) -> Option<usize> {
+    let doc = sch_doc::SchDoc::read(ctx.sch_path()).ok()?;
+    let count = doc
+        .items()
+        .iter()
+        .filter(|item| matches!(item, sch_doc::Item::Rectangle(_)))
+        .count();
+    (count > 0).then_some(count)
 }

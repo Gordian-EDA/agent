@@ -1359,3 +1359,23 @@ fn dropping_a_shadowed_label_changes_no_net() {
     agrees_with_kicad(&before);
     assert_eq!(nets(&before), partition);
 }
+
+/// A rail glyph touching nothing is litter when its net has members elsewhere;
+/// the sole mention of a rail stays, and a loose flag always goes.
+#[test]
+fn loose_rail_glyphs_are_found_when_their_net_lives_elsewhere() {
+    let doc = unverified(
+        &[RESISTOR, GROUND, FLAG],
+        &format!(
+            "{}\n{}\n{}\n{}\n{}",
+            place("Device:R", "R1", "1k", 0.0, 3.81, 0.0, "(unit 1)"),
+            place("power:GND", "#PWR01", "GND", 0.0, 0.0, 0.0, "(unit 1)"),
+            place("power:GND", "#PWR02", "GND", 50.0, 50.0, 0.0, "(unit 1)"),
+            place("power:GND", "#PWR03", "VSS", 80.0, 50.0, 0.0, "(unit 1)"),
+            place("power:PWR_FLAG", "#FLG01", "PWR_FLAG", 90.0, 90.0, 0.0, "(unit 1)"),
+        ),
+    );
+    let mut loose = sch_doc::loose_power_glyphs(&doc);
+    loose.sort();
+    assert_eq!(loose, ["#FLG01-uuid", "#PWR02-uuid"]);
+}

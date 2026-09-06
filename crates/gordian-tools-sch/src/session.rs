@@ -312,6 +312,11 @@ impl Edit {
         // the delta below is what proves it.
         let stray = sch_doc::stray_labels(&self.doc);
         self.doc.remove_drawing(&stray);
+        // A rail glyph with nothing under it is the engine's litter, not the
+        // author's design; it goes the same way, with the same proof.
+        for uuid in sch_doc::loose_power_glyphs(&self.doc) {
+            self.doc.remove_symbol(&uuid)?;
+        }
         let wire_faults = self.doc.wire_faults();
         if !wire_faults.is_empty() {
             self.doc.restore(self.rollback)?;

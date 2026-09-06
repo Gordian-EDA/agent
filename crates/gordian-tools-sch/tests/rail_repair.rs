@@ -1,12 +1,11 @@
-//! A rail glyph left touching nothing, and the loop it used to open.
+//! A rail glyph left touching nothing.
 //!
 //! KiCAD reports `pin_not_connected` on a `power:` symbol whose one pin has no
-//! wire under it. The repair the planner used to offer was `connect` to another
-//! glyph on the same rail — which joins nothing, because both ends already read
-//! that name — so the call reported success, the sheet came back byte-identical,
-//! and the same finding came back with it. These tests hold the loop shut from
-//! both ends: the fix a finding carries has to clear the finding, and `connect`
-//! has to stop calling a no-op a connection.
+//! wire under it. Every edit now sweeps such a glyph as it commits, as long as
+//! its net still has a member elsewhere, so the model never sees the finding for
+//! a rail the engine drew; the sole mention of a rail stays, and its finding
+//! carries the one repair that clears it. `connect` between two glyphs that
+//! already read the same name is refused, so a no-op cannot pass as a repair.
 //!
 //! Skips when no KiCAD is installed: every assertion is against real ERC.
 
@@ -39,8 +38,8 @@ fn call(ctx: &AgentRuntime, name: &str, input: Value) -> Value {
         .unwrap_or_else(|error| panic!("`{name}` failed: {error}"))
 }
 
-/// Two resistors on a GND rail, with the second rail glyph cut loose: its pin
-/// touches nothing, and it sits far enough away that no wire reads as local.
+/// Two resistors on a GND rail, with the second rail glyph cut loose by the
+/// last edit.
 fn orphan_rail_sheet(ctx: &AgentRuntime) {
     let added = call(
         ctx,
@@ -55,11 +54,31 @@ fn orphan_rail_sheet(ctx: &AgentRuntime) {
     call(ctx, "add_power", json!({"pin": "R1.1", "net": "GND"}));
     call(ctx, "add_power", json!({"pin": "R2.2", "net": "GND"}));
     call(ctx, "delete_wires", json!({"pins": ["R2.2"]}));
-    call(
+}
+
+/// Two resistors far apart, each on its own GND glyph, both wired.
+fn wired_rail_sheet(ctx: &AgentRuntime) {
+    let added = call(
         ctx,
-        "move_symbols",
-        json!({"moves": [{"ref": "#PWR2", "to": [60.0, 60.0]}]}),
+        "add_symbols",
+        json!({"parts": [
+            {"lib_id": "Device:R", "ref": "R1"},
+            {"lib_id": "Device:R", "ref": "R2"},
+        ]}),
     );
+    assert!(added.get("error").is_none(), "fixture failed: {added}");
+    call(ctx, "move_symbols", json!({"moves": [{"ref": "R2", "to": [150.0, 150.0]}]}));
+    call(ctx, "connect", json!({"from": "R1.2", "to": "R2.1"}));
+    call(ctx, "add_power", json!({"pin": "R1.1", "net": "GND"}));
+    call(ctx, "add_power", json!({"pin": "R2.2", "net": "GND"}));
+}
+
+/// Whether a symbol with this reference is on the sheet.
+fn on_sheet(ctx: &AgentRuntime, reference: &str) -> bool {
+    sch_doc::SchDoc::read(ctx.sch_path())
+        .unwrap()
+        .symbols()
+        .any(|symbol| symbol.refdes() == reference)
 }
 
 /// Every blocking finding KiCAD's ERC raises against the sheet as it stands.
@@ -94,57 +113,51 @@ fn apply(ctx: &AgentRuntime, finding: &Value) -> Value {
     result
 }
 
-/// The loop, closed: the finding names a repair, the repair runs, and the
-/// finding is gone. Nothing else the sheet was holding up comes loose.
+/// The edit that cuts a rail loose takes the glyph with it: nothing is left for
+/// ERC to report, and the model never sees a repair it did not ask for.
 #[test]
-fn an_orphan_rails_fix_clears_the_finding_it_came_with() {
+fn a_rail_cut_loose_is_swept_by_the_edit_that_cut_it() {
     let Some(ctx) = sheet() else {
         eprintln!("SKIP: no KiCad detected");
         return;
     };
     orphan_rail_sheet(&ctx);
-    let before = erc_errors(&ctx);
-    let finding = find(&before, "pin_not_connected", "#PWR2.1")
-        .unwrap_or_else(|| panic!("fixture must leave the rail bare: {before:#?}"));
 
-    let applied = apply(&ctx, finding);
-
-    assert_eq!(
-        applied["changed"]["now_loose"],
-        json!([]),
-        "removing a pin that touches nothing loosened another pin: {applied}"
-    );
-    let after = erc_errors(&ctx);
-    assert!(
-        find(&after, "pin_not_connected", "#PWR2.1").is_none(),
-        "the finding survived its own fix: {after:#?}"
-    );
+    assert!(!on_sheet(&ctx, "#PWR2"), "the loose rail glyph survived the cut");
+    assert!(on_sheet(&ctx, "#PWR1"), "the rail that feeds R1.1 was taken");
+    let bare: Vec<Value> = erc_errors(&ctx)
+        .into_iter()
+        .filter(|finding| finding["code"] == "pin_not_connected")
+        .filter(|finding| finding["refs"].to_string().contains("#PWR"))
+        .collect();
+    assert!(bare.is_empty(), "a rail glyph still reads as bare: {bare:#?}");
 }
 
-/// The repair on offer has to be one that works wherever the glyph happens to
-/// sit. Wiring it to another glyph on the rail only clears the rule when the two
-/// are close enough to draw between, so it is never the answer.
+/// The only glyph naming a rail is the author's, however bare: it stays, its
+/// finding names the one repair that clears it, and that repair clears it.
 #[test]
-fn the_offered_repair_is_not_a_wire_to_another_glyph_on_the_rail() {
+fn the_sole_mention_of_a_rail_stays_and_its_finding_clears_in_one_call() {
     let Some(ctx) = sheet() else {
         eprintln!("SKIP: no KiCad detected");
         return;
     };
-    orphan_rail_sheet(&ctx);
-    let findings = erc_errors(&ctx);
+    call(&ctx, "add_symbols", json!({"parts": [{"lib_id": "Device:R", "ref": "R1"}]}));
+    call(&ctx, "add_power", json!({"pin": "R1.1", "net": "GND"}));
+    call(&ctx, "delete_wires", json!({"pins": ["R1.1"]}));
+    assert!(on_sheet(&ctx, "#PWR1"), "the sole GND glyph was swept");
 
-    let finding = find(&findings, "pin_not_connected", "#PWR2.1").expect("the rail reads as bare");
-
+    let before = erc_errors(&ctx);
+    let finding = find(&before, "pin_not_connected", "#PWR1.1")
+        .unwrap_or_else(|| panic!("the bare rail is reported: {before:#?}"));
     assert_eq!(
         finding["fix"],
-        json!({"tool": "remove_symbols", "args": {"refs": ["#PWR2"]}}),
-        "{finding:#?}"
+        json!({"tool": "remove_symbols", "args": {"refs": ["#PWR1"]}}),
+        "{finding}"
     );
+    apply(&ctx, finding);
     assert!(
-        finding["why"]
-            .as_str()
-            .is_some_and(|why| why.contains("add_power")),
-        "the reason must name the constructive alternative: {finding:#?}"
+        find(&erc_errors(&ctx), "pin_not_connected", "#PWR1.1").is_none(),
+        "the finding survived its own fix"
     );
 }
 
@@ -157,7 +170,7 @@ fn connect_refuses_a_name_both_ends_already_read() {
         eprintln!("SKIP: no KiCad detected");
         return;
     };
-    orphan_rail_sheet(&ctx);
+    wired_rail_sheet(&ctx);
     let before = std::fs::read_to_string(ctx.sch_path()).unwrap();
 
     let result = call(&ctx, "connect", json!({"from": "#PWR2.1", "to": "#PWR1.1"}));
@@ -248,12 +261,11 @@ fn a_rail_that_reaches_a_pin_is_never_offered_for_removal() {
     );
 }
 
-/// The blue-pill shape: several rail glyphs cut loose at once. The thrash guard
-/// budgets rail removals by the CALL and stops at three, so a repair offered one
-/// glyph at a time would be refused as a purge halfway through clearing itself.
-/// One call names them all.
+/// The blue-pill shape: several rail glyphs cut loose one after another. Each
+/// cut glyph goes as soon as the rail has another member, so at most the last
+/// one — the sole mention — is ever reported, and its one repair clears it.
 #[test]
-fn every_bare_rail_is_cleared_by_one_call() {
+fn rails_cut_loose_one_after_another_never_pile_up() {
     let Some(ctx) = sheet() else {
         eprintln!("SKIP: no KiCad detected");
         return;
@@ -282,61 +294,14 @@ fn every_bare_rail_is_cleared_by_one_call() {
         .filter(|finding| finding["code"] == "pin_not_connected")
         .filter(|finding| finding["fix"]["tool"] == "remove_symbols")
         .collect();
-    assert!(
-        bare.len() >= 4,
-        "fixture must leave several rails bare: {bare:#?}"
-    );
-
-    let applied = apply(&ctx, &bare[0]);
-
-    assert_eq!(
-        applied["changed"]["removed"]["power"].as_u64().unwrap_or(0) as usize,
-        bare.len(),
-        "one call must take every bare rail: {applied}"
-    );
-    let after = erc_errors(&ctx);
-    assert!(
-        after
-            .iter()
-            .all(|finding| finding["code"] != "pin_not_connected"
-                || finding["fix"]["tool"] != "remove_symbols"),
-        "bare rails survived the one call that named them all: {after:#?}"
-    );
-}
-
-/// The v4 blue-pill ladder, rung by rung. The run that exposed this defect went
-/// check -> connect -> check -> connect -> check -> no_connect -> delete_wires ->
-/// remove_symbols, every rung answering an unchanged finding, and the purge at
-/// the end took the rails a working sheet was using. Replayed here, the ladder
-/// has no second rung: the first repair the finding names clears it.
-#[test]
-fn the_escalation_ladder_has_nothing_left_to_climb() {
-    let Some(ctx) = sheet() else {
-        eprintln!("SKIP: no KiCad detected");
-        return;
-    };
-    orphan_rail_sheet(&ctx);
-
-    // Rung 1, as the run made it: read the finding and do what it says.
-    let finding = erc_errors(&ctx)
-        .into_iter()
-        .find(|finding| finding["code"] == "pin_not_connected")
-        .expect("the bare rail is reported");
-    apply(&ctx, &finding);
+    assert!(bare.len() <= 1, "cut rails piled up: {bare:#?}");
+    if let Some(finding) = bare.first() {
+        apply(&ctx, finding);
+    }
     assert!(
         erc_errors(&ctx)
             .iter()
-            .all(|left| left["code"] != "pin_not_connected"),
-        "the finding survived rung 1, which is where the ladder used to start"
-    );
-
-    // Rung 2, the move the run repeated: it is now refused outright, so even a
-    // caller that ignores the finding cannot mistake a no-op for progress.
-    std::fs::write(ctx.sch_path(), EMPTY_SHEET).unwrap();
-    orphan_rail_sheet(&ctx);
-    let repeated = call(&ctx, "connect", json!({"from": "#PWR2.1", "to": "#PWR1.1"}));
-    assert!(
-        repeated.get("error").is_some(),
-        "wiring one rail glyph to another still reports success: {repeated}"
+            .all(|finding| finding["code"] != "pin_not_connected" || !finding["refs"].to_string().contains("#PWR")),
+        "a bare rail survived"
     );
 }

@@ -32,6 +32,57 @@ pub fn stray_labels(doc: &SchDoc) -> Vec<String> {
     if draws_a_bus(doc) {
         return Vec::new();
     }
+    let (segments, touched) = conductors(doc, |_| true);
+    doc.labels()
+        .filter(|label| {
+            let at = label.at.point();
+            !touched.contains(&key(at)) && !segments.iter().any(|seg| seg.contains_point(at))
+        })
+        .map(|label| label.uuid.clone())
+        .collect()
+}
+
+/// The power glyphs — `#PWR` rails and `#FLG` flags — whose pin touches no
+/// conductor: no wire, no pin of another symbol, no label, no junction.
+///
+/// A rail glyph is the engine's own furniture. One left with nothing under it
+/// names a node that does not exist, and KiCAD reports the pin as unconnected;
+/// the model then spends its turn removing rails one by one. A `#PWR` glyph is
+/// only taken when its net still has a member elsewhere, so the sole mention of
+/// a rail on the sheet stays for the author to wire.
+///
+/// A sheet that draws a bus keeps its glyphs, as [`stray_labels`] keeps its labels.
+pub fn loose_power_glyphs(doc: &SchDoc) -> Vec<String> {
+    if draws_a_bus(doc) {
+        return Vec::new();
+    }
+    let glyph = |inst: &crate::SymbolInst| inst.refdes().starts_with('#');
+    let (segments, mut touched) = conductors(doc, |pin| !pin.refdes.starts_with('#'));
+    touched.extend(doc.labels().map(|label| key(label.at.point())));
+    let pins = crate::placed_pins(doc);
+    let netlist = crate::connect::extract(doc);
+    let has_other_member = |name: &str| {
+        netlist
+            .nets
+            .iter()
+            .any(|net| net.name == name && net.pins.iter().any(|pin| !pin.refdes.starts_with('#')))
+    };
+    doc.symbols()
+        .filter(|inst| glyph(inst))
+        .filter(|inst| {
+            pins.iter().filter(|pin| pin.owner == inst.uuid).all(|pin| {
+                !touched.contains(&key(pin.at)) && !segments.iter().any(|seg| seg.contains_point(pin.at))
+            })
+        })
+        .filter(|inst| inst.refdes().starts_with("#FLG") || has_other_member(inst.value()))
+        .map(|inst| inst.uuid.clone())
+        .collect()
+}
+
+/// The wire segments of the sheet, and every point something conducts at:
+/// wire ends, junctions, no-connect markers, sheet pins, and the tips of the
+/// placed pins `keep` accepts.
+fn conductors(doc: &SchDoc, keep: impl Fn(&crate::PlacedPin) -> bool) -> (Vec<Segment>, BTreeSet<(i64, i64)>) {
     let mut segments: Vec<Segment> = Vec::new();
     let mut touched: BTreeSet<(i64, i64)> = BTreeSet::new();
     for item in doc.items() {
@@ -55,12 +106,6 @@ pub fn stray_labels(doc: &SchDoc) -> Vec<String> {
             _ => {}
         }
     }
-    touched.extend(crate::placed_pins(doc).iter().map(|pin| key(pin.at)));
-    doc.labels()
-        .filter(|label| {
-            let at = label.at.point();
-            !touched.contains(&key(at)) && !segments.iter().any(|seg| seg.contains_point(at))
-        })
-        .map(|label| label.uuid.clone())
-        .collect()
+    touched.extend(crate::placed_pins(doc).iter().filter(|pin| keep(pin)).map(|pin| key(pin.at)));
+    (segments, touched)
 }

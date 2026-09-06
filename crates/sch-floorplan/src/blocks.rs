@@ -21,7 +21,7 @@ use crate::reseat::{Piece, pieces, wired};
 
 /// The title's text size and the width one of its characters takes.
 const TITLE_SIZE: f64 = 3.81;
-const TITLE_EM: f64 = 2.8;
+const TITLE_EM: f64 = 3.4;
 /// The band under the contents that the title is written in.
 const CAPTION_BAND: f64 = TITLE_SIZE * 1.6;
 

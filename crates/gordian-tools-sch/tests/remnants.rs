@@ -39,8 +39,10 @@ fn add(ctx: &AgentRuntime, parts: Value) {
     assert!(result.get("error").is_none(), "fixture failed: {result}");
 }
 
+/// A loose flag never lands — the commit sweeps it — while the sole glyph of a
+/// rail stays until it is removed by reference.
 #[test]
-fn power_symbols_are_removable_by_reference_and_uuid() {
+fn power_symbols_are_removable_by_reference_and_a_loose_flag_is_swept() {
     let Some(ctx) = sheet() else {
         eprintln!("SKIP: KiCad 10 is not installed");
         return;
@@ -52,13 +54,12 @@ fn power_symbols_are_removable_by_reference_and_uuid() {
             {"lib_id": "power:PWR_FLAG", "ref": "#FLG02"},
         ]),
     );
+    let doc = SchDoc::read(ctx.sch_path()).unwrap();
+    assert!(doc.symbol_by_ref("#FLG02").is_none(), "a flag touching nothing landed");
+    assert!(doc.symbol_by_ref("#PWR01").is_some(), "the sole GND glyph was swept");
 
     let by_ref = call(&ctx, "remove_symbols", json!({"refs": ["#PWR01"]}));
     assert_eq!(by_ref["changed"]["removed"]["power"], 1, "{by_ref}");
-    let doc = SchDoc::read(ctx.sch_path()).unwrap();
-    let uuid = doc.symbol_by_ref("#FLG02").unwrap().uuid.clone();
-    let by_uuid = call(&ctx, "remove_symbols", json!({"refs": [uuid]}));
-    assert_eq!(by_uuid["changed"]["removed"]["power"], 1, "{by_uuid}");
     assert_eq!(SchDoc::read(ctx.sch_path()).unwrap().symbols().count(), 0);
 }
 
