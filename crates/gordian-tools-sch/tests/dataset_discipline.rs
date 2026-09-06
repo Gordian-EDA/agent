@@ -40,8 +40,15 @@ fn strict_mode_silences_every_completeness_gap() {
     };
     let permissive = place(&ctx, false);
     assert!(
-        !gaps(&permissive).is_empty(),
-        "fixture must produce gaps to suppress: {permissive}"
+        gaps(&permissive).is_empty(),
+        "placement must not echo missing-support gaps: {permissive}"
+    );
+    let checked = gordian_tools_sch::run("check_schematic", json!({}), &ctx)
+        .expect("registered tool")
+        .expect("check_schematic result");
+    assert!(
+        checked.pointer("/completeness/gaps").and_then(Value::as_array).is_some_and(|gaps| !gaps.is_empty()),
+        "fixture must produce gaps to suppress: {checked}"
     );
 
     let Some(strict) = AgentRuntime::detect_for_test() else {

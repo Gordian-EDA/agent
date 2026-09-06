@@ -1444,12 +1444,15 @@ fn selection(input: &SelectionInput) -> Result<Selection> {
     }
 }
 
+/// The sheet's findings after the call. Missing-support gaps are left to
+/// `check_schematic`: echoed on every placement they drove one-cap-per-call
+/// churn, each cap then boxed alone.
 fn with_check(mut value: Value, ctx: &AgentRuntime) -> Result<Value> {
-    let check = crate::check::check_schematic(json!({}), ctx)?;
-    value["gaps"] = check
-        .pointer("/completeness/gaps")
-        .cloned()
-        .unwrap_or_else(|| json!([]));
+    let mut check = crate::check::check_schematic(json!({}), ctx)?;
+    if let Some(completeness) = check.get_mut("completeness").and_then(Value::as_object_mut) {
+        completeness.remove("gaps");
+    }
+    value["gaps"] = json!([]);
     value["check_schematic"] = check;
     Ok(value)
 }
