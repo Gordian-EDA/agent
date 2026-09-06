@@ -214,3 +214,23 @@ Passing all checks: current-sense, ecg, ibm, rp2040, hbridge (5 of 14).
 - Low and consistent: three-phase 5.29 (4 ERC), light-accessory 5.86 (77 requests),
   sallen-key 5.71, ddr 6.0 — the next side-by-side targets.
 - This binary predates the port-label rule (86b8aeea) and the wire-more merge.
+
+## Evening: what the render showed, and what changed (main 6e280724)
+
+Side-by-side of our deterministic Blue Pill replay against `~/sch-agent`'s render named
+the visible gap: every decoupling cap carried its own glyph pair (68 power symbols vs
+27), because `emit_rail` gave up any trunk wider than 50 mm. Landed, all replay 0/0/0,
+netlist oracle green, reviewer KEEP:
+- bank rails (4f46c3b3): a net's pins split into one-row banks; each bank one rail, one
+  glyph, judged by the air between risers. Blue Pill 68 → 32 glyphs; mcp1703 10 → 5.
+- one glyph per point (f17a5d98): 81 coincident glyph pairs across the corpus → 0.
+- numbered nets join across calls (b8d6c066): `N$n` straddling two `place_parts` calls
+  was silently dropped; 8 of 14 cases are dataset netlists named this way.
+- merged: serve-pin (support parts beside the pin they serve, shunts 41 → 54 % wired),
+  reseat (whole-sheet re-pack after place_parts; esp32 fill 71 → 87 %).
+- REVERTED (6e280724): re-seat after `arrange` — the live Blue Pill came out torn across
+  an A1 page (8 place_parts, 5 remove_symbols; pieces moved apart from their frames).
+
+Live agent runs on the merged engine (one attempt): dataset-stm32 7.86 PASS (0 ERC, 55
+requests, A3, framed); prompt-blue-pill 6.57 (101 requests, A2, blocks in the corners —
+the model's arrange/remove churn is what the engine cannot pack).
