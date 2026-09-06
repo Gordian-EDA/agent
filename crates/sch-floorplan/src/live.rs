@@ -453,6 +453,10 @@ fn place_parts_inner(
     if reseated.moved > 0 {
         tracing::info!(?reseated, "re-seated the sheet around the block just drawn");
     }
+    let aligned = crate::reseat::align(doc);
+    if aligned > 0 {
+        tracing::info!(aligned, "lined the blocks up");
+    }
 
     let mut mismatch = live_phase("verify", placed.len(), inc.len(), || {
         verify(doc, &design)
@@ -870,6 +874,7 @@ fn rearrange_inner(
     }
     if laid_out {
         crate::frames::reframe_titled(doc, &titles);
+        crate::reseat::align(doc);
     }
     Ok(ArrangeReport {
         // The restore put every benched symbol back on the bench too.

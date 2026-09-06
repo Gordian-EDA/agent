@@ -186,10 +186,26 @@ fn report(
         .iter()
         .filter(|item| matches!(item, sch_doc::Item::Text(_)))
         .count();
+    // Blocks meant as one row or column whose edges do not meet: pairs of pieces whose
+    // tops (or lefts) differ by more than a grid step and less than a band.
+    let framed: Vec<&geom::Rect> = pieces
+        .iter()
+        .filter(|p| !p.blocks.is_empty())
+        .map(|p| &p.frame)
+        .collect();
+    let off = |a: f64, b: f64| (a - b).abs() > 1.27 + 0.01 && (a - b).abs() <= 15.24;
+    let mut misaligned = 0;
+    for (i, a) in framed.iter().enumerate() {
+        for b in framed.iter().skip(i + 1) {
+            if off(a.min_y, b.min_y) || off(a.min_x, b.min_x) {
+                misaligned += 1;
+            }
+        }
+    }
     print!(
         "{name}: blocks={blocks} symbols={symbols} page={page} hull={hull:.0} fill={fill:.0}% \
          pieces={} frames={rects} captions={captions} labels={labels} wires={wires} \
-         scattered={} shorted={} body_overlaps={}",
+         misaligned={misaligned} scattered={} shorted={} body_overlaps={}",
         pieces.len(),
         mismatch.scattered.len(),
         mismatch.shorted.len(),

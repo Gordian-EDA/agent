@@ -455,6 +455,122 @@ pub fn reseat(doc: &mut SchDoc) -> Reseat {
     }
 }
 
+/// How far apart two blocks' edges may sit and still be meant as one row or column.
+/// Within it the packer's landings and the typesetter's frames differ by air, not by
+/// intent; beyond it the blocks are on different rows.
+const ALIGN_BAND: f64 = 15.24;
+
+/// Line the blocks up: pieces whose top edges sit within [`ALIGN_BAND`] of each other
+/// take the same top, and pieces whose left edges do take the same left. Rigid moves,
+/// each by less than a band, kept only when no frame lands on another, the partition
+/// is unchanged and nothing new overlaps. Returns the pieces moved.
+///
+/// A seat lands a block beside its neighbours by corner, so two blocks meant as one
+/// row end a few lines apart wherever their frames differ; the eye reads that as
+/// arbitrary where a person would have drawn one line across the top of both.
+pub fn align(doc: &mut SchDoc) -> usize {
+    let Some(pieces) = pieces(doc) else {
+        return 0;
+    };
+    let blocks: Vec<&Piece> = pieces.iter().filter(|p| !p.blocks.is_empty()).collect();
+    if blocks.len() < 2 {
+        return 0;
+    }
+    // The edge the eye lines up is the drawn outline's, where there is one; a piece
+    // without a frame lines up by everything it draws.
+    let edges: Vec<Rect> = blocks
+        .iter()
+        .map(|p| {
+            doc.items()
+                .iter()
+                .find_map(|item| match item {
+                    Item::Rectangle(r) if p.uuids.contains(&r.uuid) => {
+                        Some(Rect::from_points(r.start, r.end))
+                    }
+                    _ => None,
+                })
+                .unwrap_or(p.frame)
+        })
+        .collect();
+    let mut delta: Vec<Point2> = vec![Point2::new(0.0, 0.0); blocks.len()];
+    for (axis, edge) in [(1usize, 0usize), (0usize, 1usize)] {
+        // Pieces sorted by the edge, walked into bands: a band closes where the next
+        // edge is more than a band from the band's first.
+        let mut order: Vec<usize> = (0..blocks.len()).collect();
+        let at = |i: usize| match axis {
+            1 => edges[i].min_y,
+            _ => edges[i].min_x,
+        };
+        order.sort_by(|a, b| at(*a).total_cmp(&at(*b)));
+        let mut band: Vec<usize> = Vec::new();
+        let close = |band: &mut Vec<usize>, delta: &mut Vec<Point2>| {
+            if band.len() >= 2 {
+                let target = at(band[0]);
+                for &i in band.iter() {
+                    let shift = GRID_50_MIL.snap(target - at(i));
+                    match axis {
+                        1 => delta[i].y = shift,
+                        _ => delta[i].x = shift,
+                    }
+                }
+            }
+            band.clear();
+        };
+        for i in order {
+            if band.first().is_some_and(|&f| at(i) - at(f) > ALIGN_BAND) {
+                close(&mut band, &mut delta);
+            }
+            band.push(i);
+        }
+        close(&mut band, &mut delta);
+        let _ = edge;
+    }
+    if delta.iter().all(|d| d.x == 0.0 && d.y == 0.0) {
+        return 0;
+    }
+    // Frames after the move may not touch: a block pulled up onto its neighbour is
+    // worse than one a few lines low.
+    let moved: Vec<Rect> = blocks
+        .iter()
+        .zip(&delta)
+        .map(|(p, d)| {
+            Rect::new(
+                p.frame.min_x + d.x,
+                p.frame.min_y + d.y,
+                p.frame.max_x + d.x,
+                p.frame.max_y + d.y,
+            )
+        })
+        .collect();
+    for (i, a) in moved.iter().enumerate() {
+        for b in moved.iter().skip(i + 1) {
+            if a.overlaps(b) {
+                return 0;
+            }
+        }
+    }
+    let partition = connect::extract(doc).partition();
+    let overlaps = crate::visual::body_overlaps(doc).len();
+    let over_labels = label_hits(doc);
+    let snapshot = doc.snapshot();
+    let mut count = 0;
+    for (p, d) in blocks.iter().zip(&delta) {
+        if d.x != 0.0 || d.y != 0.0 {
+            doc.translate_items(&p.uuids, d.x, d.y);
+            count += 1;
+        }
+    }
+    doc.refit_page(&BTreeSet::new());
+    let kept = connect::extract(doc).partition() == partition
+        && crate::visual::body_overlaps(doc).len() <= overlaps
+        && label_hits(doc) <= over_labels;
+    if !kept {
+        let _ = doc.restore(snapshot);
+        return 0;
+    }
+    count
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
