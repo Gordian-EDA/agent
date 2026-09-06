@@ -20,8 +20,6 @@ fn typed<T: serde::de::DeserializeOwned>(input: Value, tool: &str) -> Result<T> 
 struct CreateBlockInput {
     parts: Vec<String>,
     title: String,
-    #[serde(default)]
-    note: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -36,8 +34,7 @@ pub(crate) fn create_block_schema() -> Value {
         "properties": {
             "parts": { "type": "array", "items": { "type": "string" }, "minItems": 1,
                        "description": "Reference designators of every part in the block." },
-            "title": { "type": "string", "description": "The block's name, written inside its outline." },
-            "note": { "type": "string", "description": "One line a human would write under the title." }
+            "title": { "type": "string", "description": "The block's name, written inside its outline." }
         },
         "required": ["parts", "title"],
         "additionalProperties": false
@@ -67,7 +64,6 @@ pub fn create_and_update_block(input: Value, ctx: &AgentRuntime) -> Result<Value
         &input.title,
         &input.parts,
         Some(&input.title),
-        input.note.as_deref(),
     ) {
         Ok(report) => report,
         Err(error) => return Ok(json!({ "error": error.to_string() })),
@@ -93,6 +89,7 @@ pub fn arrange_blocks(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     edit.commit(
         json!({
             "moved": report.moved,
+            "set_aside": report.set_aside,
             "page": report.page,
         }),
         Allow::nothing(),

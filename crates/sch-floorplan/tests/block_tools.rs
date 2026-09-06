@@ -59,9 +59,9 @@ fn blocks_are_outlined_after_placement_and_tiled_as_a_grid() {
     };
     let mut doc = sheet(&env);
     let refs = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
-    blocks::create_block(&mut doc, "POWER", &refs(&["U1", "C1", "C2"]), Some("Power"), None).unwrap();
-    blocks::create_block(&mut doc, "LED", &refs(&["R1", "D1"]), Some("Status LED"), Some("1 mA")).unwrap();
-    blocks::create_block(&mut doc, "TIMER", &refs(&["U2", "R2", "R3", "C3"]), Some("Timer"), None).unwrap();
+    blocks::create_block(&mut doc, "POWER", &refs(&["U1", "C1", "C2"]), Some("Power")).unwrap();
+    blocks::create_block(&mut doc, "LED", &refs(&["R1", "D1"]), Some("Status LED")).unwrap();
+    blocks::create_block(&mut doc, "TIMER", &refs(&["U2", "R2", "R3", "C3"]), Some("Timer")).unwrap();
     assert_eq!(rects(&doc).len(), 3);
 
     let before = sch_doc::connect::extract(&doc).partition();
@@ -93,6 +93,6 @@ fn a_set_a_wire_leaves_is_no_block() {
     };
     let mut doc = sheet(&env);
     // R2 and R3 are wired to U2 (DIS, TRIG) inside the timer's drawing.
-    let err = blocks::create_block(&mut doc, "HALF", &["R2".to_string(), "R3".to_string()], None, None).unwrap_err();
+    let err = blocks::create_block(&mut doc, "HALF", &["R2".to_string(), "R3".to_string()], None).unwrap_err();
     assert!(matches!(err, blocks::BlockError::WiredAcross { .. }), "{err}");
 }

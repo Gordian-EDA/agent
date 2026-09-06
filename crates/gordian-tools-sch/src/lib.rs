@@ -111,12 +111,12 @@ pub fn tool_defs() -> Vec<Tool> {
         ),
         (
             "create_and_update_block",
-            "Make the listed placed parts one block: outline them and write the title inside the outline's bottom edge. The parts must stand alone — every drawn wire from one of them ends on another of them (blocks meet only through net labels) — and connect to each other. A title the sheet already has is redefined with these parts. Standalone parts outside every block are allowed.",
+            "Make the listed placed parts one block: outline them and write the title inside the outline's bottom edge. The parts must stand alone — every drawn wire from one of them ends on another of them (blocks meet only through net labels) — and connect to each other. A title the sheet already has is redefined with these parts. Power flags and rails named among the parts are ignored. Standalone parts outside every block are allowed.",
             blocks::create_block_schema(),
         ),
         (
             "arrange_blocks",
-            "Lay the blocks out as a grid: `rows` of block titles, top to bottom, each left to right. Every block moves rigidly, its outline is re-fitted to its cell with the contents centred, columns share a width and rows a height, and the page is sized to the grid. Call it once the blocks exist; call it again after a block changes.",
+            "Lay the blocks out as a grid: `rows` of block titles, top to bottom, each left to right. Every block moves rigidly, its outline is re-fitted to its cell with the contents centred, blocks in a row share a height, and whatever the rows leave out — parts of no block, blocks not named — goes in a row under the grid. Call it once the blocks exist; call it again after later edits.",
             blocks::arrange_blocks_schema(),
         ),
         (

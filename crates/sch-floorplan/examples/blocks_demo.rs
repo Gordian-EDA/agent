@@ -32,9 +32,9 @@ fn main() {
     let out = std::path::PathBuf::from(std::env::args().nth(1).unwrap());
     doc.write(&out.with_extension("placed.kicad_sch")).unwrap();
     let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
-    blocks::create_block(&mut doc, "POWER", &s(&["J1", "C1", "U1", "C2"]), Some("POWER ENTRY & 5V"), Some("12 V in, 5 V out, bulk caps both sides")).unwrap();
-    blocks::create_block(&mut doc, "TIMER", &s(&["U2", "C4", "R1", "R2", "C3"]), Some("NE555 ASTABLE"), None).unwrap();
-    blocks::create_block(&mut doc, "LEDS", &s(&["R3", "D1", "R4", "D2"]), Some("INDICATORS"), None).unwrap();
+    blocks::create_block(&mut doc, "POWER", &s(&["J1", "C1", "U1", "C2"]), Some("POWER ENTRY & 5V")).unwrap();
+    blocks::create_block(&mut doc, "TIMER", &s(&["U2", "C4", "R1", "R2", "C3"]), Some("NE555 ASTABLE")).unwrap();
+    blocks::create_block(&mut doc, "LEDS", &s(&["R3", "D1", "R4", "D2"]), Some("INDICATORS")).unwrap();
     let rows = vec![vec!["POWER".to_string(), "TIMER".to_string()], vec!["LEDS".to_string()]];
     let r = blocks::arrange_blocks(&mut doc, &rows).unwrap();
     eprintln!("arranged {:?} page {:?}", r.moved, r.page);
