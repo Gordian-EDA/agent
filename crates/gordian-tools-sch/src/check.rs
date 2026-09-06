@@ -435,13 +435,27 @@ impl FixPlanner {
             } else {
                 None
             };
+        // A lone pin on a name the AUTHOR wrote may be a port — the net goes on to
+        // another sheet, and what drives it is drawn there. The marker is offered,
+        // never demanded: only a name a tool derived says the pin is truly alone.
+        let named_port = code == "pin-not-driven"
+            && self
+                .affected_pin(finding)
+                .and_then(|pin| pin.net.as_deref())
+                .is_some_and(|net| !sch_doc::netname::is_derived(net));
+        if named_port {
+            finding.severity = "warning".to_string();
+            finding.advisory = true;
+        }
         if let Some((fix, why)) = planned {
             finding.fix = Some(fix);
-            finding.why = why;
-        } else if code == "pin-not-driven" {
-            finding.why = "The pin's net leaves this sheet under its own name; what drives it \
-                           is drawn elsewhere, and a marker here would cut the port."
-                .to_string();
+            finding.why = match named_port {
+                true => format!(
+                    "{why} If instead the net is a port to another sheet, leave it: what \
+                     drives it is drawn there."
+                ),
+                false => why,
+            };
         } else if is_connection_finding(&code, &message) {
             finding.why =
                 "No same-net or same-function endpoint proves the intended connection.".to_string();
@@ -736,10 +750,7 @@ impl FixPlanner {
             .iter()
             .filter(|other| other.net.as_deref() == Some(net))
             .count();
-        // A lone pin on a name the author wrote is a port: the net goes on to
-        // another sheet, and nothing on this one can or should drive it. Only a
-        // name a tool derived marks a pin that is truly left alone.
-        if sharing != 1 || !sch_doc::netname::is_derived(net) {
+        if sharing != 1 {
             return None;
         }
         Some((
@@ -1997,13 +2008,13 @@ mod tests {
     }
 
     #[test]
-    fn an_undriven_port_pin_gets_no_marker_but_a_derived_dead_end_does() {
+    fn an_undriven_lone_pin_is_offered_a_marker_whatever_its_name() {
         let planner = planner(vec![
             pin("U6.B2", "DQ0", "bidirectional", Some("DDR_DQ0_A"), 10.0),
             pin("U6.B3", "DQ1", "bidirectional", Some("Net-(U6-DQ1)"), 20.0),
         ]);
         let port = finding("pin_not_driven", &["U6.B2"], &["DDR_DQ0_A"], "Input pin not driven");
-        assert!(planner.undriven_dead_end(&port).is_none());
+        assert!(planner.undriven_dead_end(&port).is_some());
         let dead = finding("pin_not_driven", &["U6.B3"], &["Net-(U6-DQ1)"], "Input pin not driven");
         assert_eq!(
             planner.undriven_dead_end(&dead).unwrap().0,
