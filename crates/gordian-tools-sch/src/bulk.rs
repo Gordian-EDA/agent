@@ -46,7 +46,7 @@ enum ArrangeLayout {
 
 impl ArrangeLayout {
     fn tree(self) -> Option<sch_model::tree::Tree> {
-        use sch_model::tree::{Align, Axis, Container, Tree};
+        use sch_model::tree::{Align, Axis, Container, Tree, Margin};
         match self {
             ArrangeLayout::Tree(tree) => Some(*tree),
             ArrangeLayout::Blocks(blocks) => {
@@ -60,6 +60,7 @@ impl ArrangeLayout {
                         gap: None,
                         align: Align::Center,
                         wrap: None,
+                        margin: Margin::default(),
                     })),
                 }
             }

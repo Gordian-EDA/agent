@@ -1074,7 +1074,16 @@ pub fn layout_tree_schema() -> Value {
                     "row": {"type": "array", "items": {"$ref": "#/$defs/node"}, "minItems": 1},
                     "col": {"type": "array", "items": {"$ref": "#/$defs/node"}, "minItems": 1},
                     "gap": {"type": "number", "description": "Grid units between children (1 unit = 1.27 mm, an 0603 resistor is 6 units). Default 8."},
-                    "align": {"type": "string", "enum": ["center", "start", "end"]}
+                    "align": {"type": "string", "enum": ["center", "start", "end"]},
+                    "margin": {
+                        "description": "White space kept around this node, in grid units: one number for all sides, or {left, top, right, bottom} (a side left out is 0). Use it to hold a part or a sub-tree away from what the tree puts beside it.",
+                        "oneOf": [
+                            {"type": "number", "minimum": 0},
+                            {"type": "object", "additionalProperties": false, "properties": {
+                                "left": {"type": "number", "minimum": 0}, "top": {"type": "number", "minimum": 0},
+                                "right": {"type": "number", "minimum": 0}, "bottom": {"type": "number", "minimum": 0}}}
+                        ]
+                    }
                 },
                 "additionalProperties": false
             }

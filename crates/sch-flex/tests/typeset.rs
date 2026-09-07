@@ -5,7 +5,7 @@
 use geom::Point2;
 use kicad_symbol::geometry::{PinGeom, SymbolGeometry};
 use sch_model::item::Item;
-use sch_model::tree::{Align, Axis, Container, Leaf, Tree, Trees};
+use sch_model::tree::{Align, Axis, Container, Leaf, Tree, Trees, Margin};
 
 /// A pin at `(x, y)` in symbol space (Y up) pointing outward along `angle`.
 fn pin(number: &str, name: &str, x: f64, y: f64, angle: f64) -> PinGeom {
@@ -106,6 +106,7 @@ fn stack(axis: Axis, children: Vec<Tree>) -> Tree {
         gap: None,
         align: Align::Center,
         wrap: None,
+        margin: Margin::default(),
     })
 }
 
@@ -339,6 +340,7 @@ fn wrapped_bands_stand_on_shared_column_lines() {
         align: Align::Center,
         // Four of these to a band, so the fold is two bands of four.
         wrap: Some(22.0),
+        margin: Margin::default(),
     });
     sch_flex::typeset(&mut items, &trees(tree), &[]);
     let x = |i: usize| items[i].at.x;
@@ -474,4 +476,36 @@ fn a_bare_row_still_seats_supports_beside_what_they_serve() {
         at("C1").dist(at("U1")) < at("R1").dist(at("U1")),
         "C1 is further from the pin it serves than a part that serves nothing"
     );
+}
+
+/// A margin is white space the author keeps around a node: the same row typeset with a
+/// margin on one part holds its neighbours that much further off, on the lattice.
+#[test]
+fn a_margin_holds_the_neighbours_off_by_that_much() {
+    let build = |margin: Margin| {
+        let mut items = vec![
+            passive("R1", "IN", "MID"),
+            passive("R2", "MID", "OUT"),
+            passive("R3", "OUT", "GND"),
+        ];
+        let tree = stack(
+            Axis::Row,
+            vec![
+                leaf("R1"),
+                Tree::Leaf(Leaf { part: "R2".into(), margin, ..Leaf::default() }),
+                leaf("R3"),
+            ],
+        );
+        sch_flex::typeset(&mut items, &trees(tree), &[]);
+        let at = |r: &str| items.iter().find(|i| i.refdes == r).unwrap().at;
+        (at("R1"), at("R2"), at("R3"))
+    };
+    let (a1, a2, a3) = build(Margin::default());
+    let (b1, b2, b3) = build(Margin { left: 4.0, right: 6.0, ..Margin::default() });
+    let grid = |v: f64| geom::GRID_50_MIL.snap(v);
+    assert!(((b2.x - b1.x) - (a2.x - a1.x) - 4.0 * 1.27).abs() < 1.27 + 1e-9, "left margin: {a1:?} {a2:?} {b1:?} {b2:?}");
+    assert!(((b3.x - b2.x) - (a3.x - a2.x) - 6.0 * 1.27).abs() < 1.27 + 1e-9, "right margin: {a2:?} {a3:?} {b2:?} {b3:?}");
+    for p in [b1, b2, b3] {
+        assert!((grid(p.x) - p.x).abs() < 1e-9 && (grid(p.y) - p.y).abs() < 1e-9, "{p:?} off the lattice");
+    }
 }

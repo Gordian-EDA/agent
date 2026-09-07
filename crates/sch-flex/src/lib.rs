@@ -31,7 +31,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use geom::{Dir, Point2, Rect};
 use sch_model::item::Item;
-use sch_model::tree::{Align, Axis, Container, Tree, Trees};
+use sch_model::tree::{Align, Axis, Container, Tree, Trees, Margin};
 
 use measure::typeset_block;
 use pack::{BLOCK_GAP, FRAME_PAD, corner_pack};
@@ -278,6 +278,7 @@ fn complete(
         gap: None,
         align: Align::Start,
         wrap: None,
+        margin: Margin::default(),
     })
 }
 
@@ -344,6 +345,7 @@ fn bare_row(items: &[Item], members: &[usize]) -> Tree {
         gap: None,
         align: Align::Center,
         wrap: None,
+        margin: Margin::default(),
     })
 }
 
@@ -399,6 +401,7 @@ fn flanked(device: Tree, flanks: &Flanks) -> Vec<Tree> {
                     gap: None,
                     align: Align::Center,
                     wrap: Some(f64::INFINITY),
+                    margin: Margin::default(),
                 })
             })
     };

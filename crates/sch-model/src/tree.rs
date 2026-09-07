@@ -47,8 +47,25 @@ pub enum Align {
     End,
 }
 
+/// White space kept around a node, in grid units: the room a reader wants between a
+/// part and whatever the tree puts beside it. Written as `{left, top, right, bottom}`
+/// or as one number for all four sides.
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize)]
+pub struct Margin {
+    pub left: f64,
+    pub top: f64,
+    pub right: f64,
+    pub bottom: f64,
+}
+
+impl Margin {
+    pub fn is_zero(&self) -> bool {
+        *self == Margin::default()
+    }
+}
+
 /// A part at a leaf of the tree.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct Leaf {
     pub part: String,
     /// 1-based unit of a multi-unit symbol; each unit is its own leaf.
@@ -58,6 +75,7 @@ pub struct Leaf {
     pub rot: Option<i32>,
     /// Flip left↔right.
     pub mirror: bool,
+    pub margin: Margin,
 }
 
 /// Which way a container stacks its children.
@@ -80,6 +98,7 @@ pub struct Container {
     /// Length (grid units) past which the container wraps into bands; `None` = the
     /// default for its axis ([`WRAP_WIDTH`] / [`WRAP_HEIGHT`]).
     pub wrap: Option<f64>,
+    pub margin: Margin,
 }
 
 /// A block's arrangement: a part, or a row/column of arrangements.
@@ -111,6 +130,7 @@ impl Tree {
             gap: None,
             align: Align::Center,
             wrap: None,
+            margin: Margin::default(),
         })
     }
 
@@ -156,6 +176,37 @@ struct Wire {
     gap: Option<f64>,
     align: Option<Align>,
     wrap: Option<f64>,
+    #[serde(default)]
+    margin: MarginWire,
+}
+
+/// `margin` written as one number or as sides; a side left out is zero.
+#[derive(Default, Deserialize)]
+#[serde(untagged)]
+enum MarginWire {
+    #[default]
+    Absent,
+    All(f64),
+    Sides {
+        #[serde(default)]
+        left: f64,
+        #[serde(default)]
+        top: f64,
+        #[serde(default)]
+        right: f64,
+        #[serde(default)]
+        bottom: f64,
+    },
+}
+
+impl MarginWire {
+    fn margin(&self) -> Margin {
+        match *self {
+            MarginWire::Absent => Margin::default(),
+            MarginWire::All(m) => Margin { left: m, top: m, right: m, bottom: m },
+            MarginWire::Sides { left, top, right, bottom } => Margin { left, top, right, bottom },
+        }
+    }
 }
 
 impl Wire {
@@ -173,6 +224,7 @@ impl Wire {
             ("gap", self.gap.is_some()),
             ("align", self.align.is_some()),
             ("wrap", self.wrap.is_some()),
+            ("margin", !matches!(self.margin, MarginWire::Absent)),
         ] {
             if present {
                 keys.push(name);
@@ -234,6 +286,7 @@ impl<'de> Deserialize<'de> for Tree {
                 unit: wire.unit,
                 rot: wire.rot,
                 mirror: wire.mirror.flag(),
+                margin: wire.margin.margin(),
             }));
         }
         let (axis, children) = match (wire.row, wire.col) {
@@ -250,6 +303,7 @@ impl<'de> Deserialize<'de> for Tree {
             gap: wire.gap,
             align: wire.align.unwrap_or_default(),
             wrap: wire.wrap,
+            margin: wire.margin.margin(),
         }))
     }
 }
@@ -270,6 +324,9 @@ impl Serialize for Tree {
                 if leaf.mirror {
                     map.serialize_entry("mirror", &true)?;
                 }
+                if !leaf.margin.is_zero() {
+                    map.serialize_entry("margin", &leaf.margin)?;
+                }
                 map.end()
             }
             Tree::Container(c) => {
@@ -287,6 +344,9 @@ impl Serialize for Tree {
                 }
                 if let Some(wrap) = c.wrap {
                     map.serialize_entry("wrap", &wrap)?;
+                }
+                if !c.margin.is_zero() {
+                    map.serialize_entry("margin", &c.margin)?;
                 }
                 map.end()
             }
@@ -313,6 +373,22 @@ mod tests {
                 ("D1".into(), 1)
             ]
         );
+        let back: Tree = serde_json::from_str(&serde_json::to_string(&tree).unwrap()).unwrap();
+        assert_eq!(back, tree);
+    }
+
+    #[test]
+    fn margins_read_as_one_number_or_as_sides_and_round_trip() {
+        let tree: Tree = serde_json::from_str(
+            r#"{"row":[{"part":"R1","margin":2},{"part":"R2","margin":{"left":1,"bottom":3}}],"margin":{"top":4}}"#,
+        )
+        .unwrap();
+        let Tree::Container(c) = &tree else { panic!() };
+        assert_eq!(c.margin, Margin { top: 4.0, ..Margin::default() });
+        let Tree::Leaf(r1) = &c.children[0] else { panic!() };
+        assert_eq!(r1.margin, Margin { left: 2.0, top: 2.0, right: 2.0, bottom: 2.0 });
+        let Tree::Leaf(r2) = &c.children[1] else { panic!() };
+        assert_eq!(r2.margin, Margin { left: 1.0, bottom: 3.0, ..Margin::default() });
         let back: Tree = serde_json::from_str(&serde_json::to_string(&tree).unwrap()).unwrap();
         assert_eq!(back, tree);
     }

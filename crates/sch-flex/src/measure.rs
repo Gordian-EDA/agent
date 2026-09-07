@@ -12,7 +12,7 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 
 use geom::{Dir, Point2, Rect};
-use sch_model::tree::{Align, Axis, Container, DEFAULT_GAP, Tree, UNIT_MM, WRAP_HEIGHT, WRAP_WIDTH};
+use sch_model::tree::{Align, Axis, Container, DEFAULT_GAP, Margin, Tree, UNIT_MM, WRAP_HEIGHT, WRAP_WIDTH};
 
 use crate::SHEET_ASPECT;
 
@@ -73,6 +73,9 @@ pub struct Node {
     pub ay: f64,
     ink: Vec<Ink>,
     pub kind: Kind,
+    /// The node's authored margin, in mm, already counted into `w`/`h`/`ax`/`ay`:
+    /// `[left, top, right, bottom]`. What is drawn starts that far inside the box.
+    pad: [f64; 4],
 }
 
 pub enum Kind {
@@ -201,6 +204,7 @@ fn empty() -> Node {
             align: Align::Center,
             offsets: None,
         },
+        pad: [0.0; 4],
     }
 }
 
@@ -227,6 +231,7 @@ fn leaf_node(part: usize, parts: &[Part], pose: Pose, axis: Axis) -> Node {
         ay: anchor.y,
         ink,
         kind: Kind::Leaf { part, pose, anchor },
+        pad: [0.0; 4],
     };
     align_line(&mut node, parts, axis);
     node
@@ -327,6 +332,9 @@ fn container_node(
     if c.axis == Axis::Row {
         align_columns_to_ic_pins(&mut children, parts);
     }
+    for (child, tree) in children.iter_mut().zip(&c.children) {
+        pad(child, margin_of(tree));
+    }
     let gap = spacing(c, &children, parts);
     let (before, after) = (
         children.iter().map(|k| line(k, c.axis)).fold(0.0, f64::max),
@@ -370,6 +378,51 @@ fn container_node(
             align: c.align,
             offsets: Some(offsets),
         },
+        pad: [0.0; 4],
+    }
+}
+
+fn margin_of(tree: &Tree) -> Margin {
+    match tree {
+        Tree::Leaf(leaf) => leaf.margin,
+        Tree::Container(c) => c.margin,
+    }
+}
+
+/// Grow the node's box by its authored margin. The drawing keeps its place inside the
+/// box, so the alignment line, the ink and a leaf's instance origin all move in by the
+/// leading margins; a stack's children are shifted at placement by [`Node::pad`].
+fn pad(node: &mut Node, margin: Margin) {
+    if margin.is_zero() {
+        return;
+    }
+    let [l, t, r, b] = [margin.left, margin.top, margin.right, margin.bottom].map(|u| u * UNIT_MM);
+    node.w += l + r;
+    node.h += t + b;
+    node.ax += l;
+    node.ay += t;
+    node.pad = [node.pad[0] + l, node.pad[1] + t, node.pad[2] + r, node.pad[3] + b];
+    for ink in &mut node.ink {
+        *ink = ink.shifted(l, t);
+    }
+    // Siblings are seated by ink, so the margin has to BE ink: the whole padded box
+    // counts as one body, and nothing is seated closer to it than the container's gap.
+    node.ink.push(Ink {
+        r: Rect::new(0.0, 0.0, node.w, node.h),
+        text: false,
+    });
+    if let Kind::Leaf { anchor, .. } = &mut node.kind {
+        *anchor = Point2::new(anchor.x + l, anchor.y + t);
+    }
+}
+
+/// A stack's content box, inside its margins: its thickness across `axis` and where its
+/// alignment line sits in it.
+fn content_across(node: &Node, axis: Axis) -> (f64, f64) {
+    let [l, t, r, b] = node.pad;
+    match axis {
+        Axis::Row => (node.h - t - b, node.ay - t),
+        Axis::Col => (node.w - l - r, node.ax - l),
     }
 }
 
@@ -523,10 +576,7 @@ fn rebuild_ink(node: &mut Node) {
     else {
         return;
     };
-    let (thickness, at_line) = match axis {
-        Axis::Row => (node.h, node.ay),
-        Axis::Col => (node.w, node.ax),
-    };
+    let (thickness, at_line) = content_across(node, *axis);
     let crosses: Vec<f64> = children
         .iter()
         .map(|k| cross_offset(k, *axis, *align, thickness, at_line))
@@ -542,7 +592,11 @@ fn rebuild_ink(node: &mut Node) {
             })
             .collect(),
     };
-    node.ink = stack_ink(children, &mains, &crosses, *axis);
+    let [l, t, ..] = node.pad;
+    node.ink = stack_ink(children, &mains, &crosses, *axis)
+        .into_iter()
+        .map(|k| k.shifted(l, t))
+        .collect();
 }
 
 /// The children of a stack; nothing, for a leaf.
@@ -808,6 +862,7 @@ fn wrap(c: &Container, children: &[Node], parts: &[Part]) -> Option<Container> {
                     gap: c.gap,
                     align: c.align,
                     wrap: Some(f64::INFINITY),
+                    margin: Margin::default(),
                 }))
             })
             .collect(),
@@ -816,6 +871,7 @@ fn wrap(c: &Container, children: &[Node], parts: &[Part]) -> Option<Container> {
         // The bands were chosen against the finished grid's proportions; measuring that
         // grid again on the flipped axis is what started the ribbon.
         wrap: Some(f64::INFINITY),
+        margin: Margin::default(),
     })
 }
 
@@ -1311,17 +1367,15 @@ fn place(node: &Node, x: f64, y: f64, out: &mut Vec<Placed>) {
             align,
             offsets,
         } => {
+            let (thickness, at_line) = content_across(node, *axis);
+            let [l, t, ..] = node.pad;
             let mut cursor = 0.0;
             for (i, child) in children.iter().enumerate() {
                 let along = offsets.as_ref().map_or(cursor, |o| o[i]);
-                let across = match align {
-                    Align::Center => line(node, *axis) - line(child, *axis),
-                    Align::End => cross(node, *axis) - cross(child, *axis),
-                    Align::Start => 0.0,
-                };
+                let across = cross_offset(child, *axis, *align, thickness, at_line);
                 let (cx, cy) = match axis {
-                    Axis::Row => (x + along, y + across),
-                    Axis::Col => (x + across, y + along),
+                    Axis::Row => (x + l + along, y + t + across),
+                    Axis::Col => (x + l + across, y + t + along),
                 };
                 place(child, cx, cy, out);
                 cursor = along + main(child, *axis) + gap;
