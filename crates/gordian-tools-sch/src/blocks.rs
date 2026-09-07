@@ -114,6 +114,7 @@ pub fn arrange_blocks(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     edit.commit(
         json!({
             "moved": report.moved,
+            "unknown": report.unknown,
             "set_aside": report.set_aside,
             "page": report.page,
         }),

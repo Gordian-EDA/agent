@@ -45,7 +45,7 @@ pub enum BlockError {
     NoParts,
     #[error("a wire joins {inside} to {outside}, which is not in the block; blocks meet only through net labels")]
     WiredAcross { inside: String, outside: String },
-    #[error("the parts do not connect to each other: {0}")]
+    #[error("the parts do not connect to each other: {0}; make one block per group, or add the rail they share")]
     Split(String),
     #[error("no block named `{0}`")]
     UnknownBlock(String),
@@ -90,6 +90,14 @@ pub fn create_block(
         .collect();
     standalone(doc, &members)?;
     connected(doc, &members)?;
+    // Parts placed together stay together: the tags they carry now are the calls that
+    // placed them, and a group placed elsewhere is what gets brought in.
+    gather(doc, &members, |s| {
+        s.fields
+            .get(sch_model::result::AP_BLOCK)
+            .map(|f| f.value.clone())
+            .unwrap_or_default()
+    });
 
     // The name is the tag every member carries, every unit of it; a member of an older
     // block leaves it.
@@ -111,7 +119,6 @@ pub fn create_block(
     tag(doc, &leavers.into_iter().collect(), sch_model::result::DEFAULT_BLOCK)?;
 
     drop_outline_of(doc, &symbols, name);
-    gather(doc, &members);
     let frame = outline(doc, &symbols, title.unwrap_or(name));
     Ok(BlockReport {
         name: name.to_string(),
@@ -174,6 +181,7 @@ fn outline(doc: &mut SchDoc, symbols: &[usize], title: &str) -> Rect {
 /// now are: the outline follows the parts a re-typeset moved, instead of standing
 /// empty where they were. Returns the blocks redrawn.
 pub fn refit_outlines(doc: &mut SchDoc, refs: &[String]) -> Vec<String> {
+    let moved: BTreeSet<String> = refs.iter().cloned().collect();
     let names: BTreeSet<String> = doc
         .items()
         .iter()
@@ -222,7 +230,7 @@ pub fn refit_outlines(doc: &mut SchDoc, refs: &[String]) -> Vec<String> {
             continue;
         }
         // A re-typeset of part of the block leaves the rest where it was; the outline
-        // is around the block, so the rest comes along first.
+        // is around the block, so whichever half is the smaller comes to the other.
         let members: BTreeSet<String> = symbols
             .iter()
             .filter_map(|i| match &doc.items()[*i] {
@@ -230,21 +238,25 @@ pub fn refit_outlines(doc: &mut SchDoc, refs: &[String]) -> Vec<String> {
                 _ => None,
             })
             .collect();
-        gather(doc, &members);
+        gather(doc, &members, |s| moved.contains(s.refdes()).to_string());
         outline(doc, &symbols, &name);
         redrawn.push(name);
     }
     redrawn
 }
 
+/// Farther apart than this, two drawings of one block were not placed together.
+const FAR: f64 = 2.0 * BLOCK_GAP;
+
 /// Bring the block's separate drawings together before it is outlined: a part added
 /// to a block later was placed wherever the sheet had room, and an outline around
-/// both is a page-sized box. Each smaller piece is moved rigidly to the first side of
-/// the largest — right, below, left, above — where it lands on nothing. When the sheet
-/// is too full for that, the whole block goes to a row of its pieces under everything
-/// else, where the next tiling collects it. Nothing here is re-typeset, and the
-/// netlist is proven equal.
-fn gather(doc: &mut SchDoc, members: &BTreeSet<String>) {
+/// both is a page-sized box. The drawings are grouped by `group` — parts that share a
+/// key were placed together and keep their composition — and only a group standing
+/// [`FAR`] from the largest is moved, rigidly, to the first side of it — right,
+/// below, left, above — where it lands on nothing. When the sheet is too full for
+/// that, the whole block goes to a row of its groups under everything else, where the
+/// next tiling collects it. Nothing here is re-typeset, and the netlist is proven equal.
+fn gather(doc: &mut SchDoc, members: &BTreeSet<String>, group: impl Fn(&sch_doc::SymbolInst) -> String) {
     let Some((joinable, mut sets)) = wired(doc) else { return };
     let Some(all) = crate::reseat::pieces_of(doc, &joinable, &mut sets, &BTreeMap::new()) else { return };
     let member_uuids: BTreeSet<String> = doc
@@ -252,17 +264,43 @@ fn gather(doc: &mut SchDoc, members: &BTreeSet<String>) {
         .filter(|s| members.contains(s.refdes()))
         .map(|s| s.uuid.clone())
         .collect();
-    let mut mine: Vec<&Piece> = all.iter().filter(|p| p.uuids.iter().any(|u| member_uuids.contains(u))).collect();
+    let key_of: BTreeMap<String, String> = doc
+        .symbols()
+        .filter(|s| members.contains(s.refdes()))
+        .map(|s| (s.uuid.clone(), group(s)))
+        .collect();
+    let mut grouped: BTreeMap<String, Piece> = BTreeMap::new();
+    for piece in all.iter().filter(|p| p.uuids.iter().any(|u| member_uuids.contains(u))) {
+        let key = piece
+            .uuids
+            .iter()
+            .find_map(|u| key_of.get(u))
+            .cloned()
+            .unwrap_or_default();
+        match grouped.get_mut(&key) {
+            Some(g) => {
+                g.uuids.extend(piece.uuids.iter().cloned());
+                g.frame = union(&g.frame, &piece.frame);
+            }
+            None => {
+                grouped.insert(key, piece.clone());
+            }
+        }
+    }
+    let mut mine: Vec<Piece> = grouped.into_values().collect();
     if mine.len() < 2 {
         return;
     }
     mine.sort_by(|a, b| (b.frame.width() * b.frame.height()).total_cmp(&(a.frame.width() * a.frame.height())));
+    if mine[1..].iter().all(|p| rect_gap(&p.frame, &mine[0].frame) < FAR) {
+        return;
+    }
     let partition = connect::extract(doc).partition();
     let overlaps = crate::visual::body_overlaps(doc).len();
     let whole = doc.snapshot();
     let mut cluster = mine[0].frame;
     let mut stranded = false;
-    for piece in &mine[1..] {
+    for piece in mine[1..].iter().filter(|p| rect_gap(&p.frame, &mine[0].frame) >= FAR) {
         let f = piece.frame;
         let sides = [
             (cluster.max_x + BLOCK_GAP, cluster.min_y),
@@ -450,6 +488,8 @@ fn write_caption(doc: &mut SchDoc, frame: Rect, title: &str) {
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct ArrangeBlocksReport {
     pub moved: Vec<String>,
+    /// Names the rows gave that no outlined block carries; tiled around.
+    pub unknown: Vec<String>,
     /// The parts the rows did not name, now in a row under the grid.
     pub set_aside: Vec<String>,
     pub page: Option<[f64; 2]>,
@@ -485,19 +525,24 @@ pub fn arrange_blocks(doc: &mut SchDoc, rows: &[Vec<String>]) -> Result<ArrangeB
         })
         .collect();
     let mut cells: BTreeMap<String, Cell> = BTreeMap::new();
+    let mut unknown: Vec<String> = Vec::new();
     for name in rows.iter().flatten() {
         if cells.contains_key(name) {
             continue;
         }
-        let piece = all
-            .iter()
-            .find(|p| p.blocks.contains(name))
-            .ok_or_else(|| BlockError::UnknownBlock(name.clone()))?;
+        let Some(piece) = all.iter().find(|p| p.blocks.contains(name)) else {
+            unknown.push(name.clone());
+            continue;
+        };
         if piece.blocks.len() > 1 {
             return Err(BlockError::Joined(piece.blocks.iter().cloned().collect::<Vec<_>>().join(", ")));
         }
-        if let Some(cell) = cell_of(doc, name, piece, &furniture)? {
-            cells.insert(name.clone(), cell);
+        match cell_of(doc, name, piece, &furniture) {
+            Ok(Some(cell)) => {
+                cells.insert(name.clone(), cell);
+            }
+            Ok(None) => {}
+            Err(_) => unknown.push(name.clone()),
         }
     }
     let heights: Vec<f64> = rows
@@ -533,6 +578,7 @@ pub fn arrange_blocks(doc: &mut SchDoc, rows: &[Vec<String>]) -> Result<ArrangeB
     }
     Ok(ArrangeBlocksReport {
         moved,
+        unknown,
         set_aside,
         page: fit.map(|f| f.page),
     })
@@ -641,6 +687,13 @@ fn set_aside(doc: &mut SchDoc, all: &[Piece], cells: &BTreeMap<String, Cell>, to
         x += piece.frame.width() + BLOCK_GAP;
     }
     parts
+}
+
+/// The clear distance between two rectangles; zero when they touch or overlap.
+fn rect_gap(a: &Rect, b: &Rect) -> f64 {
+    let dx = (a.min_x - b.max_x).max(b.min_x - a.max_x).max(0.0);
+    let dy = (a.min_y - b.max_y).max(b.min_y - a.max_y).max(0.0);
+    dx.max(dy)
 }
 
 fn union(a: &Rect, b: &Rect) -> Rect {
