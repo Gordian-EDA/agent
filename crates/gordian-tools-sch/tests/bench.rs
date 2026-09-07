@@ -1,8 +1,7 @@
 //! The bench: symbols that are on the sheet and on their nets, but not laid out.
 //!
-//! What is checked here is the loop the agent actually runs — `add_parts` to get
-//! connectivity now, `arrange` to lay it out later — and the one refusal an
-//! incomplete design earns.
+//! What is checked here is what `place_parts` does when a payload cannot be drawn,
+//! and how `arrange` lays the benched parts out later.
 //!
 //! SKIPs cleanly without a KiCAD installation.
 
@@ -41,44 +40,6 @@ fn divider() -> Value {
         {"ref": "R2", "part": "Device:R", "value": "10k", "pins": {"1": "MID", "2": "GND"}},
         {"ref": "C1", "part": "Device:C", "value": "100n", "pins": {"1": "MID", "2": "GND"}}
     ]})
-}
-
-/// `add_parts` writes connectivity and nothing else; `arrange` turns it into a
-/// drawing; the netlist is the same throughout.
-#[test]
-fn a_payload_reaches_the_bench_and_arrange_empties_it() {
-    let Some(ctx) = sheet() else {
-        eprintln!("SKIP: KiCad 10 not configured");
-        return;
-    };
-    let added = call(&ctx, "add_parts", divider());
-    assert_eq!(added["ok"].as_bool(), None, "{added:#}");
-    let benched: Vec<&str> = added["changed"]["benched"]
-        .as_array()
-        .unwrap_or_else(|| panic!("{added:#}"))
-        .iter()
-        .filter_map(|entry| entry["ref"].as_str())
-        .collect();
-    assert_eq!(benched, ["C1", "R1", "R2"], "{added:#}");
-
-    // Connectivity is COMPLETE on the bench: the parts are on the nets they were
-    // declared with, drawn as names rather than as wires.
-    let checked = call(&ctx, "check_schematic", json!({}));
-    assert_eq!(checked["bench"], json!(3), "{checked:#}");
-    let net = call(&ctx, "get_net", json!({"name": "MID"}));
-    let text = serde_json::to_string(&net).unwrap();
-    for pin in ["R1", "R2", "C1"] {
-        assert!(text.contains(pin), "MID is missing {pin}: {net:#}");
-    }
-
-    let arranged = call(&ctx, "arrange", json!({"refs": ["R1", "R2", "C1"]}));
-    assert_eq!(arranged.get("error"), None, "{arranged:#}");
-    let checked = call(&ctx, "check_schematic", json!({}));
-    assert_eq!(checked["bench"], json!(0), "{checked:#}");
-    let text = serde_json::to_string(&call(&ctx, "get_net", json!({"name": "MID"}))).unwrap();
-    for pin in ["R1", "R2", "C1"] {
-        assert!(text.contains(pin), "arranging lost {pin} from MID");
-    }
 }
 
 /// A part nothing can resolve costs that part, not the payload it arrived in.

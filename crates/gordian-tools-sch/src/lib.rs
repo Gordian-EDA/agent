@@ -35,9 +35,8 @@ use gordian_runtime::AgentRuntime;
 use serde_json::{Value, json};
 
 /// The tools that write the schematic.
-pub const MUTATORS: [&str; 20] = [
+pub const MUTATORS: [&str; 19] = [
     "place_parts",
-    "add_parts",
     "arrange",
     "create_and_update_block",
     "arrange_blocks",
@@ -97,11 +96,6 @@ pub fn tool_defs() -> Vec<Tool> {
         (
             "place_parts",
             "The ONLY way to create a new design or add a multi-part block. Submit a COMPLETE electrically finished functional block in one call, including its support, protection, decoupling, bias, termination, indicator, and connector parts. If the call would leave 60 or more parts on the sheet, split the design into named functional blocks and set `block` on every payload; add one block per call. Those later calls use region placement and freeze every existing symbol. State connectivity only: real KiCAD parts and pin-to-net mappings, never coordinates or wires. Pin keys accept physical numbers, names, or alternate functions case-insensitively; `PH0-OSC_IN` selects PH0 by its alternate. Before placement, the complete payload is validated and writes nothing on electrical failure: explicit refs must be unused, and every new named signal pin must land on a net with at least one other pin across the payload and existing sheet; power rails, declared ports, and `nc` are terminal nets. A requested net on a library no-connect pin becomes `nc` and is returned under `nc_overridden` plus `gaps`; use a functional pin if that connection matters. Unknown or pad-incompatible footprints do not block placement: they are cleared and returned under `footprints_unresolved` for one `assign_footprints` repair call. Omit `ref` to auto-assign the lowest unused designator from the library symbol. The result reports extractor-verified `connectivity` and `unconnected` pins; trust it instead of re-reading. Its `gaps` are this call's own unresolved items (footprints, no-connect overrides); missing-support findings come from check_schematic. Rails and ports accept left, right, top, or bottom. A multi-unit symbol (dual op-amp, quad gate) is placed ONCE, in the call that holds every sub-circuit using it, with one `{part, unit}` leaf per unit it uses; `unit` belongs on layout leaves, not on parts. YOU compose the drawing: give `layout` a row/col tree per block, keyed by that block's own name and naming every one of its parts exactly once — a block without one is drawn as a bare row and says so. If rejected, correct every reported diagnostic before retrying; unknown-pin errors return ranked suggestions.",
-            sch_check::place_parts_input_schema(),
-        ),
-        (
-            "add_parts",
-            "Add a block of parts to the BENCH: on the sheet and on their nets, named at every pin, with no layout and no wire drawn. Same payload as place_parts, minus the drawing. Use it when you want connectivity now and layout later, or to keep going after place_parts benched a block. `arrange({refs|block, layout})` is what lays them out and takes them off the bench. `export_fab` and `sync_board` refuse while the bench is non-empty.",
             sch_check::place_parts_input_schema(),
         ),
         (
@@ -496,10 +490,10 @@ pub fn tool_defs() -> Vec<Tool> {
 
 /// Dispatch one of this crate's tools. `None` when the name is not ours.
 pub fn run(name: &str, input: Value, ctx: &AgentRuntime) -> Option<Result<Value>> {
-    // `place_parts` and `add_parts` are the two ways a schematic comes into
-    // existence; everything else needs one to already be there.
+    // `place_parts` is the way a schematic comes into existence; everything else
+    // needs one to already be there.
     if !ctx.sch_path().is_file()
-        && !matches!(name, "place_parts" | "add_parts" | "search_footprints")
+        && !matches!(name, "place_parts" | "search_footprints")
     {
         return handles(name).then(|| {
             Ok(json!({
@@ -512,7 +506,6 @@ pub fn run(name: &str, input: Value, ctx: &AgentRuntime) -> Option<Result<Value>
     }
     Some(match name {
         "place_parts" => bulk::place_parts(input, ctx),
-        "add_parts" => bulk::add_parts(input, ctx),
         "arrange" => bulk::arrange(input, ctx),
         "create_and_update_block" => blocks::create_and_update_block(input, ctx),
         "arrange_blocks" => blocks::arrange_blocks(input, ctx),

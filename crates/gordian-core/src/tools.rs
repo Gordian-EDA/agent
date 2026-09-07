@@ -154,7 +154,7 @@ pub fn tool_defs() -> Vec<Tool> {
             name: "reserve_refs".into(),
             description: "Claim a block of reference designators (R7…R12) and record the claim \
                  in the project. Use it before adding parts while another agent works on the \
-                 same design, then name those exact refs in place_parts/add_parts — the claim \
+                 same design, then name those exact refs in place_parts — the claim \
                  is recorded and skipped by later reserve_refs calls, so two agents that both \
                  reserve never collide."
                 .into(),

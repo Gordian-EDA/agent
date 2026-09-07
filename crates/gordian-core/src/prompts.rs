@@ -18,7 +18,7 @@ Discover symbols once with `search_symbols({queries})`; top hits carry pins, alt
 
 Work one sub-circuit at a time, 3-12 parts: `place_parts({parts, layout, name?, intent?})` places and wires it as one group beside the sheet's content; `arrange({refs|bbox, layout})` corrects it. Then `create_and_update_block({parts, title})` outlines that group and writes its title — the parts must stand alone (drawn wires stay inside; sub-circuits meet only through net labels) — and, once every block exists, `arrange_blocks({rows: [[title, ...], ...]})` tiles the blocks as a grid, rows top to bottom, blockless parts under it; call it again after later edits. Compose 2-6 functional blocks (POWER, MCU, USB...), each holding ALL of one sub-circuit's parts; a crystal with its caps is never a block alone. Pin keys accept number, name or alternate, any case; `"nc"` means no-connect. Rails and ports take left/right/top/bottom. YOU compose the layout, the engine only measures: `layout` is one row/col tree over the payload's parts. A node is `{part, unit?, rot?, mirror?}`, `{row: [...]}` or `{col: [...]}`, with `gap` (1.27 mm grid units). A row is ONE signal path: neighbours must share a net; unrelated parts never sit side by side. A part that SERVES one pin — decoupler, pull-up, reset cap, shunt — goes in the `col` beside that part, on the side that pin leaves from; anywhere else needs a label. An IC sits between its input- and output-side cols, its decoupling caps a further col. Pass `name` (sheet title).
 
-`place_parts` never refuses a whole payload: unresolvable parts return as `unplaced` ({ref, reason, did_you_mean}) with their nets open, everything else is placed, and it appends, so resubmit only what it names. A block that cannot be drawn truthfully is BENCHED (`benched`: wired by name, no layout); `add_parts({parts})` benches directly; `arrange({refs|block, layout})` lays them out and empties the bench. Checks report `bench: n`; `sync_board`/`export_fab` refuse while it is non-empty.
+`place_parts` never refuses a whole payload: unresolvable parts return as `unplaced` ({ref, reason, did_you_mean}) with their nets open, everything else is placed, and it appends, so resubmit only what it names. A block that cannot be drawn truthfully is BENCHED (`benched`: wired by name, no layout); `arrange({refs|block, layout})` lays them out and empties the bench. Checks report `bench: n`; `sync_board`/`export_fab` refuse while it is non-empty.
 
 `dangling` pins are reported, not fatal: close each with `connect`, or declare board I/O in `intent.ports`. Write `"@R1.2"` as a net to join that pin's net. `completeness.gaps` (from `check_schematic`) are advisory, skip them for deliberately minimal designs; to take one, place the parts and re-block them with their sub-circuit. When the request fixes the part list, add nothing: pass `strict: true` (no gaps) and drive `netlist_fidelity.matches` true.
 
@@ -93,7 +93,6 @@ mod tests {
             "never refuses a whole payload",
             "`unplaced`",
             "BENCH",
-            "add_parts({parts})",
             "empties the bench",
             "bench: n",
         ] {

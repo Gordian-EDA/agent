@@ -485,7 +485,7 @@ fn place_parts_inner(
     })
 }
 
-/// What [`add_parts`] did.
+/// What [`bench`] did.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AddReport {
     /// Symbols now on the bench, in refdes order.
@@ -512,14 +512,15 @@ pub struct AddReport {
 /// Add `input`'s parts to the sheet's BENCH: on the sheet and on their nets, named
 /// at every pin, with no layout and no wire drawn.
 ///
-/// This is the half of [`place_parts`] that cannot fail for want of a good drawing.
+/// This is the half of [`place_parts`] that cannot fail for want of a good drawing,
+/// and what it falls back to when the typesetter's draw is not truthful.
 /// `only` narrows it to those references — how a placement that could not be drawn
 /// truthfully keeps its connectivity anyway — and `why` is what the report says
 /// about each benched symbol.
 ///
 /// Unlike a placement this is not typeset: seating a symbol in the next free bench
 /// cell and hanging a label on each pin is linear work.
-pub fn add_parts(
+pub fn bench(
     env: &KicadInstallation,
     doc: &mut SchDoc,
     input: &PlacePartsInput,

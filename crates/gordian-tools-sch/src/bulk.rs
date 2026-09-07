@@ -1321,44 +1321,6 @@ fn rewrite_tree_refs(tree: &mut sch_model::tree::Tree, renamed: &BTreeMap<String
     }
 }
 
-/// The tool behind `add_parts`: a payload with no layout at all.
-pub(crate) fn add_parts(input: Value, ctx: &AgentRuntime) -> Result<Value> {
-    let mut input = input;
-    let warnings = sanitize_place_parts_input(&mut input);
-    let mut payload: sch_check::PlacePartsInput = typed(input, "add_parts")?;
-    let mut edit = if ctx.sch_path().is_file() {
-        Edit::open(ctx).context("opening the existing schematic")?
-    } else {
-        Edit::create(ctx, sch_floorplan::live::blank_sheet()?)
-    };
-    if let Some(error) = coalesce_payload_parts(&mut payload) {
-        return Ok(with_warnings(error, &warnings));
-    }
-    let existing = sch_check::ExistingSheet {
-        refs: edit
-            .doc
-            .symbols()
-            .map(|symbol| symbol.refdes().to_string())
-            .collect(),
-        reserved: edit.reserved().clone(),
-        ..Default::default()
-    };
-    let renamed = rename_occupied_references(&mut payload, &existing);
-    match resolve_pin_net_refs(&mut payload, &mut edit)? {
-        Ok(_) => {}
-        Err(error) => return Ok(with_renamed(with_warnings(error, &warnings), &renamed)),
-    }
-    sch_check::place_parts::assign_references(&mut payload, ctx.provider(), &existing);
-    bench_payload(
-        ctx,
-        edit,
-        &payload,
-        "added without layout — call arrange to lay it out",
-        &warnings,
-    )
-    .map(|value| with_renamed(value, &renamed))
-}
-
 /// Write a payload's connectivity to the bench and commit it.
 ///
 /// The bench is what makes a placement failure survivable: the parts and their
@@ -1371,7 +1333,7 @@ fn bench_payload(
     why: &str,
     warnings: &[String],
 ) -> Result<Value> {
-    let report = match sch_floorplan::live::add_parts(ctx.env(), &mut edit.doc, payload, None, why)
+    let report = match sch_floorplan::live::bench(ctx.env(), &mut edit.doc, payload, None, why)
     {
         Ok(report) => report,
         Err(sch_floorplan::live::Error::InvalidPayload(audit)) => {

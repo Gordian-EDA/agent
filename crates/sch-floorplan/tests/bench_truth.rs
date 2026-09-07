@@ -75,14 +75,14 @@ fn campaign_regulator_payload_is_truthful_on_the_bench() {
     }))
     .expect("existing sheet payload");
     let existing_report =
-        sch_floorplan::live::add_parts(&env, &mut doc, &existing, None, "existing sheet")
+        sch_floorplan::live::bench(&env, &mut doc, &existing, None, "existing sheet")
             .expect("existing sheet draw");
     assert!(existing_report.committed, "{:#?}", existing_report.mismatch);
     let alias_point = sch_doc::Pose::new(25.4, 25.4, 0.0);
     doc.add_label(sch_doc::LabelKind::Global, "+5V_USB", alias_point);
     doc.add_label(sch_doc::LabelKind::Local, "GND", alias_point);
     let report =
-        sch_floorplan::live::add_parts(&env, &mut doc, &payload, None, "placement fallback")
+        sch_floorplan::live::bench(&env, &mut doc, &payload, None, "placement fallback")
             .expect("bench draw");
 
     assert!(report.committed, "{:#?}", report.mismatch);
@@ -135,7 +135,7 @@ fn derived_net_name_is_replaced_with_one_authored_name() {
     let mut doc = sch_floorplan::live::blank_sheet().expect("blank sheet");
 
     let report =
-        sch_floorplan::live::add_parts(&env, &mut doc, &payload, None, "placement fallback")
+        sch_floorplan::live::bench(&env, &mut doc, &payload, None, "placement fallback")
             .expect("bench draw");
 
     assert!(report.committed, "{:#?}", report.mismatch);
@@ -166,7 +166,7 @@ fn a_bench_draw_that_merges_distinct_existing_nets_is_refused() {
     }))
     .expect("existing sheet payload");
     let existing_report =
-        sch_floorplan::live::add_parts(&installed, &mut doc, &existing, None, "existing sheet")
+        sch_floorplan::live::bench(&installed, &mut doc, &existing, None, "existing sheet")
             .expect("existing sheet draw");
     assert!(existing_report.committed, "{:#?}", existing_report.mismatch);
 
@@ -191,7 +191,7 @@ fn a_bench_draw_that_merges_distinct_existing_nets_is_refused() {
     .expect("shorting payload");
 
     let report =
-        sch_floorplan::live::add_parts(&env, &mut doc, &shorting, None, "adversarial bench draw")
+        sch_floorplan::live::bench(&env, &mut doc, &shorting, None, "adversarial bench draw")
             .expect("bench draw result");
 
     assert!(!report.committed, "shorting draw unexpectedly committed");

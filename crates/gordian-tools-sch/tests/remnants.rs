@@ -297,7 +297,7 @@ fn bluepill_power_region_can_be_replaced_without_new_dangling_remnants() {
     );
     let placed = call(
         &ctx,
-        "add_parts",
+        "place_parts",
         json!({
             "block": "POWER_REPLACEMENT",
             "parts": [

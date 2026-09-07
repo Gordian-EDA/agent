@@ -1277,12 +1277,12 @@ impl<P: Provider> Agent<P> {
                 if dispatched && schematic_mutation_succeeded(&call.fn_name, &parsed) {
                     applied = true;
                     schematic_mutated = true;
-                    if matches!(call.fn_name.as_str(), "place_parts" | "add_parts") {
+                    if call.fn_name == "place_parts" {
                         successful_place_parts += 1;
                     }
                     parts_drawn_or_moved |= matches!(
                         call.fn_name.as_str(),
-                        "place_parts" | "add_parts" | "arrange"
+                        "place_parts" | "arrange"
                     );
                     reviews.note_edit();
                     schematic_check_complete = successful_place_parts > 1
@@ -2520,7 +2520,7 @@ fn tool_summary(name: &str, input: &Value, result: &Value) -> String {
                 .unwrap_or_default();
             format!("{count} finding(s){first}")
         }
-        "place_parts" | "add_parts" => {
+        "place_parts" => {
             let gaps = result
                 .get("gaps")
                 .and_then(Value::as_array)

@@ -13,7 +13,7 @@
 //!   with the net names collapsed away — that is what makes the delete and the
 //!   connect that undoes it share a budget, while wiring a 48-pin MCU pin by pin
 //!   does not.
-//! - **existence** — `remove_symbols {refs: ["D2"]}`, `add_parts` putting D2
+//! - **existence** — `remove_symbols {refs: ["D2"]}`, `place_parts` putting D2
 //!   back, `remove_symbols {refs: ["D2"]}` again. The re-add names a whole block
 //!   (`R4, D2`) so an exact-set key misses it; counting *presence flips per ref*
 //!   does not. The initial placement seeds presence and is not a flip.
@@ -142,7 +142,7 @@ fn family(tool: &str) -> Option<Family> {
     Some(match tool {
         "connect" | "label" | "no_connect" | "add_power" | "delete_wires" | "delete_labels"
         | "rewire" => Family::Wiring,
-        "place_parts" | "add_parts" | "add_symbols" => Family::Add,
+        "place_parts" | "add_symbols" => Family::Add,
         "remove_symbols" | "remove_region" => Family::Remove,
         // Layout and field edits neither strand parts nor change connectivity,
         // and re-arranging one block after touching another is ordinary work.
@@ -282,7 +282,7 @@ mod tests {
         );
         assert!(
             guard
-                .intervene("add_parts", &place(&["R4", "D2"]))
+                .intervene("place_parts", &place(&["R4", "D2"]))
                 .is_none()
         );
         let refusal = guard

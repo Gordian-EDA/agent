@@ -110,7 +110,7 @@ async fn a_third_remove_and_place_cycle_is_refused() {
 }
 
 /// v4 blue-pill #45/#46/#48: the model removes the user LED the prompt asked
-/// for, puts it back inside a whole-block `add_parts`, and removes it again. The
+/// for, puts it back inside a whole-block `place_parts`, and removes it again. The
 /// re-add never names the same argument set as the removal, so only counting the
 /// ref's presence flips catches it.
 #[tokio::test]
@@ -129,7 +129,7 @@ async fn a_block_shaped_restore_shares_the_removal_budget_of_the_part_it_restore
         vec![
             tool_call("place", "place_parts", leds.clone()),
             tool_call("cut-1", "remove_symbols", json!({"refs": ["D2"]})),
-            tool_call("restore", "add_parts", leds),
+            tool_call("restore", "place_parts", leds),
             tool_call("cut-2", "remove_symbols", json!({"refs": ["D2"]})),
         ],
     )
@@ -142,7 +142,7 @@ async fn a_block_shaped_restore_shares_the_removal_budget_of_the_part_it_restore
     assert!(
         calls
             .iter()
-            .any(|(name, refused, _)| name == "add_parts" && !refused),
+            .any(|(name, refused, _)| name == "place_parts" && !refused),
         "the restore itself is never refused"
     );
 }
