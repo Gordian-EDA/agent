@@ -272,8 +272,11 @@ fn gather(doc: &mut SchDoc, members: &BTreeSet<String>) {
         ];
         let mut seated = false;
         for (x, y) in sides {
-            let before = doc.snapshot();
             let (dx, dy) = (GRID_50_MIL.snap(x - f.min_x), GRID_50_MIL.snap(y - f.min_y));
+            if !doc.translation_is_safe(&piece.uuids, dx, dy) {
+                continue;
+            }
+            let before = doc.snapshot();
             doc.translate_items(&piece.uuids, dx, dy);
             if crate::visual::body_overlaps(doc).len() <= overlaps {
                 let moved = Rect::new(f.min_x + dx, f.min_y + dy, f.max_x + dx, f.max_y + dy);
@@ -291,7 +294,10 @@ fn gather(doc: &mut SchDoc, members: &BTreeSet<String>) {
         let mut x = mine[0].frame.min_x;
         for piece in &mine {
             let f = piece.frame;
-            doc.translate_items(&piece.uuids, GRID_50_MIL.snap(x - f.min_x), GRID_50_MIL.snap(floor - f.min_y));
+            let (dx, dy) = (GRID_50_MIL.snap(x - f.min_x), GRID_50_MIL.snap(floor - f.min_y));
+            if doc.translation_is_safe(&piece.uuids, dx, dy) {
+                doc.translate_items(&piece.uuids, dx, dy);
+            }
             x += f.width() + BLOCK_GAP;
         }
     }
@@ -623,7 +629,7 @@ fn set_aside(doc: &mut SchDoc, all: &[Piece], cells: &BTreeMap<String, Cell>, to
     for piece in all.iter().filter(|p| !p.blocks.iter().any(|b| cells.contains_key(b))) {
         let dx = GRID_50_MIL.snap(x - piece.frame.min_x);
         let dy = GRID_50_MIL.snap(top - piece.frame.min_y);
-        if dx != 0.0 || dy != 0.0 {
+        if (dx != 0.0 || dy != 0.0) && doc.translation_is_safe(&piece.uuids, dx, dy) {
             doc.translate_items(&piece.uuids, dx, dy);
         }
         parts.extend(doc.items().iter().filter_map(|item| match item {

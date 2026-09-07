@@ -440,6 +440,14 @@ impl SchDoc {
         })
     }
 
+    /// Whether moving the items named by `uuids` by `(dx, dy)` leaves every connection
+    /// alone: their wires and pins touch nothing else now, and would touch nothing
+    /// else there. A rigid move that lands a rail end on a neighbour's rail changes no
+    /// net and still welds the two drawings together.
+    pub fn translation_is_safe(&self, uuids: &BTreeSet<String>, dx: f64, dy: f64) -> bool {
+        self.slide_is_safe([dx, dy], |item| item.uuid().is_some_and(|u| uuids.contains(u)))
+    }
+
     /// Whether moving the items `keep` accepts by `shift` leaves every connection alone.
     ///
     /// It does when the two drawings do not touch — no connection point of one sitting on
