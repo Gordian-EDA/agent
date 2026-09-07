@@ -110,7 +110,7 @@ pub fn tool_defs() -> Vec<Tool> {
         ),
         (
             "arrange_blocks",
-            "Lay the blocks out as a grid: `rows` of block titles, top to bottom, each left to right. Every block moves rigidly, its outline is re-fitted to its cell with the contents centred, blocks in a row share a height, and whatever the rows leave out — parts of no block, blocks not named — goes in a row under the grid. Call it once the blocks exist; call it again after later edits.",
+            "Lay the blocks out as a grid: `rows` of block titles, top to bottom, each left to right. Every block moves rigidly, its outline is re-fitted to its cell with the contents centred, blocks in a row share a height, and whatever the rows leave out — parts of no block, blocks not named — goes in a row under the grid. Call it once the blocks exist; from then on every block edit (create_and_update_block, arrange) re-tiles to the same rows by itself, a new block joining the last row — call it again only to change the rows.",
             blocks::arrange_blocks_schema(),
         ),
         (

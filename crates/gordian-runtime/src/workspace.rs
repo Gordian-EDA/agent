@@ -75,6 +75,20 @@ impl Workspace {
         self.root.join("request.json")
     }
 
+    /// The rows of block titles the sheet's blocks were last tiled in; empty until
+    /// `arrange_blocks` has run. Every later block edit re-tiles to these rows.
+    pub fn block_rows(&self) -> Vec<Vec<String>> {
+        std::fs::read_to_string(self.root.join("blocks.json"))
+            .ok()
+            .and_then(|text| serde_json::from_str(&text).ok())
+            .unwrap_or_default()
+    }
+
+    pub fn set_block_rows(&self, rows: &[Vec<String>]) -> io::Result<()> {
+        let json = serde_json::to_vec_pretty(rows).map_err(io::Error::other)?;
+        atomic_write(&self.root.join("blocks.json"), &json)
+    }
+
     /// Atomically persist a PNG under the next free `renders/render-NNN.png`.
     /// Existing leaves of every kind, including dangling symlinks, are never
     /// followed or replaced.

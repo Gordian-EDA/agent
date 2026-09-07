@@ -54,6 +54,27 @@ pub(crate) fn arrange_blocks_schema() -> Value {
     })
 }
 
+/// Re-tile the sheet to the rows it was last tiled in, once it has been; a block
+/// the rows do not know joins the last row. `None` when the sheet was never tiled.
+pub(crate) fn retile(doc: &mut sch_doc::SchDoc, ctx: &AgentRuntime, newcomer: Option<&str>) -> Option<Value> {
+    let mut rows = ctx.workspace().block_rows();
+    if rows.is_empty() {
+        return None;
+    }
+    if let Some(name) = newcomer
+        && !rows.iter().flatten().any(|n| n == name)
+    {
+        rows.last_mut().expect("rows are not empty").push(name.to_string());
+    }
+    Some(match sch_floorplan::blocks::arrange_blocks(doc, &rows) {
+        Ok(report) => {
+            let _ = ctx.workspace().set_block_rows(&rows);
+            json!({"rows": rows, "set_aside": report.set_aside})
+        }
+        Err(error) => json!({"error": error.to_string()}),
+    })
+}
+
 /// Outline and title a set of parts as one block; a title the sheet already has is
 /// redefined with these parts.
 pub fn create_and_update_block(input: Value, ctx: &AgentRuntime) -> Result<Value> {
@@ -68,12 +89,14 @@ pub fn create_and_update_block(input: Value, ctx: &AgentRuntime) -> Result<Value
         Ok(report) => report,
         Err(error) => return Ok(json!({ "error": error.to_string() })),
     };
+    let retiled = retile(&mut edit.doc, ctx, Some(&report.name));
     edit.commit(
         json!({
             "block": report.name,
             "ignored": report.ignored,
             "parts": report.parts,
             "frame": [report.frame.min_x, report.frame.min_y, report.frame.max_x, report.frame.max_y],
+            "retiled": retiled,
         }),
         Allow::nothing(),
     )
@@ -87,6 +110,7 @@ pub fn arrange_blocks(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         Ok(report) => report,
         Err(error) => return Ok(json!({ "error": error.to_string() })),
     };
+    let _ = ctx.workspace().set_block_rows(&input.rows);
     edit.commit(
         json!({
             "moved": report.moved,

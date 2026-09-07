@@ -1169,7 +1169,7 @@ pub(crate) fn rewire(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     finish_arrangement(edit, report, ctx)
 }
 
-fn finish_arrangement(edit: Edit, report: ArrangeReport, ctx: &AgentRuntime) -> Result<Value> {
+fn finish_arrangement(mut edit: Edit, report: ArrangeReport, ctx: &AgentRuntime) -> Result<Value> {
     if !report.committed {
         return Ok(json!({
             "ok": false,
@@ -1191,15 +1191,23 @@ fn finish_arrangement(edit: Edit, report: ArrangeReport, ctx: &AgentRuntime) -> 
         .unname_nets(report.nets.clone())
         .creating();
     let refit = report.outlines_refit.clone();
+    let retiled = match refit.is_empty() {
+        true => None,
+        false => crate::blocks::retile(&mut edit.doc, ctx, None),
+    };
     let mut value = edit.commit(json!(report), allow)?;
     if value.get("error").is_some() {
         return Ok(value);
     }
-    if !refit.is_empty() {
-        value["next"] = json!(format!(
-            "the outline(s) of {} were redrawn around the moved parts; call arrange_blocks to re-tile the grid",
-            refit.join(", ")
-        ));
+    match retiled {
+        Some(retiled) => value["retiled"] = retiled,
+        None if !refit.is_empty() => {
+            value["next"] = json!(format!(
+                "the outline(s) of {} were redrawn around the moved parts; call arrange_blocks to tile the grid",
+                refit.join(", ")
+            ));
+        }
+        None => {}
     }
     with_check(value, ctx)
 }

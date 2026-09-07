@@ -240,8 +240,10 @@ pub fn refit_outlines(doc: &mut SchDoc, refs: &[String]) -> Vec<String> {
 /// Bring the block's separate drawings together before it is outlined: a part added
 /// to a block later was placed wherever the sheet had room, and an outline around
 /// both is a page-sized box. Each smaller piece is moved rigidly to the first side of
-/// the largest — right, below, left, above — where it lands on nothing; a piece with
-/// no such side stays. Nothing here is re-typeset, and the netlist is proven equal.
+/// the largest — right, below, left, above — where it lands on nothing. When the sheet
+/// is too full for that, the whole block goes to a row of its pieces under everything
+/// else, where the next tiling collects it. Nothing here is re-typeset, and the
+/// netlist is proven equal.
 fn gather(doc: &mut SchDoc, members: &BTreeSet<String>) {
     let Some((joinable, mut sets)) = wired(doc) else { return };
     let Some(all) = crate::reseat::pieces_of(doc, &joinable, &mut sets, &BTreeMap::new()) else { return };
@@ -259,6 +261,7 @@ fn gather(doc: &mut SchDoc, members: &BTreeSet<String>) {
     let overlaps = crate::visual::body_overlaps(doc).len();
     let whole = doc.snapshot();
     let mut cluster = mine[0].frame;
+    let mut stranded = false;
     for piece in &mine[1..] {
         let f = piece.frame;
         let sides = [
@@ -267,6 +270,7 @@ fn gather(doc: &mut SchDoc, members: &BTreeSet<String>) {
             (cluster.min_x - BLOCK_GAP - f.width(), cluster.min_y),
             (cluster.min_x, cluster.min_y - BLOCK_GAP - f.height()),
         ];
+        let mut seated = false;
         for (x, y) in sides {
             let before = doc.snapshot();
             let (dx, dy) = (GRID_50_MIL.snap(x - f.min_x), GRID_50_MIL.snap(y - f.min_y));
@@ -274,12 +278,24 @@ fn gather(doc: &mut SchDoc, members: &BTreeSet<String>) {
             if crate::visual::body_overlaps(doc).len() <= overlaps {
                 let moved = Rect::new(f.min_x + dx, f.min_y + dy, f.max_x + dx, f.max_y + dy);
                 cluster = union(&cluster, &moved);
+                seated = true;
                 break;
             }
             let _ = doc.restore(before);
         }
+        stranded |= !seated;
     }
-    if connect::extract(doc).partition() != partition {
+    if stranded {
+        let _ = doc.restore(whole);
+        let floor = doc.content_bbox().map_or(0.0, |b| b.max_y) + BLOCK_GAP;
+        let mut x = mine[0].frame.min_x;
+        for piece in &mine {
+            let f = piece.frame;
+            doc.translate_items(&piece.uuids, GRID_50_MIL.snap(x - f.min_x), GRID_50_MIL.snap(floor - f.min_y));
+            x += f.width() + BLOCK_GAP;
+        }
+    }
+    if connect::extract(doc).partition() != partition || crate::visual::body_overlaps(doc).len() > overlaps {
         let _ = doc.restore(whole);
     }
 }
