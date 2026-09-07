@@ -242,17 +242,31 @@ impl Selection {
                     .map(|s| s.refdes().to_string())
                     .collect()
             }
+            // A block is named by its title once outlined, and the model still calls it
+            // by the region name it placed it under: `MCU_CORE` for "MCU CORE".
             Selection::Block(name) => doc
                 .symbols()
                 .filter(|s| {
                     s.fields
                         .get(sch_model::result::AP_BLOCK)
-                        .is_some_and(|field| field.value == *name)
+                        .is_some_and(|field| same_block_name(&field.value, name))
                 })
                 .map(|s| s.refdes().to_string())
                 .collect(),
         }
     }
+}
+
+/// Whether two block names are the same name, spelt as a title or as a region key:
+/// letters and digits compared without case, everything else ignored.
+fn same_block_name(a: &str, b: &str) -> bool {
+    let key = |s: &str| {
+        s.chars()
+            .filter(|c| c.is_ascii_alphanumeric())
+            .map(|c| c.to_ascii_uppercase())
+            .collect::<String>()
+    };
+    a == b || key(a) == key(b)
 }
 
 /// An empty sheet, ready to be filled — what [`place_parts`] starts from when there is

@@ -93,7 +93,7 @@ pub(crate) fn selection_schema(engine: bool) -> Value {
         },
         "block": {
             "type": "string",
-            "description": "Select every symbol tagged with this functional block, bench included."
+            "description": "Select every symbol of this block, by its title or the region name it was placed under (case and punctuation do not matter), bench included."
         }
     });
     if engine {

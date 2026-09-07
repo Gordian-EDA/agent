@@ -221,6 +221,16 @@ pub fn refit_outlines(doc: &mut SchDoc, refs: &[String]) -> Vec<String> {
         if symbols.is_empty() {
             continue;
         }
+        // A re-typeset of part of the block leaves the rest where it was; the outline
+        // is around the block, so the rest comes along first.
+        let members: BTreeSet<String> = symbols
+            .iter()
+            .filter_map(|i| match &doc.items()[*i] {
+                Item::Symbol(s) => Some(s.refdes().to_string()),
+                _ => None,
+            })
+            .collect();
+        gather(doc, &members);
         outline(doc, &symbols, &name);
         redrawn.push(name);
     }
