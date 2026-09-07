@@ -459,7 +459,6 @@ fn is_schematic_phase_tool(name: &str) -> bool {
                 | "project_info"
                 | "search_footprints"
                 | "get_footprint_info"
-                | "assign_footprints"
         )
 }
 
@@ -2611,20 +2610,6 @@ fn tool_summary(name: &str, input: &Value, result: &Value) -> String {
                 format!("{blocking} blocking findings{first}; fix them, then check_board again")
             }
         }
-        "assign_footprints" => {
-            if let Some(count) = result.get("count").and_then(Value::as_u64) {
-                return format!("{count} footprint(s) assigned");
-            }
-            let reference = result
-                .get("reference")
-                .and_then(Value::as_str)
-                .unwrap_or("component");
-            let footprint = result
-                .get("footprint")
-                .and_then(Value::as_str)
-                .unwrap_or("footprint");
-            format!("{reference} → {footprint}")
-        }
         "place_board" => {
             let placed = result
                 .get("positions")
@@ -3110,11 +3095,7 @@ mod tests {
     }
 
     fn nudge(refs: &str) -> StreamEnd {
-        crate::testing::tool_call(
-            "move",
-            "move_symbols",
-            json!({"moves": [{"ref": refs, "by": [0.0, 2.54]}]}),
-        )
+        crate::testing::tool_call("move", "arrange", json!({"refs": [refs]}))
     }
 
     fn two_resistors() -> StreamEnd {
@@ -3176,7 +3157,7 @@ mod tests {
         assert!(notice.contains("at its best"), "{notice}");
         let (_, moved) = calls
             .iter()
-            .find(|(name, _)| name == "move_symbols")
+            .find(|(name, _)| name == "arrange")
             .expect("the model tried an edit");
         assert_eq!(moved["error"], "review loop closed");
     }
@@ -3218,7 +3199,7 @@ mod tests {
         assert!(stop.contains("the last edit hurt"), "{stop}");
         let moves: Vec<_> = calls
             .iter()
-            .filter(|(name, _)| name == "move_symbols")
+            .filter(|(name, _)| name == "arrange")
             .collect();
         assert_eq!(moves.len(), 3, "{calls:?}");
         assert!(moves[0].1.get("error").is_none());
@@ -3439,8 +3420,8 @@ mod tests {
                 "message": "no driver on net VCC",
                 "refs": ["U1.8"],
                 "fix": {
-                    "tool": "add_power",
-                    "args": {"net": "VCC", "pin": "U1.8"}
+                    "tool": "connect",
+                    "args": {"from": "U1.8", "net": "VCC"}
                 }
             }]
         });
@@ -3448,7 +3429,7 @@ mod tests {
         assert_eq!(
             tool_summary("check_schematic", &json!({}), &result),
             "1 finding(s) — first blocking finding: power_pin_not_driven at \
-             U1.8: no driver on net VCC → fix: add_power{\"net\":\"VCC\",\"pin\":\"U1.8\"}"
+             U1.8: no driver on net VCC → fix: connect{\"from\":\"U1.8\",\"net\":\"VCC\"}"
         );
     }
 

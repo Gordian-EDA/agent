@@ -114,7 +114,7 @@ fn focused_lookups_are_aligned_plain_text() {
         eprintln!("SKIP: no KiCAD detected");
         return;
     };
-    let symbol = text(&ctx, "get_symbol", json!({"ref": "U1"}));
+    let symbol = text(&ctx, "read_schematic", json!({"ref": "U1"}));
     assert!(symbol.starts_with("U1  ECC83  ecc83-pp:ECC83  3 units"));
     assert!(symbol.contains("pin  name  type     side"));
     assert_eq!(
@@ -134,7 +134,7 @@ fn focused_lookups_are_aligned_plain_text() {
         .count();
     assert_eq!(pin_rows, 9, "{symbol}");
 
-    let net = text(&ctx, "get_net", json!({"name": "GND"}));
+    let net = text(&ctx, "read_schematic", json!({"net": "GND"}));
     assert!(net.starts_with("NET GND  7 pins  named by: power symbol\n"));
     let pins: Vec<&str> = net
         .lines()

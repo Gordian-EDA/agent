@@ -47,7 +47,7 @@ fn listing(ctx: &AgentRuntime) -> String {
 fn labelled_resistor(ctx: &AgentRuntime) {
     let added = call(
         ctx,
-        "add_symbols",
+        "place_parts",
         json!({"parts": [{"lib_id": "Device:R", "ref": "R1", "value": "DNP"}]}),
     );
     assert!(added.get("error").is_none(), "fixture failed: {added}");
@@ -126,7 +126,7 @@ fn add_power_uses_a_renamed_generic_bar_for_an_unknown_rail() {
     };
     labelled_resistor(&ctx);
 
-    let result = call(&ctx, "add_power", json!({"pin": "R1.1", "net": "+5V_USB"}));
+    let result = call(&ctx, "connect", json!({"pin": "R1.1", "net": "+5V_USB"}));
 
     assert!(result.get("error").is_none(), "{result}");
     assert_eq!(result["power_symbol_used"], "power:VDC", "{result}");
@@ -145,13 +145,17 @@ fn get_net_resolves_power_only_nets_and_a_unique_close_name() {
         eprintln!("SKIP: no KiCad detected");
         return;
     };
+    // A rail with no part on it: R1's GND wire is cut, and the sole GND glyph stays.
     let added = call(
         &ctx,
-        "add_symbols",
-        json!({"parts": [{"lib_id": "power:GND", "ref": "#PWR01"}]}),
+        "place_parts",
+        json!({"parts": [{"lib_id": "Device:R", "ref": "R9", "pins": {"1": "GND", "2": "OUT"}}],
+               "intent": {"ports": {"OUT": "right"}}}),
     );
     assert!(added.get("error").is_none(), "fixture failed: {added}");
-    let power = call(&ctx, "get_net", json!({"name": "GND"}));
+    let cut = call(&ctx, "delete_wires", json!({"pins": ["R9.1"]}));
+    assert!(cut.get("error").is_none(), "fixture failed: {cut}");
+    let power = call(&ctx, "read_schematic", json!({"net": "GND"}));
     assert!(
         power
             .as_str()
@@ -160,9 +164,9 @@ fn get_net_resolves_power_only_nets_and_a_unique_close_name() {
     );
 
     labelled_resistor(&ctx);
-    let named = call(&ctx, "label", json!({"pin": "R1.1", "net": "OUT_AC"}));
+    let named = call(&ctx, "connect", json!({"pin": "R1.1", "net": "OUT_AC"}));
     assert!(named.get("error").is_none(), "fixture failed: {named}");
-    let resolved = call(&ctx, "get_net", json!({"name": "OUTA"}));
+    let resolved = call(&ctx, "read_schematic", json!({"net": "OUTA"}));
     assert_eq!(resolved["resolved_from"], "OUTA", "{resolved}");
     assert_eq!(resolved["name"], "OUT_AC", "{resolved}");
     assert!(
@@ -181,7 +185,7 @@ fn pin_mutators_rank_unknown_pin_names_with_the_shared_resolver() {
     };
     let added = call(
         &ctx,
-        "add_symbols",
+        "place_parts",
         json!({"parts": [
             {"lib_id": "Connector:USB_B", "ref": "J1"},
             {"lib_id": "Device:R", "ref": "R1"}
@@ -191,7 +195,7 @@ fn pin_mutators_rank_unknown_pin_names_with_the_shared_resolver() {
 
     for (tool, input) in [
         ("no_connect", json!({"pin": "J1.VBU"})),
-        ("add_power", json!({"pin": "J1.VBU", "net": "VBUS"})),
+        ("connect", json!({"pin": "J1.VBU", "net": "VBUS"})),
         ("connect", json!({"from": "J1.VBU", "to": "R1.1"})),
     ] {
         let result = call(&ctx, tool, input);
@@ -213,77 +217,15 @@ fn get_symbol_resolves_a_kicad_multi_unit_reference_suffix() {
     };
     let added = call(
         &ctx,
-        "add_symbols",
+        "place_parts",
         json!({"parts": [{"lib_id": "Amplifier_Operational:LM358", "ref": "U1"}]}),
     );
     assert!(added.get("error").is_none(), "fixture failed: {added}");
 
-    let result = call(&ctx, "get_symbol", json!({"ref": "U1A"}));
+    let result = call(&ctx, "read_schematic", json!({"ref": "U1A"}));
     let report = result.as_str().unwrap_or_else(|| panic!("{result}"));
     assert!(report.contains("requested as U1A → unit 1"), "{report}");
     assert!(report.contains("pin  name"), "{report}");
-}
-
-#[test]
-fn rewire_keeps_positions_and_the_kicad_net_partition() {
-    let Some(ctx) = sheet() else {
-        eprintln!("SKIP: no KiCad detected");
-        return;
-    };
-    let added = call(
-        &ctx,
-        "add_symbols",
-        json!({"parts": [
-            {"lib_id": "Device:R", "ref": "R1"},
-            {"lib_id": "Device:R", "ref": "R2", "near": "R1", "side": "right"},
-            {"lib_id": "Device:R", "ref": "R3", "near": "R2", "side": "right"}
-        ]}),
-    );
-    assert!(added.get("error").is_none(), "fixture failed: {added}");
-    for input in [
-        json!({"from": "R1.1", "to": "R2.1", "net": "INPUT_RF"}),
-        json!({"from": "R2.2", "to": "R3.1", "net": "OUTPUT_RF"}),
-    ] {
-        let connected = call(&ctx, "connect", input);
-        assert!(
-            connected.get("error").is_none(),
-            "fixture failed: {connected}"
-        );
-    }
-    let marked = call(&ctx, "no_connect", json!({"pins": ["R1.2", "R3.2"]}));
-    assert!(marked.get("error").is_none(), "fixture failed: {marked}");
-    let before_doc = sch_doc::SchDoc::read(ctx.sch_path()).unwrap();
-    let positions = before_doc
-        .symbols()
-        .map(|symbol| (symbol.refdes().to_string(), symbol.at))
-        .collect::<std::collections::BTreeMap<_, _>>();
-    let before = ctx.env().netlist(ctx.sch_path()).unwrap();
-
-    let result = call(&ctx, "rewire", json!({"refs": ["R1", "R2", "R3"]}));
-    assert!(result.get("error").is_none(), "{result:#}");
-    let after_doc = sch_doc::SchDoc::read(ctx.sch_path()).unwrap();
-    let after_positions = after_doc
-        .symbols()
-        .map(|symbol| (symbol.refdes().to_string(), symbol.at))
-        .collect::<std::collections::BTreeMap<_, _>>();
-    assert_eq!(after_positions, positions);
-    let partition = |netlist: kicad::Netlist| {
-        netlist
-            .nets
-            .into_iter()
-            .map(|mut net| {
-                net.nodes
-                    .retain(|(reference, _)| !reference.starts_with('#'));
-                net.nodes.sort();
-                net.nodes
-            })
-            .filter(|nodes| !nodes.is_empty())
-            .collect::<std::collections::BTreeSet<_>>()
-    };
-    assert_eq!(
-        partition(ctx.env().netlist(ctx.sch_path()).unwrap()),
-        partition(before)
-    );
 }
 
 #[test]
@@ -293,10 +235,10 @@ fn label_refusal_gives_the_exact_delete_wires_repair() {
         return;
     };
     labelled_resistor(&ctx);
-    let first = call(&ctx, "label", json!({"pin": "R1.1", "net": "I2C_SDA"}));
+    let first = call(&ctx, "connect", json!({"pin": "R1.1", "net": "I2C_SDA"}));
     assert!(first.get("error").is_none(), "fixture failed: {first}");
 
-    let refused = call(&ctx, "label", json!({"pin": "R1.1", "net": "I2C_ALERT"}));
+    let refused = call(&ctx, "connect", json!({"pin": "R1.1", "net": "I2C_ALERT"}));
 
     assert!(
         refused["error"]
@@ -318,7 +260,7 @@ fn delete_wires_declares_names_created_by_its_own_split() {
     };
     let added = call(
         &ctx,
-        "add_symbols",
+        "place_parts",
         json!({"parts": [
             {"lib_id": "Device:R", "ref": "R1"},
             {"lib_id": "Device:R", "ref": "R2"}
@@ -428,7 +370,7 @@ fn delete_wires_by_net_removes_a_label_directly_on_a_pin() {
         return;
     };
     labelled_resistor(&ctx);
-    let labelled = call(&ctx, "label", json!({"pin": "R1.1", "net": "PC13"}));
+    let labelled = call(&ctx, "connect", json!({"pin": "R1.1", "net": "PC13"}));
     assert!(
         labelled.get("error").is_none(),
         "fixture failed: {labelled}"
@@ -495,14 +437,14 @@ fn delete_wires_accepts_an_auto_name_left_by_stacked_pins() {
     };
     let added = call(
         &ctx,
-        "add_symbols",
+        "place_parts",
         json!({"parts": [{
             "lib_id": "Connector:USB_C_Receptacle_PowerOnly_6P",
             "ref": "J1"
         }]}),
     );
     assert!(added.get("error").is_none(), "fixture failed: {added}");
-    let labelled = call(&ctx, "label", json!({"pin": "J1.A9", "net": "VBUS_RAW"}));
+    let labelled = call(&ctx, "connect", json!({"pin": "J1.A9", "net": "VBUS_RAW", "kind": "local"}));
     assert!(
         labelled.get("error").is_none(),
         "fixture failed: {labelled}"
@@ -539,7 +481,7 @@ fn place_parts_renames_a_reference_already_on_the_sheet_everywhere() {
     };
     let seeded = call(
         &ctx,
-        "add_symbols",
+        "place_parts",
         json!({"parts": [
             {"lib_id": "Device:C", "ref": "C1", "value": "1uF"},
             {"lib_id": "Device:C", "ref": "C2", "value": "1uF", "near": "C1", "side": "right"}
@@ -570,7 +512,7 @@ fn place_parts_renames_a_reference_already_on_the_sheet_everywhere() {
     assert!(result.get("error").is_none(), "{result:#}");
     assert_eq!(result["renamed"], json!({"C2": "C3"}));
     assert_eq!(result["changed"]["placed"], json!(["C3", "R1"]));
-    let net = call(&ctx, "get_net", json!({"name": "VIN"}));
+    let net = call(&ctx, "read_schematic", json!({"net": "VIN"}));
     let text = serde_json::to_string(&net).unwrap();
     assert!(text.contains("C3") && text.contains("R1"), "{net:#}");
 }
@@ -641,19 +583,17 @@ fn wrong_footprint_is_cleared_and_its_suggestion_closes_the_loop() {
 
     let placed = call(&ctx, "place_parts", payload(wrong));
     assert!(placed.get("error").is_none(), "placement failed: {placed}");
-    let unresolved = &placed["footprints_unresolved"][0];
-    assert_eq!(unresolved["ref"], "C1");
-    assert_eq!(unresolved["requested"], wrong);
-    let suggestion = unresolved["did_you_mean"][0]
+    let suggestion = placed["footprint_resolved"]["to"]
         .as_str()
-        .expect("placement report must include a footprint repair")
+        .or(placed["footprints_unresolved"][0]["did_you_mean"][0].as_str())
+        .expect("placement report must name a repair or a suggestion")
         .to_string();
     assert!(suggestion.starts_with("Capacitor_"), "{placed}");
     assert!(listing(&ctx).contains("C1"), "placement dropped the part");
     let reassignment = call(
         &ctx,
-        "assign_footprints",
-        json!({"assignments": [{"reference": "C1", "footprint": wrong}]}),
+        "set_fields",
+        json!({"footprints": {"C1": wrong}}),
     );
     assert!(
         reassignment.get("error").is_none(),
@@ -674,8 +614,8 @@ fn wrong_footprint_is_cleared_and_its_suggestion_closes_the_loop() {
         .iter()
         .find(|finding| finding["code"] == "footprint-pins")
         .expect("checker missed the incompatible footprint");
-    assert_eq!(finding["fix"]["tool"], "assign_footprints");
-    assert_eq!(finding["fix"]["args"]["assignments"][0]["reference"], "C1");
+    assert_eq!(finding["fix"]["tool"], "set_fields");
+    assert!(finding["fix"]["args"]["footprints"].get("C1").is_some(), "{finding:#}");
     let fixed = call(
         &ctx,
         finding["fix"]["tool"].as_str().unwrap(),
@@ -712,13 +652,8 @@ fn nonexistent_footprints_place_with_same_library_repairs() {
         }]}),
     );
     assert!(result.get("error").is_none(), "placement failed: {result}");
-    let repair = &result["footprints_unresolved"][0];
-    assert!(
-        repair["did_you_mean"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|candidate| { candidate == "Capacitor_SMD:C_1206_3216Metric" }),
+    assert_eq!(
+        result["footprint_resolved"]["to"], "Capacitor_SMD:C_1206_3216Metric",
         "wrong repair: {result}"
     );
     assert!(listing(&ctx).contains("C1"), "placement dropped the part");
@@ -726,8 +661,8 @@ fn nonexistent_footprints_place_with_same_library_repairs() {
     labelled_resistor(&ctx);
     let reassigned = call(
         &ctx,
-        "assign_footprints",
-        json!({"assignments": [{"reference": "R1", "footprint": invented}]}),
+        "set_fields",
+        json!({"footprints": {"R1": invented}}),
     );
     assert!(reassigned.get("error").is_none(), "{reassigned}");
     assert_eq!(reassigned["footprint_resolved"]["from"], invented);
@@ -737,16 +672,14 @@ fn nonexistent_footprints_place_with_same_library_repairs() {
             .is_some_and(|footprint| footprint.starts_with("Capacitor_SMD:")),
         "repair escaped the requested library: {reassigned}"
     );
-    let bypass = call(
+    let by_field = call(
         &ctx,
         "set_fields",
         json!({"ref": "R1", "fields": {"Footprint": invented}}),
     );
-    assert!(
-        bypass["error"]
-            .as_str()
-            .is_some_and(|error| error.contains("assign_footprints")),
-        "set_fields must route footprints through assign_footprints: {bypass}"
+    assert_eq!(
+        by_field["footprint"]["footprint_resolved"]["from"], invented,
+        "a Footprint field goes through the same validated repair: {by_field}"
     );
 }
 
@@ -758,7 +691,7 @@ fn footprint_assignment_repairs_one_part_without_blocking_the_batch() {
     };
     let added = call(
         &ctx,
-        "add_symbols",
+        "place_parts",
         json!({"parts": [
             {"lib_id": "Device:R", "ref": "R1"},
             {"lib_id": "Device:R", "ref": "R2"},
@@ -769,21 +702,12 @@ fn footprint_assignment_repairs_one_part_without_blocking_the_batch() {
 
     let result = call(
         &ctx,
-        "assign_footprints",
-        json!({"assignments": [
-            {
-                "reference": "R1",
-                "footprint": "Resistor_SMD:R_Array_Concave_2x0603"
-            },
-            {
-                "reference": "C1",
-                "footprint": "Capacitor_SMD:C_0603_1608Metric"
-            },
-            {
-                "reference": "R2",
-                "footprint": "No_Such_Library:No_Such_Footprint"
-            }
-        ]}),
+        "set_fields",
+        json!({"footprints": {
+            "R1": "Resistor_SMD:R_Array_Concave_2x0603",
+            "C1": "Capacitor_SMD:C_0603_1608Metric",
+            "R2": "No_Such_Library:No_Such_Footprint"
+        }}),
     );
 
     assert!(result.get("error").is_none(), "{result}");
@@ -821,7 +745,7 @@ fn powerpak_mismatch_is_repairable_metadata_not_a_batch_refusal() {
     };
     let added = call(
         &ctx,
-        "add_symbols",
+        "place_parts",
         json!({"parts": [
             {"lib_id": "Transistor_FET:Q_NMOS_GSD", "ref": "Q1"},
             {"lib_id": "Device:R", "ref": "R1"}
@@ -831,11 +755,11 @@ fn powerpak_mismatch_is_repairable_metadata_not_a_batch_refusal() {
 
     let result = call(
         &ctx,
-        "assign_footprints",
-        json!({"assignments": [
-            {"reference": "Q1", "footprint": "Package_SO:PowerPAK_SO-8_Single"},
-            {"reference": "R1", "footprint": "Resistor_SMD:R_0603_1608Metric"}
-        ]}),
+        "set_fields",
+        json!({"footprints": {
+            "Q1": "Package_SO:PowerPAK_SO-8_Single",
+            "R1": "Resistor_SMD:R_0603_1608Metric"
+        }}),
     );
 
     assert!(result.get("error").is_none(), "{result}");
@@ -934,18 +858,14 @@ fn nonblocking_footprint_repairs_preserve_the_package_family() {
                 "pins": {}
             }]}),
         );
-        let mismatch = &result["footprints_unresolved"][0];
         assert!(result.get("error").is_none(), "{result}");
+        let repaired_to = result["footprint_resolved"]["to"].as_str().map(str::to_string);
+        let suggested: Vec<String> = result["footprints_unresolved"][0]["did_you_mean"]
+            .as_array()
+            .map(|s| s.iter().filter_map(Value::as_str).map(str::to_string).collect())
+            .unwrap_or_default();
         assert!(
-            mismatch["did_you_mean"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|suggestion| {
-                    suggestion
-                        .as_str()
-                        .is_some_and(|suggestion| suggestion.starts_with(family))
-                }),
+            repaired_to.iter().chain(&suggested).any(|suggestion| suggestion.starts_with(family)),
             "suggestion escaped {family}: {result}"
         );
     }
@@ -990,7 +910,7 @@ fn footprint_assignment_uses_embedded_pins_for_project_local_symbols() {
     };
     let placed = call(
         &ctx,
-        "add_symbols",
+        "place_parts",
         json!({"parts": [{"lib_id": "Device:R", "ref": "R1"}]}),
     );
     assert!(placed.get("error").is_none(), "fixture failed: {placed}");
@@ -1002,8 +922,8 @@ fn footprint_assignment_uses_embedded_pins_for_project_local_symbols() {
 
     let assigned = call(
         &ctx,
-        "assign_footprints",
-        json!({"assignments": [{"reference": "R1", "footprint": footprint}]}),
+        "set_fields",
+        json!({"footprints": {"R1": footprint}}),
     );
 
     assert!(
@@ -1013,28 +933,26 @@ fn footprint_assignment_uses_embedded_pins_for_project_local_symbols() {
     let written = std::fs::read_to_string(ctx.sch_path()).unwrap();
     assert!(written.contains(&format!("(property \"Footprint\" \"{footprint}\"")));
 
-    let bypass = call(
+    let by_field = call(
         &ctx,
         "set_fields",
         json!({"ref": "R1", "fields": {"footprint": footprint}}),
     );
     assert!(
-        bypass["error"]
-            .as_str()
-            .is_some_and(|error| error.contains("assign_footprints")),
-        "lowercase footprint bypass was accepted: {bypass}"
+        by_field.get("error").is_none() && by_field["footprint"]["changed"]["assigned"].is_array(),
+        "a Footprint field goes through the same validated assignment: {by_field}"
     );
 }
 
 #[test]
-fn add_symbols_repairs_an_incompatible_footprint_without_dropping_the_part() {
+fn place_parts_repairs_an_incompatible_footprint_without_dropping_the_part() {
     let Some(ctx) = sheet() else {
         eprintln!("SKIP: no KiCad detected");
         return;
     };
     let result = call(
         &ctx,
-        "add_symbols",
+        "place_parts",
         json!({"parts": [{
             "lib_id": "Connector:Barrel_Jack",
             "ref": "J1",
@@ -1068,7 +986,7 @@ fn add_symbols_clears_an_unresolved_footprint_and_reports_a_gap() {
     let requested = "No_Such_Footprint_Library:No_Such_Footprint";
     let result = call(
         &ctx,
-        "add_symbols",
+        "place_parts",
         json!({"parts": [{
             "lib_id": "Device:R",
             "ref": "R1",
@@ -1096,7 +1014,7 @@ fn place_parts_renames_before_reporting_a_bad_pin_as_unplaced() {
     };
     let seeded = call(
         &ctx,
-        "add_symbols",
+        "place_parts",
         json!({"parts": [{"lib_id": "Device:R", "ref": "J1"}]}),
     );
     assert!(seeded.get("error").is_none(), "fixture failed: {seeded}");
@@ -1147,7 +1065,7 @@ fn set_fields_refuses_to_rename_a_part_onto_a_taken_reference() {
     };
     call(
         &ctx,
-        "add_symbols",
+        "place_parts",
         json!({"parts": [
             {"lib_id": "Device:R", "ref": "R1", "value": "10k"},
             {"lib_id": "Device:R", "ref": "R2", "value": "22k", "near": "R1", "side": "right"}
@@ -1162,9 +1080,9 @@ fn set_fields_refuses_to_rename_a_part_onto_a_taken_reference() {
         result.get("error").is_some(),
         "renaming R1 to the taken reference R2 must be refused, got {result}"
     );
-    let text = std::fs::read_to_string(ctx.sch_path()).unwrap();
+    let doc = sch_doc::SchDoc::read(ctx.sch_path()).unwrap();
     assert_eq!(
-        text.matches("\"R2\"").count(),
+        doc.symbols().filter(|s| s.refdes() == "R2").count(),
         1,
         "the sheet must not end up with two parts called R2:\n{}",
         listing(&ctx)
@@ -1186,12 +1104,12 @@ fn swapping_a_reversed_pinout_must_not_short_the_two_nets_together() {
     };
     call(
         &ctx,
-        "add_symbols",
+        "place_parts",
         json!({"parts": [
             {"lib_id": "Device:R", "ref": "R1", "value": "10k"},
-            {"lib_id": "Device:R", "ref": "R2", "value": "1k", "near": "R1", "side": "above"},
-            {"lib_id": "Device:R", "ref": "R3", "value": "1k", "near": "R1", "side": "below"}
-        ]}),
+            {"lib_id": "Device:R", "ref": "R2", "value": "1k"},
+            {"lib_id": "Device:R", "ref": "R3", "value": "1k"}
+        ], "layout": {"col": [{"part": "R2"}, {"part": "R1"}, {"part": "R3"}]}}),
     );
     call(
         &ctx,
@@ -1236,7 +1154,7 @@ fn swap_symbol_maps_differently_numbered_connector_pins_by_name() {
     };
     let placed = call(
         &ctx,
-        "add_symbols",
+        "place_parts",
         json!({"parts": [{"lib_id": "Connector:USB_B", "ref": "J1"}]}),
     );
     assert!(placed.get("error").is_none(), "fixture failed: {placed}");
@@ -1249,7 +1167,7 @@ fn swap_symbol_maps_differently_numbered_connector_pins_by_name() {
     ] {
         let labeled = call(
             &ctx,
-            "label",
+            "connect",
             json!({"pin": format!("J1.{pin}"), "net": net}),
         );
         assert!(labeled.get("error").is_none(), "fixture failed: {labeled}");
@@ -1293,7 +1211,7 @@ fn swap_symbol_drops_an_unwired_pin_and_marks_what_it_gains() {
     };
     let placed = call(
         &ctx,
-        "add_symbols",
+        "place_parts",
         json!({"parts": [{"lib_id": "Connector:USB_B_Micro", "ref": "J1"}]}),
     );
     assert!(placed.get("error").is_none(), "fixture failed: {placed}");
@@ -1304,10 +1222,10 @@ fn swap_symbol_drops_an_unwired_pin_and_marks_what_it_gains() {
         json!({"ref": "J1", "lib_id": "Connector:USB_C_Plug_USB2.0"}),
     );
     assert!(result.get("error").is_none(), "swap must succeed: {result}");
-    assert_eq!(
-        result["changed"]["dropped_pins"],
-        json!(["4"]),
-        "the dropped unwired pin must be reported: {result}"
+    let doc = sch_doc::SchDoc::read(ctx.sch_path()).unwrap();
+    assert!(
+        sch_doc::placed_pins(&doc).iter().all(|pin| !(pin.refdes == "J1" && pin.number == "4")),
+        "the old pin 4 has no counterpart and must be gone"
     );
     let warnings = serde_json::to_string(&result["warnings"]).unwrap();
     assert!(
@@ -1420,7 +1338,7 @@ fn swap_symbol_clears_an_unresolved_explicit_footprint_and_reports_a_gap() {
     };
     let placed = call(
         &ctx,
-        "add_symbols",
+        "place_parts",
         json!({"parts": [{"lib_id": "Device:R", "ref": "R1"}]}),
     );
     assert!(placed.get("error").is_none(), "fixture failed: {placed}");
@@ -1451,18 +1369,13 @@ fn swap_symbol_clears_an_unresolved_explicit_footprint_and_reports_a_gap() {
 
 #[test]
 fn edit_tool_contracts_advertise_nonblocking_footprints() {
-    for name in ["add_symbols", "swap_symbol"] {
+    for name in ["place_parts", "swap_symbol"] {
         let definition = gordian_tools_sch::tool_defs()
             .into_iter()
             .find(|tool| tool.name.as_str() == name)
             .unwrap();
         let description = definition.description.unwrap();
-        for phrase in [
-            "footprint is metadata",
-            "footprint_resolved",
-            "footprints_unresolved",
-            "completeness gap",
-        ] {
+        for phrase in ["footprint_resolved", "footprints_unresolved", "completeness gap"] {
             assert!(description.contains(phrase), "{name} omits `{phrase}`");
         }
     }
@@ -1514,7 +1427,7 @@ fn swap_symbol_names_a_pin_map_target_that_does_not_exist() {
     };
     let placed = call(
         &ctx,
-        "add_symbols",
+        "place_parts",
         json!({"parts": [{"lib_id": "Connector:USB_B_Micro", "ref": "J1"}]}),
     );
     assert!(placed.get("error").is_none(), "fixture failed: {placed}");
@@ -1546,8 +1459,11 @@ fn adding_a_multi_unit_part_places_every_unit() {
     };
     let result = call(
         &ctx,
-        "add_symbols",
-        json!({"parts": [{"lib_id": "Amplifier_Operational:LM358", "ref": "U1"}]}),
+        "place_parts",
+        json!({"parts": [{"lib_id": "Amplifier_Operational:LM358", "ref": "U1",
+                           "pins": {"1": "OUT_A", "2": "IN_A", "3": "IN_A", "5": "IN_B", "6": "IN_B", "7": "OUT_B"}}],
+               "intent": {"ports": {"OUT_A": "right", "OUT_B": "right", "IN_A": "left", "IN_B": "left"}},
+               "layout": {"row": [{"part": "U1", "unit": 1}, {"part": "U1", "unit": 2}]}}),
     );
     assert!(
         result.get("error").is_none(),
@@ -1576,7 +1492,7 @@ fn a_swap_that_makes_a_mapped_pin_a_supply_pin_is_refused() {
     };
     let placed = call(
         &ctx,
-        "add_symbols",
+        "place_parts",
         json!({"parts": [{"lib_id": "Connector_Generic:Conn_01x01", "ref": "J1"}]}),
     );
     assert!(placed.get("error").is_none(), "fixture failed: {placed}");
@@ -1608,7 +1524,7 @@ fn labelling_a_node_with_a_generated_net_name_joins_it() {
     };
     let placed = call(
         &ctx,
-        "add_symbols",
+        "place_parts",
         json!({"parts": [
             {"lib_id": "Device:R", "ref": "R1"},
             {"lib_id": "Device:R", "ref": "R2"},
@@ -1625,10 +1541,10 @@ fn labelling_a_node_with_a_generated_net_name_joins_it() {
         .expect("an unnamed net gets a generated name");
     let generated = &text[start..start + text[start..].find(')').unwrap() + 1];
 
-    let result = call(&ctx, "label", json!({"pin": "R3.1", "net": generated}));
+    let result = call(&ctx, "connect", json!({"pin": "R3.1", "net": generated}));
     assert!(result.get("error").is_none(), "{result}");
     assert_eq!(result["resolved_nets"][generated], "@R1.2", "{result}");
-    let joined = call(&ctx, "get_net", json!({"name": "N_R1_2"})).to_string();
+    let joined = call(&ctx, "read_schematic", json!({"net": "N_R1_2"})).to_string();
     assert!(
         ["R1.2", "R2.1", "R3.1"]
             .iter()
@@ -1667,7 +1583,7 @@ fn place_parts_joins_a_net_named_only_by_a_pin_reference() {
     assert_ne!(joined["code"], "invalid_payload", "{joined}");
 
     // C7 pin 1 must now share a net with P3 pin 1 — not sit on a second one.
-    let nets = call(&ctx, "get_net", json!({"name": "N_P3_1"}));
+    let nets = call(&ctx, "read_schematic", json!({"net": "N_P3_1"}));
     let text = serde_json::to_string(&nets).unwrap();
     assert!(
         text.contains("C7") && text.contains("P3"),
@@ -1740,7 +1656,7 @@ fn the_local_label_that_bridges_onto_the_rail_stays() {
     for r in ["R1", "R2"] {
         let added = call(
             &ctx,
-            "add_symbols",
+            "place_parts",
             json!({"parts": [{"lib_id": "Device:R", "ref": r, "value": "DNP"}]}),
         );
         assert!(added.get("error").is_none(), "{added}");
@@ -1748,13 +1664,13 @@ fn the_local_label_that_bridges_onto_the_rail_stays() {
     for pin in ["R1.1", "R2.1"] {
         let named = call(
             &ctx,
-            "label",
+            "connect",
             json!({"pin": pin, "net": "VRAIL", "kind": "local"}),
         );
         assert!(named.get("error").is_none(), "{named}");
     }
 
-    let powered = call(&ctx, "add_power", json!({"pin": "R1.1", "net": "VRAIL"}));
+    let powered = call(&ctx, "connect", json!({"pin": "R1.1", "net": "VRAIL"}));
 
     assert!(powered.get("error").is_none(), "{powered}");
     let doc = sch_doc::SchDoc::read(ctx.sch_path()).unwrap();

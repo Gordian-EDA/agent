@@ -55,7 +55,7 @@ fn erc_errors(ctx: &AgentRuntime) -> Vec<String> {
 /// A ground made of rail glyphs alone is `power_pin_not_driven` otherwise, which
 /// is a different finding and would drown out the one under test.
 fn declare_rail(ctx: &AgentRuntime, pin: &str, net: &str) {
-    let flag = call(ctx, "add_power", json!({"pin": pin, "net": net}));
+    let flag = call(ctx, "connect", json!({"pin": pin, "net": net}));
     assert_eq!(
         flag["power_symbol_used"], "power:PWR_FLAG",
         "fixture must flag {net}: {flag}"
@@ -86,7 +86,7 @@ fn apply(ctx: &AgentRuntime, finding: &Value) -> Value {
 fn flagged_regulator(ctx: &AgentRuntime) {
     let added = call(
         ctx,
-        "add_symbols",
+        "place_parts",
         json!({"parts": [
             {"lib_id": "Regulator_Linear:AMS1117-3.3", "ref": "U1"},
             {"lib_id": "Device:R", "ref": "R1"},
@@ -94,10 +94,10 @@ fn flagged_regulator(ctx: &AgentRuntime) {
     );
     assert!(added.get("error").is_none(), "fixture failed: {added}");
     call(ctx, "connect", json!({"from": "U1.2", "to": "R1.1"}));
-    call(ctx, "add_power", json!({"pin": "U1.1", "net": "GND"}));
-    call(ctx, "add_power", json!({"pin": "R1.2", "net": "GND"}));
-    call(ctx, "add_power", json!({"pin": "U1.3", "net": "+5V"}));
-    call(ctx, "add_power", json!({"pin": "U1.2", "net": "+3V3"}));
+    call(ctx, "connect", json!({"pin": "U1.1", "net": "GND"}));
+    call(ctx, "connect", json!({"pin": "R1.2", "net": "GND"}));
+    call(ctx, "connect", json!({"pin": "U1.3", "net": "+5V"}));
+    call(ctx, "connect", json!({"pin": "U1.2", "net": "+3V3"}));
     declare_rail(ctx, "U1.1", "GND");
     declare_rail(ctx, "U1.3", "+5V");
     declare_rail(ctx, "U1.2", "+3V3");
@@ -139,7 +139,7 @@ fn two_real_drivers_keep_a_refusal_and_a_two_call_sequence_that_works() {
     };
     let added = call(
         &ctx,
-        "add_symbols",
+        "place_parts",
         json!({"parts": [
             {"lib_id": "Regulator_Linear:AMS1117-3.3", "ref": "U1"},
             {"lib_id": "Regulator_Linear:AMS1117-3.3", "ref": "U2"},
@@ -157,7 +157,7 @@ fn two_real_drivers_keep_a_refusal_and_a_two_call_sequence_that_works() {
         ("U1.2", "+3V3"),
         ("U2.2", "+3V3"),
     ] {
-        call(&ctx, "add_power", json!({"pin": pin, "net": net}));
+        call(&ctx, "connect", json!({"pin": pin, "net": net}));
     }
     declare_rail(&ctx, "U1.1", "GND");
     declare_rail(&ctx, "U1.3", "+5V");
@@ -214,15 +214,15 @@ fn strand_a_label(ctx: &AgentRuntime, text: &str, uuid: &str) {
 fn wired_pair(ctx: &AgentRuntime) {
     call(
         ctx,
-        "add_symbols",
+        "place_parts",
         json!({"parts": [
             {"lib_id": "Device:R", "ref": "R1"},
             {"lib_id": "Device:R", "ref": "R2"},
         ]}),
     );
     call(ctx, "connect", json!({"from": "R1.2", "to": "R2.1"}));
-    call(ctx, "add_power", json!({"pin": "R1.1", "net": "GND"}));
-    call(ctx, "add_power", json!({"pin": "R2.2", "net": "GND"}));
+    call(ctx, "connect", json!({"pin": "R1.1", "net": "GND"}));
+    call(ctx, "connect", json!({"pin": "R2.2", "net": "GND"}));
     declare_rail(ctx, "R1.1", "GND");
 }
 
@@ -238,7 +238,7 @@ fn a_stranded_label_is_cleared_by_the_fix_its_finding_carries() {
     let before = findings(&ctx);
     let dangling = of_code(&before, "label_dangling")
         .unwrap_or_else(|| panic!("fixture must strand a label: {before:#?}"));
-    assert_eq!(dangling["fix"]["tool"], "delete_labels", "{dangling:#?}");
+    assert_eq!(dangling["fix"]["tool"], "delete_wires", "{dangling:#?}");
 
     let applied = apply(&ctx, dangling);
     assert_eq!(
@@ -260,11 +260,7 @@ fn no_edit_leaves_a_label_touching_nothing_on_the_sheet() {
     wired_pair(&ctx);
     strand_a_label(&ctx, "ORPHAN", "11111111-2222-4333-8444-555555555556");
 
-    let moved = call(
-        &ctx,
-        "move_symbols",
-        json!({"moves": [{"ref": "R2", "to": [80.0, 80.0]}]}),
-    );
+    let moved = call(&ctx, "arrange", json!({"refs": ["R2"]}));
     assert!(moved.get("error").is_none(), "{moved}");
 
     let doc = sch_doc::SchDoc::read(ctx.sch_path()).unwrap();
@@ -290,7 +286,7 @@ fn a_loose_shield_pin_with_no_partner_is_marked_no_connect() {
     wired_pair(&ctx);
     let added = call(
         &ctx,
-        "add_symbols",
+        "place_parts",
         json!({"parts": [
             {"lib_id": "Connector:USB_C_Receptacle_PowerOnly_6P", "ref": "J1"},
         ]}),
@@ -299,7 +295,7 @@ fn a_loose_shield_pin_with_no_partner_is_marked_no_connect() {
     for pin in ["A1", "B1", "A4", "B4"] {
         call(
             &ctx,
-            "add_power",
+            "connect",
             json!({"pin": format!("J1.{pin}"), "net": "GND"}),
         );
     }
@@ -341,15 +337,15 @@ fn an_input_on_a_dead_end_net_is_marked_no_connect() {
     wired_pair(&ctx);
     let added = call(
         &ctx,
-        "add_symbols",
+        "place_parts",
         json!({"parts": [{"lib_id": "Amplifier_Operational:LM358", "ref": "U1"}]}),
     );
     assert!(added.get("error").is_none(), "fixture failed: {added}");
-    call(&ctx, "add_power", json!({"pin": "U1.8", "net": "+5V"}));
+    call(&ctx, "connect", json!({"pin": "U1.8", "net": "+5V"}));
     declare_rail(&ctx, "U1.8", "+5V");
-    call(&ctx, "add_power", json!({"pin": "U1.4", "net": "GND"}));
+    call(&ctx, "connect", json!({"pin": "U1.4", "net": "GND"}));
     call(&ctx, "connect", json!({"from": "U1.1", "to": "U1.2"}));
-    call(&ctx, "label", json!({"pin": "U1.3", "net": "SENSE_IN"}));
+    call(&ctx, "connect", json!({"pin": "U1.3", "net": "SENSE_IN"}));
 
     let before = findings(&ctx);
     let undriven = of_code(&before, "pin_not_driven")

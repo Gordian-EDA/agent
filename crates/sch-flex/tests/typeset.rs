@@ -47,6 +47,7 @@ fn item(refdes: &str, pins: Vec<PinGeom>, nets: &[(&str, &str)]) -> Item {
         unit: 1,
         mirror: false,
         preseeded: false,
+        open: false,
         supports: None,
     }
 }

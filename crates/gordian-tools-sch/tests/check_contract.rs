@@ -80,11 +80,10 @@ fn check_schematic_matches_kicad_warning_count_and_names_each_finding() {
     assert_eq!(
         p1["fix"],
         json!({
-            "tool": "assign_footprints",
-            "args": {"assignments": [{
-                "reference": "P1",
-                "footprint": "TerminalBlock_Altech:Altech_AK300_1x02_P5.00mm_45-Degree"
-            }]}
+            "tool": "set_fields",
+            "args": {"footprints": {
+                "P1": "TerminalBlock_Altech:Altech_AK300_1x02_P5.00mm_45-Degree"
+            }}
         })
     );
     assert_eq!(

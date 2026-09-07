@@ -521,7 +521,7 @@ fn get_net_answers_a_pin_address() {
         ]}),
     );
     assert!(placed.get("error").is_none(), "{placed:#}");
-    let result = call(&ctx, "get_net", json!({"name": "R1.2"}));
+    let result = call(&ctx, "read_schematic", json!({"net": "R1.2"}));
     assert!(result.get("error").is_none(), "{result:#}");
     assert_eq!(result["resolved_from"], "R1.2", "{result:#}");
     assert_eq!(result["name"], "Net-(R1-Pad2)", "{result:#}");

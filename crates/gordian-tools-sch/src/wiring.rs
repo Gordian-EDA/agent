@@ -10,7 +10,6 @@ use sch_doc::{LabelKind, SchDoc, connect, placed_pins};
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
 
-use crate::place::{Occupancy, snap_point};
 use crate::refs::{self, Target};
 use crate::session::{Allow, Edit, is_auto, symbol_source};
 
@@ -74,10 +73,16 @@ fn connect_one(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     // net", which is what `label` does. Answering it with an argument complaint cost
     // the campaign runs a request every time they asked.
     if input.get("to").is_none()
-        && let Some(pin) = input.get("from").and_then(Value::as_str)
+        && let Some(pin) = input.get("from").or(input.get("pin")).and_then(Value::as_str)
         && let Some(net) = input.get("net").and_then(Value::as_str)
     {
-        return label_tool(json!({ "pin": pin, "net": net }), ctx);
+        // A rail is drawn as a rail symbol on the pin; any other name, or any name the
+        // call gives a label `kind` for, is a label.
+        let rail = circuit_graph::netclass::is_power_net(net) || net.starts_with('+') || input.get("lib_id").is_some();
+        if rail && input.get("kind").is_none() {
+            return add_power(json!({ "pin": pin, "net": net, "lib_id": input.get("lib_id") }), ctx);
+        }
+        return label_tool(json!({ "pin": pin, "net": net, "kind": input.get("kind") }), ctx);
     }
     let mut edit = Edit::open(ctx)?;
     let (from, to) = match (input.get("from"), input.get("to")) {
@@ -510,7 +515,7 @@ pub(crate) fn outward_pose(doc: &SchDoc, at: Point2) -> sch_doc::Pose {
 }
 
 /// Name the net at one pin.
-pub fn label_tool(input: Value, ctx: &AgentRuntime) -> Result<Value> {
+fn label_tool(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let (Some(spec), Some(original_net)) = (
         input.get("pin").and_then(Value::as_str),
         input.get("net").and_then(Value::as_str),
@@ -623,7 +628,7 @@ fn input_bbox(input: &Value) -> std::result::Result<Option<Rect>, String> {
 }
 
 /// Remove labels selected by name, UUID, region or the net they name.
-pub fn delete_labels(input: Value, ctx: &AgentRuntime) -> Result<Value> {
+fn delete_labels(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let names = string_list(&input, "names");
     let uuids = string_list(&input, "uuids");
     let bbox = match input_bbox(&input) {
@@ -633,7 +638,7 @@ pub fn delete_labels(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let wanted_net = input.get("net").and_then(Value::as_str);
     if names.is_empty() && uuids.is_empty() && bbox.is_none() && wanted_net.is_none() {
         return Ok(json!({
-            "error": "delete_labels needs one of `names`, `uuids`, `bbox` or `net`",
+            "error": "deleting labels needs one of `names`, `uuids`, `bbox` or `net`",
         }));
     }
     let mut edit = Edit::open(ctx)?;
@@ -864,7 +869,7 @@ fn power_candidates(net: &str) -> Vec<String> {
 }
 
 /// Drop a rail symbol onto a loose pin, or a PWR_FLAG onto an existing rail.
-pub fn add_power(input: Value, ctx: &AgentRuntime) -> Result<Value> {
+fn add_power(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let (Some(net), Some(spec)) = (
         input.get("net").and_then(Value::as_str),
         input.get("pin").and_then(Value::as_str),
@@ -1231,7 +1236,18 @@ fn drawing_on_net(doc: &SchDoc, net: &str) -> NetDrawing {
 }
 
 /// Remove drawn wires by pin, by net, by the parts they touch, or by UUID.
+/// Remove wires — or, with `names` or `labels: true`, the LABELS the selectors match
+/// instead: `names` are label texts, and `net`, `bbox`, `uuids` then pick labels.
 pub fn delete_wires(input: Value, ctx: &AgentRuntime) -> Result<Value> {
+    let labels = input.get("labels").and_then(Value::as_bool).unwrap_or(false)
+        || !string_list(&input, "names").is_empty();
+    match labels {
+        true => delete_labels(input, ctx),
+        false => delete_wires_only(input, ctx),
+    }
+}
+
+fn delete_wires_only(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let mut edit = Edit::open(ctx)?;
     let live = connect::scene(&edit.doc);
     let wanted_bbox = match input_bbox(&input) {
@@ -1283,7 +1299,7 @@ pub fn delete_wires(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         && wanted_bbox.is_none()
     {
         return Ok(json!({
-            "error": "delete_wires needs one of `pins`, `net`, `refs`, `uuids` or `bbox`",
+            "error": "delete_wires needs one of `pins`, `net`, `refs`, `uuids`, `bbox` or `names`",
         }));
     }
     let pins = sch_doc::placed_pins(&edit.doc);
@@ -1430,30 +1446,4 @@ pub fn delete_wires(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         ),
     };
     edit.commit(json!(changed), allow)
-}
-
-/// A free spot near a symbol, used by the tools that place something beside an
-/// anchor. Exposed here so `edit` and `wiring` agree on the rule.
-pub(crate) fn spot_beside(
-    doc: &SchDoc,
-    anchor: &str,
-    side: crate::place::Side,
-    w: f64,
-    h: f64,
-    skip: &[String],
-) -> Option<(Point2, bool)> {
-    let symbol = doc.symbol_by_ref(anchor)?;
-    let body = crate::place::extent(doc, symbol)?;
-    Occupancy::skipping(doc, skip).beside(body, side, w, h)
-}
-
-/// A free spot anywhere, preferring near `from`.
-pub(crate) fn spot_near(
-    doc: &SchDoc,
-    from: Point2,
-    w: f64,
-    h: f64,
-    skip: &[String],
-) -> Option<Point2> {
-    Occupancy::skipping(doc, skip).nearest_free(snap_point(from), w, h)
 }

@@ -783,7 +783,7 @@ pub fn unresolvable_footprints(
                 malformed,
                 message: format!(
                     "{reference}: {} — use search_footprints{{symbol: \"{}\", query: \
-                     \"{}\"}} for a real `Library:Name`, then assign_footprints",
+                     \"{}\"}} for a real `Library:Name`, then set_fields({{footprints}})",
                     kicad_footprint::unknown_footprint_message(footprint, &problem),
                     component.part,
                     footprint,

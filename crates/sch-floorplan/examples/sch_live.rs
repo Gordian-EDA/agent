@@ -47,10 +47,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let report = live::arrange(&env, &mut doc, &selection(rest)?, None, None)?;
             (serde_json::to_string_pretty(&report)?, report.committed)
         }
-        "rewire" => {
-            let report = live::rewire(&env, &mut doc, &selection(rest)?)?;
-            (serde_json::to_string_pretty(&report)?, report.committed)
-        }
         other => return Err(format!("unknown command `{other}`").into()),
     };
 

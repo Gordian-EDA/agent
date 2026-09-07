@@ -199,6 +199,7 @@ mod tests {
             unit: 1,
             mirror: false,
             preseeded: false,
+            open: false,
             supports: None,
         }
     }

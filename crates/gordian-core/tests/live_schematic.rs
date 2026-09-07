@@ -82,11 +82,7 @@ async fn moving_a_symbol_preserves_connectivity() {
                 {"ref": "#PWR2", "part": "power:GND", "pins": {"1": "GND"}}
             ]}),
         ),
-        tool_call(
-            "t2",
-            "move_symbols",
-            json!({"moves": [{"ref": "R2", "by": [0.0, 25.4]}]}),
-        ),
+        tool_call("t2", "arrange", json!({"refs": ["R2"]})),
         tool_call("t3", "check_schematic", json!({})),
         final_text("done"),
         final_text("done"),

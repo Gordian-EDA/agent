@@ -22,13 +22,13 @@ Work one sub-circuit at a time, 3-12 parts: `place_parts({parts, layout, name?, 
 
 `dangling` pins are reported, not fatal: close each with `connect`, or declare board I/O in `intent.ports`. Write `"@R1.2"` as a net to join that pin's net. `completeness.gaps` (from `check_schematic`) are advisory, skip them for deliberately minimal designs; to take one, place the parts and re-block them. When the request fixes the part list, add nothing: pass `strict: true` (no gaps) and drive `netlist_fidelity.matches` true.
 
-Unknown or pad-incompatible footprints go to `footprints_unresolved` (repair with one `assign_footprints`); they never block PCB work: `sync_board` stages them.
+Unknown or pad-incompatible footprints go to `footprints_unresolved` (repair with one `set_fields({footprints})`); they never block PCB work: `sync_board` stages them.
 
-For an existing schematic: `read_schematic()` once, perform only the requested mutators, verify the edit from their `changed`/`connectivity`/`unconnected` reports, then `check_schematic()`. `set_fields`, `set_flags`, `swap_symbol`, `add_symbols`, `remove_symbols`, `label`, `no_connect`, `add_power`, `delete_wires` edit; `arrange({refs|bbox|block, layout})` re-places and redraws the selection's wires from the netlist.
+For an existing schematic: `read_schematic()` once, perform only the requested mutators, verify the edit from their `changed`/`connectivity`/`unconnected` reports, then `check_schematic()`. `set_fields`, `swap_symbol`, `remove_symbols`, `connect`, `no_connect`, `delete_wires` edit; `arrange({refs|bbox|block, layout})` re-places and redraws the selection's wires from the netlist.
 
-To replace a sub-circuit use `remove_region` (or `remove_symbols` and `delete_labels`), then place the new one; leave no remnants.
+To replace a sub-circuit use `remove_symbols({block})`, then place the new one; leave no remnants.
 
-Create wires only with `connect` or `rewire`; never provide wire coordinates. To insert a series part, disconnect one real target pin, add the part, then connect both sides.
+Create wires only with `connect`; never provide wire coordinates. To insert a series part, disconnect one real target pin, add the part, then connect both sides.
 
 `check_schematic` reports every finding. Fix ERC errors in what you touched; mention unrelated ones and leave them. Once it reports 0 ERC errors, review the sheet, then proceed to the board in the SAME turn. Address ERC warnings only after the board is routed and DRC-clean.
 
@@ -62,7 +62,6 @@ mod tests {
             "place_parts",
             "read_schematic",
             "arrange",
-            "rewire",
             "connect",
             "check_schematic",
         ] {

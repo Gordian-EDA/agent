@@ -36,7 +36,7 @@ fn call(ctx: &AgentRuntime, name: &str, input: Value) -> Value {
 }
 
 fn add(ctx: &AgentRuntime, parts: Value) {
-    let added = call(ctx, "add_symbols", json!({ "parts": parts }));
+    let added = call(ctx, "place_parts", json!({ "parts": parts }));
     assert!(added.get("error").is_none(), "fixture failed: {added}");
 }
 
@@ -168,7 +168,7 @@ fn no_connect_refuses_a_pin_on_a_label_joined_net() {
         ]),
     );
     for pin in ["R1.2", "R2.1"] {
-        let named = call(&ctx, "label", json!({"pin": pin, "net": "SWDIO"}));
+        let named = call(&ctx, "connect", json!({"pin": pin, "net": "SWDIO"}));
         assert!(named.get("error").is_none(), "fixture failed: {named}");
     }
 
@@ -208,7 +208,7 @@ fn naming_a_pin_that_already_has_an_authored_net_refuses() {
         return;
     };
     add(&ctx, json!([{"lib_id": "Device:R", "ref": "R1"}]));
-    let named = call(&ctx, "label", json!({"pin": "R1.2", "net": "USB_D-"}));
+    let named = call(&ctx, "connect", json!({"pin": "R1.2", "net": "USB_D-"}));
     assert!(named.get("error").is_none(), "fixture failed: {named}");
 
     let result = call(&ctx, "connect", json!({"from": "R1.2", "net": "USB_D+"}));
@@ -353,7 +353,7 @@ fn a_marker_cannot_hide_the_net_a_pin_is_already_on() {
         ]),
     );
     for pin in ["R5.1", "R6.2"] {
-        let named = call(&ctx, "label", json!({"pin": pin, "net": "USB_D-"}));
+        let named = call(&ctx, "connect", json!({"pin": pin, "net": "USB_D-"}));
         assert!(named.get("error").is_none(), "fixture failed: {named}");
     }
     // The marker place_parts leaves behind on a pin it thought was spare.
@@ -402,7 +402,7 @@ fn a_later_label_adopts_the_nets_existing_scope() {
     );
     let global = call(
         &ctx,
-        "label",
+        "connect",
         json!({"pin": "R1.1", "net": "SWDIO", "kind": "global"}),
     );
     assert!(global.get("error").is_none(), "fixture failed: {global}");
@@ -436,7 +436,7 @@ fn add_power_clears_the_marker_on_the_pin_it_feeds() {
     add(&ctx, json!([{"lib_id": "Device:R", "ref": "R1"}]));
     call(&ctx, "no_connect", json!({"pins": ["R1.2"]}));
 
-    let powered = call(&ctx, "add_power", json!({"pin": "R1.2", "net": "GND"}));
+    let powered = call(&ctx, "connect", json!({"pin": "R1.2", "net": "GND"}));
 
     assert!(powered.get("error").is_none(), "{powered}");
     assert!(

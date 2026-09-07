@@ -41,6 +41,9 @@ pub struct Item {
     /// neighbours, lifted off a real sheet), so seeding must leave `at`/`angle` alone.
     /// Every whole-sheet path builds items at the origin with this clear.
     pub preseeded: bool,
+    /// Placed with no pin map at all: its unwired pins stay OPEN for a later `connect`
+    /// instead of being marked no-connect, and every unit of it is drawn.
+    pub open: bool,
     /// The refdes this part was SYNTHESIZED to support — the parent of a `decouple`
     /// cap. Such a part exists only because the sugar expanded, so its author never saw
     /// it and could not have given it a place in the layout tree; the typesetter seats it

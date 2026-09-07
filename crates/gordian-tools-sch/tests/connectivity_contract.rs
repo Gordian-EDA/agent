@@ -40,15 +40,15 @@ fn add_and_swap_report_realized_connectivity() {
     };
     let added = tool(
         &ctx,
-        "add_symbols",
+        "place_parts",
         json!({"parts": [{"lib_id": "Device:R", "ref": "R5", "value": "10k"}]}),
     );
-    assert_success("add_symbols", &added);
+    assert_success("place_parts", &added);
     assert_eq!(added["connectivity"], json!(["R5:"]));
     assert_eq!(added["unconnected"], json!(["R5.1", "R5.2"]));
     assert_eq!(
         added["text"],
-        json!("ADDED  R5\nCONNECTIVITY\nR5:\nUNCONNECTED  R5.1 R5.2")
+        json!("PLACED  R5\nCONNECTIVITY\nR5:\nUNCONNECTED  R5.1 R5.2")
     );
 
     let swapped = tool(
@@ -143,8 +143,8 @@ fn connector_swap_reflows_fields_without_moving_the_part() {
         "the swap must preserve every net: {delta:?}"
     );
 
-    let powered = tool(&ctx, "add_power", json!({"net": "GND", "pin": "P1.3"}));
-    assert_success("add_power", &powered);
+    let powered = tool(&ctx, "connect", json!({"net": "GND", "pin": "P1.3"}));
+    assert_success("connect", &powered);
     let after_doc = sch_doc::SchDoc::read(ctx.sch_path()).unwrap();
     assert_eq!(after_doc.symbol_by_ref("P1").unwrap().at, before_at);
     let added: Vec<_> = collisions(&ctx).difference(&before).cloned().collect();

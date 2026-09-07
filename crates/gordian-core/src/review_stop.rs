@@ -15,7 +15,7 @@
 //! rather than a stopping heuristic. All three are in-band like the thrash guard:
 //!
 //! - **at its best** — a FIRST review of [`BAND`] or better closes the loop then
-//!   and there: `arrange` / `move_symbols` / `rewire` are refused for the rest of
+//!   and there: `arrange` / `arrange_blocks` are refused for the rest of
 //!   the subturn and the result says to finish and report that mean. Not even one
 //!   targeted fix: none of the five runs that tried above 7 came out ahead.
 //! - **still failing** — under [`BAND`] the loop iterates, since that is where
@@ -46,7 +46,7 @@ const FLAT_LIMIT: usize = 3;
 
 /// The layout edits that only make sense while the review loop is open.
 fn is_layout_edit(tool: &str) -> bool {
-    matches!(tool, "arrange" | "move_symbols" | "rewire")
+    matches!(tool, "arrange" | "arrange_blocks")
 }
 
 /// One subturn's review trajectory.
@@ -121,7 +121,7 @@ impl ReviewProgress {
                 "The sheet is at its best: it reads {mean} on its first review, and in the last \
                  suite no sheet that read {BAND} or better improved on its first read — every one \
                  that was edited again ended lower. Finish and report {mean}. Do not arrange, \
-                 move or rewire anything: those calls will be refused."
+                 re-arrange anything: those calls will be refused."
             ));
         }
         if improved {
@@ -133,7 +133,7 @@ impl ReviewProgress {
                 "This review did not beat the best mean of {best} this turn (it read {mean}), \
                  which means the last edit hurt: do not arrange again, finish. Report {best} as \
                  the final mean and do not edit the sheet after the review you finish on. Further \
-                 arrange, move_symbols and rewire calls will be refused."
+                 arrange and arrange_blocks calls will be refused."
             ));
         }
         if self.flat < FLAT_LIMIT {
@@ -143,7 +143,7 @@ impl ReviewProgress {
         Some(format!(
             "{FLAT_LIMIT} reviews in a row have failed to beat {best} and the sheet is still \
              under {BAND}: re-arranging is not finding the composition this circuit wants. \
-             Finish and report {best}; further arrange, move_symbols and rewire calls will be \
+             Finish and report {best}; further arrange and arrange_blocks calls will be \
              refused."
         ))
     }
@@ -193,8 +193,7 @@ mod tests {
         assert!(notice.contains("at its best"), "{notice}");
         assert!(notice.contains("6.86"), "{notice}");
         assert!(progress.refusal("arrange").is_some());
-        assert!(progress.refusal("move_symbols").is_some());
-        assert!(progress.refusal("rewire").is_some());
+        assert!(progress.refusal("arrange_blocks").is_some());
         assert!(progress.refusal("place_parts").is_none(), "new work is free");
     }
 
@@ -204,7 +203,7 @@ mod tests {
     fn a_high_first_review_gets_no_targeted_fix_either() {
         let mut progress = ReviewProgress::default();
         assert!(progress.observe(&review(8.43)).is_some());
-        assert!(progress.refusal("move_symbols").is_some());
+        assert!(progress.refusal("arrange").is_some());
     }
 
     /// Under the band the loop iterates, and closes on the first read that fails

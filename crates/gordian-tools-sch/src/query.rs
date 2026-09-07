@@ -386,6 +386,12 @@ fn write_wrapped_net(out: &mut String, net: &Net, name_width: usize) {
 
 /// The whole sheet as sorted, grouped parts followed by connectivity.
 pub fn read_schematic(input: Value, ctx: &AgentRuntime) -> Result<Value> {
+    if let Some(reference) = input.get("ref").and_then(Value::as_str) {
+        return get_symbol(json!({"ref": reference}), ctx);
+    }
+    if let Some(net) = input.get("net").and_then(Value::as_str) {
+        return get_net(json!({"name": net}), ctx);
+    }
     let (doc, netlist) = Edit::read(ctx)?;
     let full = input.get("detail").and_then(Value::as_str) == Some("full");
     let region = input
@@ -532,7 +538,7 @@ fn write_symbol_pin_table(
 }
 
 /// One symbol in full as aligned plain text.
-pub fn get_symbol(input: Value, ctx: &AgentRuntime) -> Result<Value> {
+fn get_symbol(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let Some(refdes) = input.get("ref").and_then(Value::as_str) else {
         return Ok(json!({ "error": "get_symbol needs `ref`" }));
     };
@@ -692,7 +698,7 @@ fn placed_net_pin<'a>(placed: &'a [PlacedPin], pin: &PinRef) -> Option<&'a Place
 }
 
 /// One net as an aligned pin listing with its naming source.
-pub fn get_net(input: Value, ctx: &AgentRuntime) -> Result<Value> {
+fn get_net(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let Some(name) = input.get("name").and_then(Value::as_str) else {
         return Ok(json!({ "error": "get_net needs `name`" }));
     };

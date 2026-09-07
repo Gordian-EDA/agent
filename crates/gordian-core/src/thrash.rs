@@ -140,10 +140,9 @@ enum Family {
 
 fn family(tool: &str) -> Option<Family> {
     Some(match tool {
-        "connect" | "label" | "no_connect" | "add_power" | "delete_wires" | "delete_labels"
-        | "rewire" => Family::Wiring,
-        "place_parts" | "add_symbols" => Family::Add,
-        "remove_symbols" | "remove_region" => Family::Remove,
+        "connect" | "no_connect" | "delete_wires" => Family::Wiring,
+        "place_parts" => Family::Add,
+        "remove_symbols" => Family::Remove,
         // Layout and field edits neither strand parts nor change connectivity,
         // and re-arranging one block after touching another is ordinary work.
         _ => return None,
@@ -200,10 +199,10 @@ mod tests {
     #[test]
     fn a_third_identical_edit_is_refused_and_the_first_two_are_not() {
         let mut guard = ThrashGuard::default();
-        let args = json!({"net": "+3V3", "pin": "U2.2"});
-        assert!(guard.intervene("label", &args).is_none());
-        assert!(guard.intervene("label", &args).is_none());
-        let refusal = guard.intervene("label", &args).expect("third is refused");
+        let args = json!({"net": "+3V3", "from": "U2.2"});
+        assert!(guard.intervene("connect", &args).is_none());
+        assert!(guard.intervene("connect", &args).is_none());
+        let refusal = guard.intervene("connect", &args).expect("third is refused");
         assert_eq!(refusal["error"], "edit loop refused");
         assert!(refusal["note"].as_str().unwrap().contains("U2.2"));
     }
@@ -228,8 +227,8 @@ mod tests {
     fn different_pins_keep_their_own_budgets() {
         let mut guard = ThrashGuard::default();
         for pin in ["U2.1", "U2.2", "U2.3", "U2.4", "U2.5", "U2.6"] {
-            let args = json!({"pin": pin, "net": "GND"});
-            assert!(guard.intervene("label", &args).is_none(), "{pin}");
+            let args = json!({"from": pin, "net": "GND"});
+            assert!(guard.intervene("connect", &args).is_none(), "{pin}");
         }
     }
 
@@ -347,7 +346,7 @@ mod tests {
         for pin in ["U1.1", "U2.8", "U3.4", "C1.2", "C2.2", "R1.1"] {
             assert!(
                 guard
-                    .intervene("add_power", &json!({"net": "GND", "pin": pin}))
+                    .intervene("connect", &json!({"net": "GND", "from": pin}))
                     .is_none(),
                 "{pin}"
             );

@@ -11,13 +11,11 @@ use sch_doc::{LabelKind, Pose, SchDoc, body_rect, placed_pins};
 use serde::Serialize;
 use serde_json::{Value, json};
 
-use crate::place::{Occupancy, Side, snap, snap_point};
 use crate::refs;
 use crate::session::{Allow, Edit, symbol_source};
-use crate::wiring::{spot_beside, spot_near};
 
 #[derive(Debug)]
-enum FootprintRepair {
+pub(crate) enum FootprintRepair {
     Keep,
     Resolve {
         from: String,
@@ -30,15 +28,15 @@ enum FootprintRepair {
 }
 
 #[derive(Debug, Serialize)]
-struct ResolvedFootprint {
+pub(crate) struct ResolvedFootprint {
     #[serde(rename = "ref")]
-    refdes: String,
-    from: String,
-    to: String,
+    pub(crate) refdes: String,
+    pub(crate) from: String,
+    pub(crate) to: String,
 }
 
 #[derive(Debug, Serialize)]
-struct UnresolvedFootprint {
+pub(crate) struct UnresolvedFootprint {
     #[serde(rename = "ref")]
     refdes: String,
     requested: String,
@@ -46,13 +44,16 @@ struct UnresolvedFootprint {
 }
 
 /// Turn footprint lookup and pad compatibility into repairable metadata.
-fn footprint_repair(
+/// The repair a PLACEMENT applies unasked: it stays within the package family that
+/// was named, and a footprint it cannot repair is cleared with in-family suggestions.
+pub(crate) fn footprint_repair(
     ctx: &AgentRuntime,
     reference: &str,
     symbol: &str,
     requested: &str,
+    ignored_pins: &BTreeSet<String>,
 ) -> Result<FootprintRepair> {
-    footprint_repair_ignoring(ctx, reference, symbol, requested, &BTreeSet::new())
+    footprint_repair_ignoring(ctx, reference, symbol, requested, ignored_pins, true)
 }
 
 fn footprint_repair_ignoring(
@@ -61,6 +62,7 @@ fn footprint_repair_ignoring(
     symbol: &str,
     requested: &str,
     ignored_pins: &BTreeSet<String>,
+    within_family: bool,
 ) -> Result<FootprintRepair> {
     if let Some(did_you_mean) =
         gordian_runtime::footprint_compat::unresolved_footprint_suggestions(ctx, symbol, requested)?
@@ -110,21 +112,62 @@ fn footprint_repair_ignoring(
     else {
         return Ok(FootprintRepair::Keep);
     };
+    // A repair is applied unasked only within the package family that was named: a
+    // 3.5 mm jack may become another 3.5 mm jack, never a 6.35 mm one. An explicit
+    // assignment takes any compatible repair.
     if mismatch.suggestion_compatible
-        && let Some(to) = mismatch.suggestion
+        && let Some(to) = mismatch.suggestion.clone()
+        && (!within_family || same_footprint_family(requested, &to))
     {
         return Ok(FootprintRepair::Resolve {
             from: requested.to_owned(),
             to,
         });
     }
+    let mut did_you_mean: Vec<String> = mismatch.suggestion.into_iter().collect();
+    if within_family {
+        let family = requested.split_once(':').map_or(requested, |(_, name)| name);
+        let family: String = family.split('_').take(2).collect::<Vec<_>>().join("_");
+        let library = requested.split_once(':').map_or("", |(library, _)| library);
+        let query = format!("{library}:{family}");
+        // The family's own footprints, compatible ones first: when none of them fits
+        // the symbol, the nearest name is still what a person reaches for next.
+        let mut hits = gordian_runtime::footprint_compat::search_compatible_footprints(ctx, symbol, Some(&query), 8)?;
+        hits.sort_by_key(|hit| !hit.compatible);
+        for hit in hits {
+            if same_footprint_family(requested, &hit.lib_id) && hit.lib_id != requested && !did_you_mean.contains(&hit.lib_id) {
+                did_you_mean.push(hit.lib_id);
+            }
+        }
+        did_you_mean.truncate(4);
+    }
     Ok(FootprintRepair::Clear {
         requested: requested.to_owned(),
-        did_you_mean: mismatch.suggestion.into_iter().collect(),
+        did_you_mean,
     })
 }
 
-fn attach_footprint_repairs(
+/// Same library, same leading name token, and the same physical size when both
+/// names state one in millimetres: `Jack_3.5mm_CUI…` and `Jack_3.5mm_Switronic…` are
+/// one family, `Jack_6.35mm_…` is another, while `R_Array_…_2x0603` may become
+/// `R_0603_…` since neither states a length.
+fn same_footprint_family(a: &str, b: &str) -> bool {
+    let split = |id: &str| {
+        let (library, name) = id.split_once(':').unwrap_or(("", id));
+        let mut tokens = name.split('_');
+        let head = tokens.next().unwrap_or_default().to_string();
+        let size = name
+            .split('_')
+            .find(|t| t.ends_with("mm") && t.trim_end_matches("mm").chars().all(|c| c.is_ascii_digit() || c == '.'))
+            .map(str::to_string);
+        (library.to_string(), head, size)
+    };
+    let (la, ha, sa) = split(a);
+    let (lb, hb, sb) = split(b);
+    la == lb && ha == hb && (sa.is_none() || sb.is_none() || sa == sb)
+}
+
+pub(crate) fn attach_footprint_repairs(
     value: &mut Value,
     resolved: &[ResolvedFootprint],
     unresolved: &[UnresolvedFootprint],
@@ -150,7 +193,7 @@ fn attach_footprint_repairs(
                 "kind": "footprint_unresolved",
                 "refdes": issue.refdes,
                 "suggestion": format!(
-                    "assign a compatible footprint to {} with assign_footprints",
+                    "assign a compatible footprint to {} with set_fields({{footprints}})",
                     issue.refdes
                 ),
             }))
@@ -190,15 +233,6 @@ fn normalized_pin_name(name: &str) -> String {
 fn pin_names_match(left: &str, right: &str) -> bool {
     let left = normalized_pin_name(left);
     !left.is_empty() && left == normalized_pin_name(right)
-}
-
-fn valid_refdes(refdes: &str) -> bool {
-    let refdes = refdes.strip_prefix('#').unwrap_or(refdes);
-    let letters = refdes.chars().take_while(char::is_ascii_alphabetic).count();
-    letters > 0
-        && letters < refdes.len()
-        && refdes[..letters].chars().all(|ch| ch.is_ascii_alphabetic())
-        && refdes[letters..].chars().all(|ch| ch.is_ascii_digit())
 }
 
 fn swapped_field_collisions(doc: &SchDoc, refdes: &str) -> usize {
@@ -494,327 +528,6 @@ fn combined_extent(doc: &SchDoc, uuids: &[String]) -> Option<Rect> {
     Rect::bounding(&corners)
 }
 
-fn stack_units(doc: &mut SchDoc, uuids: &[String]) -> Result<(), sch_doc::Error> {
-    let mut previous_bottom = None;
-    for uuid in uuids {
-        let Some(symbol) = doc.symbol(uuid) else {
-            continue;
-        };
-        let at = symbol.at;
-        let Some(extent) = crate::place::extent(doc, symbol) else {
-            continue;
-        };
-        if let Some(bottom) = previous_bottom {
-            let y = at.y + bottom + crate::place::CLEARANCE - extent.min_y;
-            doc.move_symbol(uuid, at.x, snap(y))?;
-        }
-        previous_bottom = doc
-            .symbol(uuid)
-            .and_then(|symbol| crate::place::extent(doc, symbol))
-            .map(|extent| extent.max_y);
-    }
-    Ok(())
-}
-
-/// Where a part should end up, and which of its two anchors the answer is
-/// about.
-///
-/// `to` names the symbol's own position — the one `read_schematic` prints, so
-/// a coordinate read back and written out again lands where it started. A
-/// free-space search instead yields where the part's *extent* should be
-/// centred, which is the only way to reason about clearance.
-enum Destination {
-    Origin(Point2),
-    Centre(Point2),
-}
-
-impl Destination {
-    /// The symbol position this destination implies for a part whose extent is
-    /// currently centred at `centre` while its origin sits at `origin`.
-    fn origin_for(&self, origin: Point2, centre: Point2) -> Point2 {
-        match self {
-            Destination::Origin(at) => *at,
-            Destination::Centre(at) => {
-                Point2::new(origin.x + at.x - centre.x, origin.y + at.y - centre.y)
-            }
-        }
-    }
-}
-
-fn destination(
-    doc: &SchDoc,
-    input: &Value,
-    w: f64,
-    h: f64,
-    skip: &[String],
-) -> Result<(Destination, Option<String>), String> {
-    if let Some(at) = input.get("to").and_then(Value::as_array) {
-        let n: Vec<f64> = at.iter().filter_map(Value::as_f64).collect();
-        if n.len() != 2 {
-            return Err("`to` must be [x, y] in mm".to_string());
-        }
-        return Ok((
-            Destination::Origin(snap_point(Point2::new(n[0], n[1]))),
-            None,
-        ));
-    }
-    if let Some(anchor) = input.get("near").and_then(Value::as_str) {
-        if doc.symbol_by_ref(anchor).is_none() {
-            return Err(format!("no symbol `{anchor}` to place near"));
-        }
-        let side = input
-            .get("side")
-            .and_then(Value::as_str)
-            .and_then(Side::parse)
-            .unwrap_or(Side::Right);
-        let (at, on_side) =
-            spot_beside(doc, anchor, side, w, h, skip).ok_or("no free space on the sheet")?;
-        let note = (!on_side)
-            .then(|| format!("nothing fits {side:?} {anchor}; used the nearest free spot"));
-        return Ok((Destination::Centre(at), note));
-    }
-    let content = Occupancy::skipping(doc, skip).content();
-    spot_near(
-        doc,
-        Point2::new(content.max_x + 12.7, content.center().y),
-        w,
-        h,
-        skip,
-    )
-    .map(|at| (Destination::Centre(at), None))
-    .ok_or_else(|| "no free space on the sheet".to_string())
-}
-
-/// Place one part and report where it landed.
-///
-/// The part is parked far off-sheet first: its extents are only knowable once
-/// its definition is embedded, and both the orientation and the destination
-/// depend on them.
-fn place_one(
-    edit: &mut Edit,
-    spec: &Value,
-    source: &sch_doc::SymbolSource,
-) -> Result<Value, String> {
-    let Some(lib_id) = spec.get("lib_id").and_then(Value::as_str) else {
-        return Err("every part needs `lib_id` (e.g. Device:R)".to_string());
-    };
-    if spec.get("at").is_some() {
-        return Err(
-            "add_symbols chooses collision-free placement; use `near`+`side`, or use move_symbols({moves:[{ref,to}]}) only when the user explicitly requested coordinates"
-                .to_string(),
-        );
-    }
-    let value = spec.get("value").and_then(Value::as_str).unwrap_or("");
-    if let Some(refdes) = spec.get("ref").and_then(Value::as_str)
-        && edit.doc.symbol_by_ref(refdes).is_some()
-    {
-        return Err(format!("`{refdes}` is already on the sheet"));
-    }
-    if let Some(refdes) = spec.get("ref").and_then(Value::as_str)
-        && !valid_refdes(refdes)
-    {
-        return Err(format!(
-            "`{refdes}` is not a valid reference; use letters followed by digits, such as R12, U3, or #PWR01"
-        ));
-    }
-    let park = Pose::new(5000.0, 5000.0, 0.0);
-    let provisional = next_refdes(edit, "ZZ");
-    let uuids = edit
-        .doc
-        .add_symbol(lib_id, &provisional, value, park, source)
-        .map_err(|error| format!("could not place {lib_id}: {error}"))?;
-    let refdes = match spec.get("ref").and_then(Value::as_str) {
-        Some(refdes) => refdes.to_string(),
-        None => {
-            let prefix = edit
-                .doc
-                .reference_prefix(lib_id)
-                .unwrap_or_else(|| "U".to_string());
-            next_refdes(edit, &prefix)
-        }
-    };
-    let fail = |error: sch_doc::Error| error.to_string();
-    edit.doc.set_reference(&uuids, &refdes).map_err(fail)?;
-    if let Some(footprint) = spec.get("footprint").and_then(Value::as_str) {
-        for uuid in &uuids {
-            edit.doc
-                .set_field(uuid, "Footprint", footprint)
-                .map_err(fail)?;
-        }
-    }
-    let side = spec
-        .get("side")
-        .and_then(Value::as_str)
-        .and_then(Side::parse);
-    let rot = match spec.get("rot").and_then(Value::as_f64) {
-        Some(rot) => {
-            let rot = geom::snap_quadrant(rot);
-            for uuid in &uuids {
-                edit.doc
-                    .set_symbol_orientation(uuid, rot, sch_doc::Mirror::None)
-                    .map_err(fail)?;
-            }
-            rot
-        }
-        None if spec.get("near").is_some() && uuids.len() == 1 => {
-            crate::place::facing_rotation(&mut edit.doc, &refdes, side.unwrap_or(Side::Right))
-        }
-        None => 0.0,
-    };
-    stack_units(&mut edit.doc, &uuids).map_err(fail)?;
-
-    let body = combined_extent(&edit.doc, &uuids);
-    let (w, h) = body.map_or((10.0, 10.0), |r| (r.width(), r.height()));
-    let skip = uuids.clone();
-    let (want, mut note) = destination(&edit.doc, spec, w, h, &skip)?;
-    let centre = body.map_or(park.point(), |r| r.center());
-    let mut at = snap_point(want.origin_for(park.point(), centre));
-    // An explicit `at` is a request, not a licence to land on someone else's
-    // drawing: slide clear, and say so.
-    let offset = Point2::new(centre.x - park.x, centre.y - park.y);
-    let landing = Point2::new(at.x + offset.x, at.y + offset.y);
-    let occupancy = Occupancy::skipping(&edit.doc, &skip);
-    if !occupancy.free(landing, w, h) {
-        let free = occupancy
-            .nearest_free(landing, w, h)
-            .ok_or("no free space on the sheet")?;
-        at = snap_point(Point2::new(free.x - offset.x, free.y - offset.y));
-        note = Some(format!(
-            "({:.2},{:.2}) was occupied; moved clear",
-            landing.x, landing.y
-        ));
-    }
-    let delta = Point2::new(at.x - park.x, at.y - park.y);
-    let before_move = sch_drag::Sheet::of(&edit.doc);
-    let moves = uuids
-        .iter()
-        .filter_map(|uuid| {
-            let symbol = edit.doc.symbol(uuid)?;
-            Some((
-                uuid.clone(),
-                sch_drag::Placement::new(
-                    Point2::new(snap(symbol.at.x + delta.x), snap(symbol.at.y + delta.y)),
-                    symbol.at.rot,
-                    symbol.mirror,
-                ),
-            ))
-        })
-        .collect::<Vec<_>>();
-    sch_drag::drag_many(&mut edit.doc, &moves, &before_move)
-        .map_err(|error| format!("could not seat {refdes}: {error}"))?;
-
-    let units: Vec<Value> = uuids
-        .iter()
-        .filter_map(|uuid| edit.doc.symbol(uuid))
-        .map(|symbol| json!({ "unit": symbol.unit, "at": [symbol.at.x, symbol.at.y] }))
-        .collect();
-    let placed = units
-        .first()
-        .and_then(|unit| unit.get("at"))
-        .cloned()
-        .unwrap_or_else(|| json!([at.x, at.y]));
-    let mut report = json!({
-        "ref": refdes,
-        "lib_id": lib_id,
-        "at": placed,
-        "units": units,
-        "rot": rot,
-    });
-    if let Some(note) = note {
-        report["note"] = json!(note);
-    }
-    Ok(report)
-}
-
-/// Place a block of new parts in one transaction, each clear of the last.
-pub fn add_symbols(input: Value, ctx: &AgentRuntime) -> Result<Value> {
-    let mut specs: Vec<Value> = input
-        .get("parts")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
-    if specs.is_empty() {
-        return Ok(json!({ "error": "add_symbols needs a non-empty `parts` list" }));
-    }
-    let mut footprint_repairs = Vec::new();
-    for (index, spec) in specs.iter_mut().enumerate() {
-        let Some(symbol) = spec.get("lib_id").and_then(Value::as_str) else {
-            continue;
-        };
-        let Some(footprint) = spec.get("footprint").and_then(Value::as_str) else {
-            continue;
-        };
-        let reference = spec.get("ref").and_then(Value::as_str).unwrap_or(symbol);
-        let repair = footprint_repair(ctx, reference, symbol, footprint)?;
-        match &repair {
-            FootprintRepair::Keep => {}
-            FootprintRepair::Resolve { to, .. } => {
-                spec["footprint"] = json!(to);
-            }
-            FootprintRepair::Clear { .. } => {
-                spec.as_object_mut()
-                    .expect("an add_symbols part is an object")
-                    .remove("footprint");
-            }
-        }
-        footprint_repairs.push((index, repair));
-    }
-    let mut edit = Edit::open(ctx)?;
-    let source = symbol_source(ctx);
-    let mut allow = Allow::nothing().creating();
-    let mut placed = Vec::new();
-    for spec in &specs {
-        match place_one(&mut edit, spec, &source) {
-            Ok(report) => {
-                if let Some(refdes) = report["ref"].as_str() {
-                    allow = allow.part(refdes);
-                }
-                placed.push(report);
-            }
-            // A half-placed block is worse than none: report the first
-            // failure and write nothing.
-            Err(error) => return Ok(json!({ "error": error, "placed": placed })),
-        }
-    }
-    let refs = placed
-        .iter()
-        .filter_map(|part| part["ref"].as_str().map(str::to_owned))
-        .collect::<Vec<_>>();
-    let mut result = edit.commit(json!({ "placed": placed }), allow)?;
-    if result.get("error").is_none() {
-        crate::session::attach_connectivity(
-            &mut result,
-            ctx,
-            refs.clone(),
-            &format!("ADDED  {}", refs.join(" ")),
-        )?;
-        let mut resolved = Vec::new();
-        let mut unresolved = Vec::new();
-        for (index, repair) in footprint_repairs {
-            let refdes = placed[index]["ref"]
-                .as_str()
-                .expect("a placed symbol has a reference")
-                .to_owned();
-            match repair {
-                FootprintRepair::Keep => {}
-                FootprintRepair::Resolve { from, to } => {
-                    resolved.push(ResolvedFootprint { refdes, from, to });
-                }
-                FootprintRepair::Clear {
-                    requested,
-                    did_you_mean,
-                } => unresolved.push(UnresolvedFootprint {
-                    refdes,
-                    requested,
-                    did_you_mean,
-                }),
-            }
-        }
-        attach_footprint_repairs(&mut result, &resolved, &unresolved);
-    }
-    Ok(result)
-}
-
 #[derive(Debug, Default, Serialize)]
 struct RemovedItems {
     symbols: usize,
@@ -1036,7 +749,10 @@ pub fn remove_symbols(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         })
         .unwrap_or_default();
     if targets.is_empty() {
-        return Ok(json!({ "error": "remove_symbols needs `refs`" }));
+        if input.get("block").is_some() || input.get("bbox").is_some() {
+            return remove_region(input, ctx);
+        }
+        return Ok(json!({ "error": "remove_symbols needs `refs`, `block` or `bbox`" }));
     }
     let mut edit = Edit::open(ctx)?;
     let original = edit.doc.clone();
@@ -1166,7 +882,7 @@ fn region_bounds(input: &Value, doc: &SchDoc) -> std::result::Result<RegionSelec
     let block = input.get("block").and_then(Value::as_str);
     match (bbox, block) {
         (None, None) => Err(json!({
-            "error": "remove_region needs `bbox`, `block`, or both",
+            "error": "remove_symbols needs `refs`, `bbox` or `block`",
         })),
         (Some(bounds), None) => Ok(RegionSelection {
             bounds,
@@ -1253,7 +969,7 @@ fn merge_refusal(delta: &sch_doc::NetDelta) -> Option<String> {
 
 /// Remove a rectangular or named functional region, cutting crossing wires at
 /// its boundary and reporting the surviving ends.
-pub fn remove_region(input: Value, ctx: &AgentRuntime) -> Result<Value> {
+fn remove_region(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let mut edit = Edit::open(ctx)?;
     let selection = match region_bounds(&input, &edit.doc) {
         Ok(selection) => selection,
@@ -1590,316 +1306,48 @@ fn stranded_labels(doc: &SchDoc, points: &[Point2]) -> Vec<String> {
         .collect()
 }
 
-/// How far a move may slide to clear an obstacle and still be the move that
-/// was asked for: 20 grid steps, about 25 mm.
-const NUDGE_RINGS: i32 = 20;
-
-/// Apply a `rot`/`mirror` to a symbol, returning the rotation it now carries.
-///
-/// A drag may turn a part to meet its connections without replacing it.
-fn orient(doc: &mut SchDoc, uuid: &str, step: &Value) -> Result<Option<f64>> {
-    let rot = step.get("rot").and_then(Value::as_f64);
-    let mirror = step.get("mirror").and_then(Value::as_str);
-    if rot.is_none() && mirror.is_none() {
-        return Ok(None);
-    }
-    let current = doc
-        .symbol(uuid)
-        .map_or((0.0, sch_doc::Mirror::None), |s| (s.at.rot, s.mirror));
-    let mirror = match mirror {
-        Some("x") => sch_doc::Mirror::X,
-        Some("y") => sch_doc::Mirror::Y,
-        Some(_) => sch_doc::Mirror::None,
-        None => current.1,
-    };
-    let rot = rot.map_or(current.0, geom::snap_quadrant);
-    doc.set_symbol_orientation(uuid, rot, mirror)?;
-    Ok(Some(rot))
-}
-
-/// `1, 2` — the unit numbers of a multi-unit part, for an error message.
-fn list(units: &[(u32, String)]) -> String {
-    units
-        .iter()
-        .map(|(unit, _)| unit.to_string())
-        .collect::<Vec<_>>()
-        .join(", ")
-}
-
-/// Move parts, sliding clear of anything already in the way.
-pub fn move_symbols(input: Value, ctx: &AgentRuntime) -> Result<Value> {
-    let moves: Vec<Value> = input
-        .get("moves")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
-    if moves.is_empty() {
-        return Ok(json!({ "error": "move_symbols needs `moves`" }));
-    }
-    let mut edit = Edit::open(ctx)?;
-    let mut planning = edit.doc.clone();
-    let all: Vec<String> = moves
-        .iter()
-        .filter_map(|m| m.get("ref").and_then(Value::as_str).map(str::to_string))
-        .collect();
-    if all.len() != moves.len() {
-        return Ok(json!({ "error": "every move needs a `ref`" }));
-    }
-    let mut placed = Vec::new();
-    let mut drag_moves = Vec::new();
-    let mut turn_moves = Vec::new();
-    let mut post_drag_turns = Vec::new();
-    // A part still waiting its turn is not an obstacle to the one being placed;
-    // one already placed in this batch is.
-    let mut pending: Vec<String> = moves
-        .iter()
-        .filter_map(|step| {
-            let refdes = step.get("ref")?.as_str()?;
-            let units = refs::units(&planning, refdes);
-            let wanted = step.get("unit").and_then(Value::as_u64);
-            match (units.as_slice(), wanted) {
-                ([(_, uuid)], _) => Some(uuid.clone()),
-                (many, Some(unit)) => many
-                    .iter()
-                    .find(|(candidate, _)| u64::from(*candidate) == unit)
-                    .map(|(_, uuid)| uuid.clone()),
-                _ => None,
-            }
-        })
-        .collect();
-    for step in &moves {
-        let refdes = step["ref"].as_str().unwrap_or_default().to_string();
-        if ["to", "by", "near", "rot", "mirror"]
-            .iter()
-            .all(|key| step.get(key).is_none())
-        {
-            return Ok(json!({
-                "error": format!("the move of {refdes} does nothing — give `to`, `by`, `near`+`side`, `rot` or `mirror`"),
-            }));
-        }
-        // The units of one part sit in different places, so a move — unlike a
-        // value or a swap — has to say which one it means.
-        let units = refs::units(&planning, &refdes);
-        let wanted = step.get("unit").and_then(Value::as_u64);
-        let uuid = match (units.as_slice(), wanted) {
-            ([], _) => {
-                return Ok(json!({ "error": format!("no symbol `{refdes}` on the sheet") }));
-            }
-            ([(_, uuid)], _) => uuid.clone(),
-            (many, Some(want)) => match many.iter().find(|(unit, _)| u64::from(*unit) == want) {
-                Some((_, uuid)) => uuid.clone(),
-                None => {
-                    return Ok(json!({
-                        "error": format!("{refdes} has no unit {want}; it has {}", list(many)),
-                    }));
-                }
-            },
-            (many, None) => {
-                return Ok(json!({
-                    "error": format!(
-                        "{refdes} is a {}-unit part whose units sit apart; add `unit` to say \
-                         which one to move — it has {}",
-                        many.len(), list(many)
-                    ),
-                }));
-            }
-        };
-        if planning.symbol(&uuid).is_none() {
-            return Ok(json!({ "error": format!("no symbol `{refdes}` on the sheet") }));
-        }
-        let staying = ["to", "by", "near"]
-            .iter()
-            .all(|key| step.get(key).is_none());
-        let explicit_turn = step.get("turn_in_place").and_then(Value::as_bool) == Some(true);
-        let before_pose = planning
-            .symbol(&uuid)
-            .map(|symbol| sch_drag::Placement::new(symbol.at.point(), symbol.at.rot, symbol.mirror))
-            .expect("the symbol was just resolved");
-        let turn_target = if staying {
-            let mut trial = planning.clone();
-            let turned = orient(&mut trial, &uuid, step)?;
-            trial.symbol(&uuid).map(|symbol| {
-                (
-                    turned,
-                    sch_drag::Placement::new(symbol.at.point(), symbol.at.rot, symbol.mirror),
-                )
-            })
-        } else {
-            None
-        };
-        let (turned, turn_in_place) = match turn_target {
-            Some((turned, target)) => match sch_drag::turn_in_place(&mut planning, &uuid, target) {
-                Ok(_) => (turned, Some(target)),
-                Err(error) if explicit_turn => {
-                    return Ok(json!({
-                        "error": format!(
-                            "turn_in_place for {refdes} was refused ({error}); nothing was moved"
-                        ),
-                    }));
-                }
-                Err(_) => (orient(&mut planning, &uuid, step)?, None),
-            },
-            None => (orient(&mut planning, &uuid, step)?, None),
-        };
-        let symbol = match planning.symbol(&uuid) {
-            Some(symbol) => symbol,
-            None => return Ok(json!({ "error": format!("no symbol `{refdes}` on the sheet") })),
-        };
-        let origin = symbol.at.point();
-        let body = crate::place::extent(&planning, symbol);
-        let (w, h) = body.map_or((10.0, 10.0), |r| (r.width(), r.height()));
-        let centre = body.map_or(origin, |r| r.center());
-        let want = if staying {
-            Destination::Origin(origin)
-        } else if let Some(by) = step.get("by").and_then(Value::as_array) {
-            let n: Vec<f64> = by.iter().filter_map(Value::as_f64).collect();
-            if n.len() != 2 {
-                return Ok(json!({ "error": "`by` must be [dx, dy] in mm" }));
-            }
-            Destination::Centre(Point2::new(centre.x + n[0], centre.y + n[1]))
-        } else {
-            match destination(&planning, step, w, h, &pending) {
-                Ok((want, _)) => want,
-                Err(error) => return Ok(json!({ "error": error })),
-            }
-        };
-        let mut at = if turn_in_place.is_some() {
-            origin
-        } else {
-            snap_point(want.origin_for(origin, centre))
-        };
-        // Clearance is about the extent, which sits `centre - origin` away.
-        let offset = Point2::new(centre.x - origin.x, centre.y - origin.y);
-        let landing = Point2::new(at.x + offset.x, at.y + offset.y);
-        let occupancy = Occupancy::skipping(&planning, &pending);
-        let mut nudge = None;
-        if turn_in_place.is_none() && !occupancy.free(landing, w, h) {
-            // The spot the caller picked is taken, but the intent — put this
-            // part about here — still holds: slide to the nearest grid spot
-            // that fits and say where it went.
-            let Some(free) = occupancy.nearest_free_within(landing, w, h, NUDGE_RINGS) else {
-                return Ok(json!({
-                    "error": format!(
-                        "nothing within {:.0} mm of ({:.2},{:.2}) has room for {refdes}; \
-                         nothing was moved",
-                        NUDGE_RINGS as f64 * 1.27, at.x, at.y
-                    ),
-                }));
-            };
-            at = snap_point(Point2::new(free.x - offset.x, free.y - offset.y));
-            nudge = Some([at.x, at.y]);
-        }
-        planning.move_symbol(&uuid, at.x, at.y)?;
-        let symbol = planning
-            .symbol(&uuid)
-            .expect("a planned move keeps its symbol");
-        let target = sch_drag::Placement::new(symbol.at.point(), symbol.at.rot, symbol.mirror);
-        if turn_in_place.is_some() {
-            turn_moves.push((placed.len(), uuid.clone(), refdes.clone(), target));
-        } else if explicit_turn {
-            drag_moves.push((
-                uuid.clone(),
-                sch_drag::Placement::new(target.at, before_pose.rot, before_pose.mirror),
-            ));
-            post_drag_turns.push((placed.len(), uuid.clone(), refdes.clone(), target));
-        } else {
-            drag_moves.push((uuid.clone(), target));
-        }
-        pending.retain(|pending_uuid| *pending_uuid != uuid);
-        let mut report = json!({ "ref": refdes, "at": [at.x, at.y] });
-        if let Some(to) = nudge {
-            report["nudged_to"] = json!(to);
-        }
-        if let Some(rot) = turned {
-            report["rot"] = json!(rot);
-        }
-        placed.push(report);
-    }
-    let moved: Vec<String> = placed
-        .iter()
-        .filter_map(|entry| entry.get("ref").and_then(Value::as_str))
-        .map(str::to_owned)
-        .collect();
-    let touched = refs::nets_touching(edit.before(), &moved);
-    let mut allow = Allow::nothing().nets(touched);
-    for (index, uuid, refdes, target) in turn_moves {
-        let turn = sch_drag::turn_in_place(&mut edit.doc, &uuid, target).map_err(|error| {
-            anyhow::anyhow!("planned turn_in_place for {refdes} failed: {error}")
-        })?;
-        let nets: Vec<String> = turn
-            .pins_swapped
-            .iter()
-            .map(|(_, net)| net.clone())
-            .collect();
-        allow = allow.joining_nets(nets).part(refdes);
-        placed[index]["turned_in_place"] = json!(true);
-        placed[index]["pins_swapped"] = json!(turn.pins_swapped);
-    }
-    let before = sch_drag::Sheet::of(&edit.doc);
-    let drag = match sch_drag::drag_many(&mut edit.doc, &drag_moves, &before) {
-        Ok((report, _)) => report,
-        Err(error) => {
-            let symbols = all.join(", ");
-            let detail = match error {
-                sch_drag::DragError::Truthfulness(nets) => format!(
-                    "dragging {symbols} would change net{} {}; try a small 1.27 mm nudge away from other pins or wires",
-                    if nets.len() == 1 { "" } else { "s" },
-                    nets.join(", ")
-                ),
-                other => format!(
-                    "dragging {symbols} was refused ({other}); try a small 1.27 mm nudge away from other pins or wires"
-                ),
-            };
-            return Ok(json!({ "error": format!("refused: {detail}; nothing was moved") }));
-        }
-    };
-    for (index, uuid, refdes, target) in post_drag_turns {
-        let turn = sch_drag::turn_in_place(&mut edit.doc, &uuid, target).map_err(|error| {
-            anyhow::anyhow!("planned turn_in_place for {refdes} failed after its drag: {error}")
-        })?;
-        let nets = turn
-            .pins_swapped
-            .iter()
-            .map(|(_, net)| net.clone())
-            .collect::<Vec<_>>();
-        allow = allow.joining_nets(nets).part(refdes);
-        placed[index]["dragged"] = json!(true);
-        placed[index]["turned_in_place"] = json!(true);
-        placed[index]["pins_swapped"] = json!(turn.pins_swapped);
-    }
-    let placement = if drag.labels_added == 0 && drag.crossings_added == 0 {
-        "connections preserved as clean wire routes; any nudged_to coordinate is final"
-    } else {
-        "connections preserved; review labels_added/crossings_added and batch-nudge the moved parts if either is nonzero"
-    };
-    edit.commit(
-        json!({
-            "moved": placed,
-            "redrawn_segments": drag.redrawn_segments,
-            "labels_added": drag.labels_added,
-            "crossings_added": drag.crossings_added,
-            "placement": placement,
-        }),
-        allow,
-    )
-}
 
 /// Set or clear a part's properties.
 pub fn set_fields(input: Value, ctx: &AgentRuntime) -> Result<Value> {
-    let (Some(refdes), Some(fields)) = (
-        input.get("ref").and_then(Value::as_str),
-        input.get("fields").and_then(Value::as_object),
-    ) else {
-        return Ok(json!({ "error": "set_fields needs `ref` and `fields`" }));
-    };
-    if fields
-        .keys()
-        .any(|name| name.eq_ignore_ascii_case("Footprint"))
-    {
-        return Ok(json!({
-            "error": "set_fields does not set Footprint; use assign_footprints so symbol compatibility is validated",
-        }));
+    // `footprints` is the many-part form; a `Footprint` field on one part goes the
+    // same validated way; `dnp` / `in_bom` are the part's flags.
+    if let Some(footprints) = input.get("footprints").and_then(Value::as_object) {
+        let assignments: Vec<Value> = footprints
+            .iter()
+            .map(|(reference, footprint)| json!({"reference": reference, "footprint": footprint}))
+            .collect();
+        return assign_footprints(json!({"assignments": assignments}), ctx);
     }
+    let Some(refdes) = input.get("ref").and_then(Value::as_str) else {
+        return Ok(json!({ "error": "set_fields needs `ref` with `fields`, `dnp` or `in_bom`, or `footprints`" }));
+    };
+    let mut fields = input.get("fields").and_then(Value::as_object).cloned().unwrap_or_default();
+    let mut out = serde_json::Map::new();
+    if let Some(key) = fields.keys().find(|k| k.eq_ignore_ascii_case("Footprint")).cloned() {
+        let footprint = fields.remove(&key);
+        let assigned = match footprint.as_ref().and_then(Value::as_str) {
+            Some(footprint) => assign_footprints(json!({"assignments": [{"reference": refdes, "footprint": footprint}]}), ctx)?,
+            None => return Ok(json!({ "error": "a Footprint is set to a KiCAD Lib:Name, not cleared here" })),
+        };
+        if assigned.get("error").is_some() {
+            return Ok(assigned);
+        }
+        out.insert("footprint".into(), assigned);
+    }
+    if input.get("dnp").is_some() || input.get("in_bom").is_some() {
+        let flags = set_flags(json!({"ref": refdes, "dnp": input.get("dnp"), "in_bom": input.get("in_bom")}), ctx)?;
+        if flags.get("error").is_some() {
+            return Ok(flags);
+        }
+        out.insert("flags".into(), flags);
+    }
+    if fields.is_empty() {
+        return Ok(match out.len() {
+            0 => json!({ "error": "set_fields needs `fields`, `dnp` or `in_bom` for the part" }),
+            _ => Value::Object(out),
+        });
+    }
+    let fields = &fields;
     let mut edit = Edit::open(ctx)?;
     // Address the symbol by UUID: setting `Reference` renames it, and every
     // later field in the same call would then be looking for a part that is
@@ -1955,7 +1403,7 @@ pub fn set_fields(input: Value, ctx: &AgentRuntime) -> Result<Value> {
 }
 
 /// Set a validated batch of footprint fields without changing connectivity.
-pub fn assign_footprints(input: Value, ctx: &AgentRuntime) -> Result<Value> {
+fn assign_footprints(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let Some(assignments) = input.get("assignments").and_then(Value::as_array) else {
         return Ok(json!({ "error": "assign_footprints needs a non-empty `assignments` array" }));
     };
@@ -2013,7 +1461,7 @@ pub fn assign_footprints(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             .or_else(|| ctx.index().ok()?.symbol(&symbol))
             .is_some();
         let repair = if installed {
-            footprint_repair_ignoring(ctx, reference, &symbol, footprint, &ignored_pins)?
+            footprint_repair_ignoring(ctx, reference, &symbol, footprint, &ignored_pins, false)?
         } else {
             let pin_numbers = placed_pins(&edit.doc)
                 .into_iter()
@@ -2077,7 +1525,7 @@ pub fn assign_footprints(input: Value, ctx: &AgentRuntime) -> Result<Value> {
 }
 
 /// Set a part's build attributes.
-pub fn set_flags(input: Value, ctx: &AgentRuntime) -> Result<Value> {
+fn set_flags(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let Some(refdes) = input.get("ref").and_then(Value::as_str) else {
         return Ok(json!({ "error": "set_flags needs `ref`" }));
     };
@@ -2295,7 +1743,7 @@ pub fn swap_symbol(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         });
     let footprint_repair = selected_footprint
         .as_deref()
-        .map(|footprint| footprint_repair(ctx, refdes, lib_id, footprint))
+        .map(|footprint| footprint_repair(ctx, refdes, lib_id, footprint, &BTreeSet::new()))
         .transpose()?;
     if let Some(text) = input.get("value").and_then(Value::as_str) {
         for (_, uuid) in &units {
@@ -2466,19 +1914,9 @@ pub fn swap_symbol(input: Value, ctx: &AgentRuntime) -> Result<Value> {
 
 #[cfg(test)]
 mod tests {
-    use super::{pin_names_match, valid_refdes};
+    use super::pin_names_match;
 
     /// Tool-created references use KiCad's letter-prefix and numeric-suffix form.
-    #[test]
-    fn reference_validation_rejects_descriptive_names() {
-        for valid in ["R12", "U3", "#PWR01"] {
-            assert!(valid_refdes(valid), "{valid}");
-        }
-        for invalid in ["D_NEW2", "R", "12", ""] {
-            assert!(!valid_refdes(invalid), "{invalid}");
-        }
-    }
-
     #[test]
     fn pin_name_matching_ignores_case_and_presentation_punctuation() {
         assert!(pin_names_match("~RESET", "r_e-s-e_t"));

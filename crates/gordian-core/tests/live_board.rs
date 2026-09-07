@@ -128,8 +128,8 @@ fn sync_board_creates_then_edits_a_board_without_disturbing_it() {
     // ── a footprint swap touches that part alone ────────────────────────────
     tool(
         &ctx,
-        "assign_footprints",
-        json!({"assignments": [{"reference": "R1", "footprint": R0603}]}),
+        "set_fields",
+        json!({"footprints": {"R1": R0603}}),
     );
     let swapped = tool(&ctx, "sync_board", json!({}));
     assert_eq!(refs(&swapped, "footprint_changed"), ["R1"]);
@@ -180,8 +180,8 @@ fn sync_board_retracts_copper_from_two_retargeted_pads() {
         "place_parts",
         json!({ "block": "ten-part-route", "parts": parts }),
     );
-    tool(&ctx, "label", json!({ "pin": "R4.2", "net": "N4" }));
-    tool(&ctx, "label", json!({ "pin": "R5.2", "net": "N5" }));
+    tool(&ctx, "connect", json!({ "pin": "R4.2", "net": "N4" }));
+    tool(&ctx, "connect", json!({ "pin": "R5.2", "net": "N5" }));
     tool(
         &ctx,
         "sync_board",
@@ -192,17 +192,32 @@ fn sync_board_retracts_copper_from_two_retargeted_pads() {
     assert_eq!(routed["routed"], json!("9/9"), "{routed:#}");
     let before = kicad_board::read_snapshot(&ctx.pcb_path()).unwrap();
 
-    let rotation = sch_doc::SchDoc::read(ctx.sch_path())
-        .unwrap()
-        .symbol_by_ref("R5")
-        .unwrap()
-        .at
-        .rot;
-    tool(
-        &ctx,
-        "move_symbols",
-        json!({ "moves": [{ "ref": "R5", "turn_in_place": true, "rot": (rotation + 180.0).rem_euclid(360.0) }] }),
-    );
+    // A half turn in place: R5's two pins exchange positions, so they exchange
+    // nets, and no wire moves — the edit a person makes with the R key in KiCAD.
+    let source = std::fs::read_to_string(ctx.sch_path()).unwrap();
+    let turned = source
+        .split("\n\t(symbol\n")
+        .map(|block| {
+            if !block.contains("\"Reference\" \"R5\"") {
+                return block.to_string();
+            }
+            let at = block.find("(at ").expect("a symbol has a pose");
+            let end = block[at..].find(')').expect("a pose closes") + at;
+            let fields: Vec<&str> = block[at + 4..end].split_whitespace().collect();
+            let rot: f64 = fields[2].parse().unwrap();
+            format!(
+                "{}(at {} {} {}){}",
+                &block[..at],
+                fields[0],
+                fields[1],
+                (rot + 180.0).rem_euclid(360.0),
+                &block[end + 1..]
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n\t(symbol\n");
+    assert_ne!(turned, source, "R5 must be on the sheet");
+    std::fs::write(ctx.sch_path(), turned).unwrap();
     let synced = tool(&ctx, "sync_board", json!({}));
 
     assert_eq!(

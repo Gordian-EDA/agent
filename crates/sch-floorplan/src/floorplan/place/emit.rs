@@ -359,7 +359,7 @@ pub fn build_writer(
         .flatten()
         .map(|(i, num)| (items[*i].refdes.as_str(), num.as_str()));
     w.declare_connected(env, wired)?;
-    for it in items {
+    for it in items.iter().filter(|it| !it.open) {
         for (num, _name, net) in &it.pins {
             if net.is_none() {
                 w.add_no_connect(env, &it.refdes, num)?;
@@ -472,7 +472,17 @@ pub(crate) fn gather(env: &KicadInstallation, design: &Design) -> io::Result<Vec
             // to the old behaviour. Without this, only unit 1's pins ever reach the
             // netlist (the power pins and unit B silently vanish).
             let pin_unit: Vec<u8> = geom.pins.iter().map(|p| p.unit.max(1)).collect();
-            let units = used_symbol_units(comp, &geom, &meta);
+            // A part placed with no pin map at all is placed whole, to be wired later.
+            let open = comp.pins.is_empty() && comp.units.values().all(|u| u.is_empty());
+            let units = match open {
+                true => {
+                    let mut every: Vec<u8> = pin_unit.clone();
+                    every.sort_unstable();
+                    every.dedup();
+                    every
+                }
+                false => used_symbol_units(comp, &geom, &meta),
+            };
             for (k, &u) in units.iter().enumerate() {
                 let unit_pins: Vec<(String, String, Option<String>)> = pins
                     .iter()
@@ -495,6 +505,7 @@ pub(crate) fn gather(env: &KicadInstallation, design: &Design) -> io::Result<Vec
                     unit: u,
                     mirror: false,
                     preseeded: false,
+                    open,
                     supports: match &comp.origin {
                         Origin::Synthesized { parent, .. } => Some(parent.clone()),
                         Origin::Authored => None,

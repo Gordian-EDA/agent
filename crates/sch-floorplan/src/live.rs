@@ -686,31 +686,16 @@ pub fn arrange(
 ) -> Result<ArrangeReport> {
     let selection = selection.clone();
     panic_isolated_edit(env, doc, move |env, doc| {
-        rearrange_inner(&env, doc, &selection, intent, layout, true)
+        rearrange_inner(&env, doc, &selection, intent, layout)
     })
 }
 
-/// Redraw `selection`'s wiring where it stands, moving nothing.
-pub fn rewire(
-    env: &KicadInstallation,
-    doc: &mut SchDoc,
-    selection: &Selection,
-) -> Result<ArrangeReport> {
-    let selection = selection.clone();
-    panic_isolated_edit(env, doc, move |env, doc| {
-        rearrange_inner(&env, doc, &selection, None, None, false)
-        },
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
 fn rearrange_inner(
     env: &KicadInstallation,
     doc: &mut SchDoc,
     selection: &Selection,
     intent: Option<sch_check::Intent>,
     layout: Option<sch_model::tree::Tree>,
-    replace: bool,
 ) -> Result<ArrangeReport> {
     let chosen = selection.resolve(doc);
     let (before, design, boundary, interior) = live_phase("lower", chosen.len(), 0, || {
@@ -811,7 +796,7 @@ fn rearrange_inner(
             (net.drawn().to_string(), side)
         })
         .collect();
-    let (placed, mut ir, typeset_warnings) = if replace {
+    let (placed, mut ir, typeset_warnings) = {
         let out = live_phase("place", movable.len(), before.nets.len(), || {
             region_arrange(RegionProblem::new(
                 env,
@@ -822,8 +807,6 @@ fn rearrange_inner(
             ))
         });
         (posed(movable, &out.poses), out.ir, out.warnings)
-    } else {
-        (movable, ir, Vec::new())
     };
     ir.ports.extend(boundary_ports);
     let (mut redrawn, inc, mut warnings, left_bench, mut labelled) = live_phase("realise",
@@ -1880,6 +1863,7 @@ fn seated_items(doc: &SchDoc, netlist: &Netlist) -> Vec<Item> {
                 unit,
                 mirror: symbol.mirror == sch_doc::Mirror::Y,
                 preseeded: true,
+                open: false,
                 supports: None,
             })
         })

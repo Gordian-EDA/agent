@@ -43,7 +43,7 @@ fn call(ctx: &AgentRuntime, name: &str, input: Value) -> Value {
 fn orphan_rail_sheet(ctx: &AgentRuntime) {
     let added = call(
         ctx,
-        "add_symbols",
+        "place_parts",
         json!({"parts": [
             {"lib_id": "Device:R", "ref": "R1"},
             {"lib_id": "Device:R", "ref": "R2"},
@@ -51,26 +51,9 @@ fn orphan_rail_sheet(ctx: &AgentRuntime) {
     );
     assert!(added.get("error").is_none(), "fixture failed: {added}");
     call(ctx, "connect", json!({"from": "R1.2", "to": "R2.1"}));
-    call(ctx, "add_power", json!({"pin": "R1.1", "net": "GND"}));
-    call(ctx, "add_power", json!({"pin": "R2.2", "net": "GND"}));
+    call(ctx, "connect", json!({"pin": "R1.1", "net": "GND"}));
+    call(ctx, "connect", json!({"pin": "R2.2", "net": "GND"}));
     call(ctx, "delete_wires", json!({"pins": ["R2.2"]}));
-}
-
-/// Two resistors far apart, each on its own GND glyph, both wired.
-fn wired_rail_sheet(ctx: &AgentRuntime) {
-    let added = call(
-        ctx,
-        "add_symbols",
-        json!({"parts": [
-            {"lib_id": "Device:R", "ref": "R1"},
-            {"lib_id": "Device:R", "ref": "R2"},
-        ]}),
-    );
-    assert!(added.get("error").is_none(), "fixture failed: {added}");
-    call(ctx, "move_symbols", json!({"moves": [{"ref": "R2", "to": [150.0, 150.0]}]}));
-    call(ctx, "connect", json!({"from": "R1.2", "to": "R2.1"}));
-    call(ctx, "add_power", json!({"pin": "R1.1", "net": "GND"}));
-    call(ctx, "add_power", json!({"pin": "R2.2", "net": "GND"}));
 }
 
 /// Whether a symbol with this reference is on the sheet.
@@ -141,8 +124,8 @@ fn the_sole_mention_of_a_rail_stays_and_its_finding_clears_in_one_call() {
         eprintln!("SKIP: no KiCad detected");
         return;
     };
-    call(&ctx, "add_symbols", json!({"parts": [{"lib_id": "Device:R", "ref": "R1"}]}));
-    call(&ctx, "add_power", json!({"pin": "R1.1", "net": "GND"}));
+    call(&ctx, "place_parts", json!({"parts": [{"lib_id": "Device:R", "ref": "R1"}]}));
+    call(&ctx, "connect", json!({"pin": "R1.1", "net": "GND"}));
     call(&ctx, "delete_wires", json!({"pins": ["R1.1"]}));
     assert!(on_sheet(&ctx, "#PWR1"), "the sole GND glyph was swept");
 
@@ -158,79 +141,6 @@ fn the_sole_mention_of_a_rail_stays_and_its_finding_clears_in_one_call() {
     assert!(
         find(&erc_errors(&ctx), "pin_not_connected", "#PWR1.1").is_none(),
         "the finding survived its own fix"
-    );
-}
-
-/// Naming both ends of a connection joins them only where the name is new to an
-/// end. Two glyphs on one rail already read it, so the labels are dropped again
-/// as duplicates and the file is byte-identical — a refusal, not a connection.
-#[test]
-fn connect_refuses_a_name_both_ends_already_read() {
-    let Some(ctx) = sheet() else {
-        eprintln!("SKIP: no KiCad detected");
-        return;
-    };
-    wired_rail_sheet(&ctx);
-    let before = std::fs::read_to_string(ctx.sch_path()).unwrap();
-
-    let result = call(&ctx, "connect", json!({"from": "#PWR2.1", "to": "#PWR1.1"}));
-
-    let error = result["error"].as_str().unwrap_or_default();
-    assert!(error.contains("already read `GND`"), "{result}");
-    assert!(error.contains("remove_symbols"), "{result}");
-    assert!(error.contains("add_power"), "{result}");
-    assert_eq!(
-        std::fs::read_to_string(ctx.sch_path()).unwrap(),
-        before,
-        "a refused connect wrote to the sheet"
-    );
-}
-
-/// The refusal is about a name that adds nothing, not about naming: two ordinary
-/// pins too far apart to wire are still joined by a label at each end, and KiCAD
-/// stops calling them unconnected.
-#[test]
-fn joining_ordinary_pins_by_name_still_connects_them() {
-    let Some(ctx) = sheet() else {
-        eprintln!("SKIP: no KiCad detected");
-        return;
-    };
-    call(
-        &ctx,
-        "add_symbols",
-        json!({"parts": [
-            {"lib_id": "Device:R", "ref": "R1"},
-            {"lib_id": "Device:R", "ref": "R2"},
-        ]}),
-    );
-    call(
-        &ctx,
-        "move_symbols",
-        json!({"moves": [{"ref": "R2", "to": [60.0, 60.0]}]}),
-    );
-
-    let result = call(&ctx, "connect", json!({"from": "R1.2", "to": "R2.1"}));
-
-    assert!(result.get("error").is_none(), "{result}");
-    assert_eq!(
-        result["net_delta"]["now_connected"],
-        json!(["R1.2", "R2.1"]),
-        "{result}"
-    );
-    let after = call(&ctx, "check_schematic", json!({"detail": true}));
-    let loose = after["findings"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter(|finding| finding["code"] == "pin_not_connected")
-        .filter(|finding| {
-            let refs = finding["refs"].to_string();
-            refs.contains("R1.2") || refs.contains("R2.1")
-        })
-        .count();
-    assert_eq!(
-        loose, 0,
-        "the named pins still read as unconnected: {after}"
     );
 }
 
@@ -273,14 +183,14 @@ fn rails_cut_loose_one_after_another_never_pile_up() {
     let refs = ["R1", "R2", "R3", "R4", "R5"];
     call(
         &ctx,
-        "add_symbols",
+        "place_parts",
         json!({"parts": refs.iter().map(|reference| json!({"lib_id": "Device:R", "ref": reference}))
             .collect::<Vec<_>>()}),
     );
     for reference in refs {
         call(
             &ctx,
-            "add_power",
+            "connect",
             json!({"pin": format!("{reference}.2"), "net": "GND"}),
         );
         call(

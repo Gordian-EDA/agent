@@ -455,7 +455,7 @@ fn route_imports_stale_net_names_without_changing_geometry() {
              "pins":{"1":"MID", "2":"GND"}}
         ]}),
     );
-    tool(&ctx, "label", json!({ "pin": "R1.2", "net": "MID" }));
+    tool(&ctx, "connect", json!({ "pin": "R1.2", "net": "MID" }));
     tool(
         &ctx,
         "sync_board",
@@ -507,12 +507,15 @@ fn existing_board_intent_runs_both_sync_halves() {
     );
     tool(&ctx, "sync_board", json!({}));
     run_tool(
-        "add_symbols",
+        "place_parts",
         json!({ "parts": [{ "ref": "R99", "lib_id": "Device:R" }] }),
         &ctx,
     )
     .expect("add an intentionally incomplete symbol");
-    tool(&ctx, "label", json!({ "pin": "R99.1", "net": "UNSYNCED" }));
+    tool(&ctx, "connect", json!({ "pin": "R99.1", "net": "UNSYNCED" }));
+    // R99.2 named and then stripped of its name is a bare pin: an ERC error.
+    tool(&ctx, "connect", json!({ "pin": "R99.2", "net": "BARE" }));
+    tool(&ctx, "delete_wires", json!({ "names": ["BARE"] }));
 
     let synced = run_tool(
         "sync_board",
@@ -602,17 +605,11 @@ fn a_minted_designator_never_takes_a_reserved_reference() {
         "{placed:#}"
     );
 
-    // add_symbols' allocator mints from the same store.
+    // A payload with no reference mints from the same store.
     let added = tool(
         &ctx,
-        "add_symbols",
+        "place_parts",
         json!({ "parts": [{ "lib_id": "Device:R" }] }),
     );
-    let refs: Vec<&str> = added["changed"]["placed"]
-        .as_array()
-        .unwrap_or_else(|| panic!("placed parts: {added:#}"))
-        .iter()
-        .filter_map(|part| part["ref"].as_str())
-        .collect();
-    assert_eq!(refs, ["R5"], "{added:#}");
+    assert_eq!(added["changed"]["placed"], json!(["R5"]), "{added:#}");
 }

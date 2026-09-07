@@ -153,6 +153,11 @@ pub fn ranked_suggestions(meta: &SymbolMeta, key: &str, limit: usize) -> Vec<Str
 pub fn mark_unused_no_connect(d: &mut Design, provider: &SymbolTable) {
     for block in d.blocks.values_mut() {
         for comp in block.components.values_mut() {
+            // No pin map at all: the part is placed whole, its pins open for a later
+            // `connect`; marking them would only have that call clear the markers.
+            if comp.pins.is_empty() && comp.units.values().all(|u| u.is_empty()) {
+                continue;
+            }
             let Some(meta) = provider.symbol(&comp.part) else {
                 continue; // unknown symbol — leave the pins as given
             };

@@ -175,7 +175,7 @@ pub(crate) fn place_parts(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         Err(error) => return Ok(with_renamed(with_warnings(error, &warnings), &renamed)),
     };
     sch_check::place_parts::assign_references(&mut payload, ctx.provider(), &existing);
-    let mut footprints_unresolved = clear_unknown_footprints(ctx, &mut payload)?;
+    let (footprints_resolved, mut footprints_unresolved) = clear_unknown_footprints(ctx, &mut payload)?;
     let (design, _, _) = sch_check::into_design(&payload, ctx.provider(), &existing);
     for mismatch in gordian_runtime::footprint_compat::design_pin_mismatches(ctx, &design)? {
         let did_you_mean = mismatch.suggestion.into_iter().collect();
@@ -306,7 +306,8 @@ pub(crate) fn place_parts(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let refs = report.placed.join(" ");
     attach_connectivity(&mut value, ctx, report.placed, &format!("PLACED  {refs}"))?;
     let value = with_check(value, ctx).context("checking placed parts")?;
-    let value = with_unresolved_footprints(value, &footprints_unresolved);
+    let mut value = with_unresolved_footprints(value, &footprints_unresolved);
+    crate::edit::attach_footprint_repairs(&mut value, &footprints_resolved, &[]);
     let value = with_unresolved_decoupling(value, &audit.decouple_unresolved);
     let value = with_resolved_nets(value, &resolved_nets.reported);
     let value = with_nc_overrides(value, &audit.nc_overridden);
@@ -673,10 +674,13 @@ fn rewrite_ref(refdes: &mut String, renamed: &BTreeMap<String, String>) {
     }
 }
 
+/// A footprint that does not fit its symbol is repaired to the unique compatible one
+/// of its own library when there is one, and cleared otherwise; both are reported.
 fn clear_unknown_footprints(
     ctx: &AgentRuntime,
     payload: &mut sch_check::PlacePartsInput,
-) -> Result<Vec<UnresolvedFootprint>> {
+) -> Result<(Vec<crate::edit::ResolvedFootprint>, Vec<UnresolvedFootprint>)> {
+    let mut resolved = Vec::new();
     let mut unresolved = Vec::new();
     for part in &mut payload.parts {
         let Some(requested) = part
@@ -687,24 +691,30 @@ fn clear_unknown_footprints(
         else {
             continue;
         };
-        let Some(did_you_mean) =
-            gordian_runtime::footprint_compat::unresolved_footprint_suggestions(
-                ctx, &part.part, &requested,
-            )?
-        else {
-            continue;
-        };
-        unresolved.push(UnresolvedFootprint {
-            refdes: part
-                .refdes
-                .clone()
-                .unwrap_or_else(|| format!("unassigned {}", part.part)),
-            requested,
-            did_you_mean,
-        });
-        part.footprint = None;
+        let refdes = part
+            .refdes
+            .clone()
+            .unwrap_or_else(|| format!("unassigned {}", part.part));
+        // A pin the payload declares no-connect needs no pad.
+        let ignored: std::collections::BTreeSet<String> = part
+            .pins
+            .iter()
+            .filter(|(_, net)| sch_check::place_parts::is_no_connect_name(net))
+            .map(|(pin, _)| pin.clone())
+            .collect();
+        match crate::edit::footprint_repair(ctx, &refdes, &part.part, &requested, &ignored)? {
+            crate::edit::FootprintRepair::Keep => {}
+            crate::edit::FootprintRepair::Resolve { from, to } => {
+                part.footprint = Some(to.clone());
+                resolved.push(crate::edit::ResolvedFootprint { refdes, from, to });
+            }
+            crate::edit::FootprintRepair::Clear { requested, did_you_mean } => {
+                unresolved.push(UnresolvedFootprint { refdes, requested, did_you_mean });
+                part.footprint = None;
+            }
+        }
     }
-    Ok(unresolved)
+    Ok((resolved, unresolved))
 }
 
 fn with_unresolved_footprints(mut value: Value, unresolved: &[UnresolvedFootprint]) -> Value {
@@ -720,7 +730,7 @@ fn with_unresolved_footprints(mut value: Value, unresolved: &[UnresolvedFootprin
             "kind": "footprint_unresolved",
             "refdes": issue.refdes,
             "suggestion": format!(
-                "assign a compatible footprint to {} with assign_footprints",
+                "assign a compatible footprint to {} with set_fields({{footprints}})",
                 issue.refdes
             ),
         })
@@ -896,12 +906,21 @@ fn sanitize_place_parts_input(input: &mut Value) -> Vec<String> {
     }
     if let Some(parts) = input.get_mut("parts").and_then(Value::as_array_mut) {
         for (index, part) in parts.iter_mut().enumerate() {
-            if part
-                .as_object_mut()
-                .and_then(|part| part.remove(""))
-                .is_some()
-            {
+            let Some(fields) = part.as_object_mut() else { continue };
+            if fields.remove("").is_some() {
                 warnings.push(format!("dropped empty field at parts[{index}]."));
+            }
+            // `lib_id` is what the KiCAD file calls the part; `near`/`side` were how a
+            // part used to ask for a seat, which the layout tree now decides.
+            if let Some(lib_id) = fields.remove("lib_id")
+                && !fields.contains_key("part")
+            {
+                fields.insert("part".into(), lib_id);
+            }
+            for key in ["near", "side"] {
+                if fields.remove(key).is_some() {
+                    warnings.push(format!("parts[{index}].{key} is ignored: where a part sits is the layout tree's."));
+                }
             }
         }
     }
@@ -1148,25 +1167,6 @@ fn resolve_arrangeable_refs(
     notes.missing.dedup();
     *requested = selected;
     notes
-}
-
-pub(crate) fn rewire(input: Value, ctx: &AgentRuntime) -> Result<Value> {
-    let input: SelectionInput = typed(input, "rewire")?;
-    if input.intent.is_some() || input.layout.is_some() {
-        return Err(anyhow!(
-            "rewire moves nothing, so it takes no intent or layout"
-        ));
-    }
-    let selection = selection(&input)?;
-    let mut edit = Edit::open(ctx)?;
-    let timing = Timing::start("rewire", edit.doc.symbols().count());
-    let report = sch_floorplan::live::rewire(ctx.env(), &mut edit.doc, &selection)?;
-    timing.done(if report.committed {
-        "committed"
-    } else {
-        "refused"
-    });
-    finish_arrangement(edit, report, ctx)
 }
 
 fn finish_arrangement(mut edit: Edit, report: ArrangeReport, ctx: &AgentRuntime) -> Result<Value> {

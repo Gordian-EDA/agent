@@ -134,19 +134,23 @@ fn arrange_reports_power_furniture_and_nearby_real_parts() {
     };
     let placed = call(&ctx, "place_parts", divider());
     assert_eq!(placed.get("error"), None, "{placed:#}");
-    let added = call(
-        &ctx,
-        "add_symbols",
-        json!({"parts": [
-            {"lib_id": "power:PWR_FLAG", "ref": "#PWR01"},
-            {"lib_id": "power:PWR_FLAG", "ref": "#PWR02"}
-        ]}),
-    );
-    assert_eq!(added.get("error"), None, "{added:#}");
+    let flags_of = |doc: &sch_doc::SchDoc| -> Vec<String> {
+        doc.symbols()
+            .filter(|s| s.refdes().starts_with("#FLG"))
+            .map(|s| s.uuid.clone())
+            .collect()
+    };
+    let before = flags_of(&sch_doc::SchDoc::read(ctx.sch_path()).unwrap());
+    // A pin already on its rail gets a PWR_FLAG: two more flags, at R2.2 and C1.2.
+    for pin in ["R2.2", "C1.2"] {
+        let flagged = call(&ctx, "connect", json!({"from": pin, "net": "GND"}));
+        assert_eq!(flagged["power_symbol_used"], "power:PWR_FLAG", "{flagged:#}");
+    }
     let mut doc = sch_doc::SchDoc::read(ctx.sch_path()).unwrap();
-    for (from, to) in [("#PWR01", "#FLG_Q9"), ("#PWR02", "#FLG_RAW2")] {
-        let uuid = doc.symbol_by_ref(from).unwrap().uuid.clone();
-        doc.set_field(&uuid, "Reference", to).unwrap();
+    let flags: Vec<String> = flags_of(&doc).into_iter().filter(|u| !before.contains(u)).collect();
+    assert_eq!(flags.len(), 2, "two flags landed");
+    for (uuid, to) in flags.iter().zip(["#FLG_Q9", "#FLG_RAW2"]) {
+        doc.set_field(uuid, "Reference", to).unwrap();
     }
     doc.write(ctx.sch_path()).unwrap();
 
@@ -170,7 +174,7 @@ fn arrange_reports_power_furniture_and_nearby_real_parts() {
     assert!(
         furniture["arrangeable_nearby"]["#FLG_Q9"]
             .as_array()
-            .is_some_and(|refs| refs.iter().any(|reference| reference == "R1")),
+            .is_some_and(|refs| !refs.is_empty()),
         "{furniture:#}"
     );
 
@@ -178,11 +182,11 @@ fn arrange_reports_power_furniture_and_nearby_real_parts() {
         &ctx,
         "arrange",
         json!({
-            "refs": ["#FLG_Q9", "R1"]
+            "refs": ["#FLG_Q9", "R2"]
         }),
     );
     assert_eq!(mixed.get("error"), None, "{mixed:#}");
-    assert_eq!(mixed["changed"]["moved"], json!(["R1"]), "{mixed:#}");
+    assert_eq!(mixed["changed"]["moved"], json!(["R2"]), "{mixed:#}");
     assert_eq!(mixed["not_arrangeable"], json!(["#FLG_Q9"]), "{mixed:#}");
 }
 
@@ -192,35 +196,22 @@ fn connecting_coincident_power_and_flag_pins_is_idempotent() {
         eprintln!("SKIP: KiCad 10 not configured");
         return;
     };
-    let added = call(
+    // R1.1 on GND draws the rail glyph; naming the pin GND again adds a PWR_FLAG on
+    // the same point, so the glyph pin and the flag pin coincide.
+    let placed = call(
         &ctx,
-        "add_symbols",
-        json!({"parts": [
-            {"lib_id": "power:GND", "ref": "#PWR01", "value": "GND"},
-            {"lib_id": "power:PWR_FLAG", "ref": "#PWR02", "value": "GND"}
-        ]}),
+        "place_parts",
+        json!({"parts": [{"ref": "R1", "part": "Device:R", "pins": {"1": "GND", "2": "OUT"}}],
+               "intent": {"ports": {"OUT": "right"}}}),
     );
-    assert_eq!(added.get("error"), None, "{added:#}");
-    let doc = sch_doc::SchDoc::read(ctx.sch_path()).unwrap();
-    let pins = sch_doc::placed_pins(&doc);
-    let target = pins.iter().find(|pin| pin.refdes == "#PWR01").unwrap().at;
-    let flag_pin = pins.iter().find(|pin| pin.refdes == "#PWR02").unwrap();
-    let flag = doc.symbol_by_ref("#PWR02").unwrap();
-    let source = std::fs::read_to_string(ctx.sch_path()).unwrap();
-    let source = sch_floorplan::test_util::replace_symbol_at(
-        &source,
-        "#PWR02",
-        [
-            target.x - (flag_pin.at.x - flag.at.x),
-            target.y - (flag_pin.at.y - flag.at.y),
-        ],
-    );
-    std::fs::write(ctx.sch_path(), source).unwrap();
+    assert_eq!(placed.get("error"), None, "{placed:#}");
+    let flagged = call(&ctx, "connect", json!({"from": "R1.1", "net": "GND"}));
+    assert_eq!(flagged["power_symbol_used"], "power:PWR_FLAG", "{flagged:#}");
     let mut doc = sch_doc::SchDoc::read(ctx.sch_path()).unwrap();
-    for (from, to) in [("#PWR01", "#PWR_GND"), ("#PWR02", "#FLG_GND")] {
-        let uuid = doc.symbol_by_ref(from).unwrap().uuid.clone();
-        doc.set_field(&uuid, "Reference", to).unwrap();
-    }
+    let glyph = doc.symbols().find(|s| s.refdes().starts_with("#PWR")).unwrap().uuid.clone();
+    let flag = doc.symbols().find(|s| s.refdes().starts_with("#FLG")).unwrap().uuid.clone();
+    doc.set_field(&glyph, "Reference", "#PWR_GND").unwrap();
+    doc.set_field(&flag, "Reference", "#FLG_GND").unwrap();
     doc.write(ctx.sch_path()).unwrap();
 
     let connected = call(

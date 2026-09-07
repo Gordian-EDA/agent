@@ -35,32 +35,32 @@ fn call(ctx: &AgentRuntime, name: &str, input: Value) -> Value {
 }
 
 fn add(ctx: &AgentRuntime, parts: Value) {
-    let result = call(ctx, "add_symbols", json!({"parts": parts}));
+    let result = call(ctx, "place_parts", json!({"parts": parts}));
     assert!(result.get("error").is_none(), "fixture failed: {result}");
 }
 
-/// A loose flag never lands — the commit sweeps it — while the sole glyph of a
-/// rail stays until it is removed by reference.
+/// Power symbols — the rail glyph a placement draws and the flag `connect` adds on a
+/// pin already on its rail — are removable by reference and by UUID.
 #[test]
-fn power_symbols_are_removable_by_reference_and_a_loose_flag_is_swept() {
+fn power_symbols_are_removable_by_reference_and_uuid() {
     let Some(ctx) = sheet() else {
         eprintln!("SKIP: KiCad 10 is not installed");
         return;
     };
-    add(
-        &ctx,
-        json!([
-            {"lib_id": "power:GND", "ref": "#PWR01"},
-            {"lib_id": "power:PWR_FLAG", "ref": "#FLG02"},
-        ]),
-    );
+    add(&ctx, json!([{"lib_id": "Device:R", "ref": "R1", "pins": {"1": "GND", "2": "OUT"}}]));
+    let flagged = call(&ctx, "connect", json!({"from": "R1.1", "net": "GND"}));
+    assert_eq!(flagged["power_symbol_used"], "power:PWR_FLAG", "{flagged}");
     let doc = SchDoc::read(ctx.sch_path()).unwrap();
-    assert!(doc.symbol_by_ref("#FLG02").is_none(), "a flag touching nothing landed");
-    assert!(doc.symbol_by_ref("#PWR01").is_some(), "the sole GND glyph was swept");
+    let glyph = doc.symbols().find(|s| s.refdes().starts_with("#PWR")).expect("a GND glyph").refdes().to_string();
+    let flags: Vec<String> = doc.symbols().filter(|s| s.refdes().starts_with("#FLG")).map(|s| s.uuid.clone()).collect();
+    assert!(!flags.is_empty(), "a flag landed on R1.1");
 
-    let by_ref = call(&ctx, "remove_symbols", json!({"refs": ["#PWR01"]}));
+    // Flags by UUID first: taking the glyph first takes every flag welded to its pin.
+    let by_uuid = call(&ctx, "remove_symbols", json!({"refs": flags}));
+    assert_eq!(by_uuid["changed"]["removed"]["power"], flags.len(), "{by_uuid}");
+    let by_ref = call(&ctx, "remove_symbols", json!({"refs": [glyph]}));
     assert_eq!(by_ref["changed"]["removed"]["power"], 1, "{by_ref}");
-    assert_eq!(SchDoc::read(ctx.sch_path()).unwrap().symbols().count(), 0);
+    assert_eq!(SchDoc::read(ctx.sch_path()).unwrap().symbols().count(), 1);
 }
 
 #[test]
@@ -111,13 +111,13 @@ fn remove_region_lists_blocks_and_uses_a_bbox_fallback() {
     let r1_at = doc.symbol(&r1).unwrap().at.point();
     doc.write(ctx.sch_path()).unwrap();
 
-    let missing = call(&ctx, "remove_region", json!({"block": "cell_monitor"}));
+    let missing = call(&ctx, "remove_symbols", json!({"block": "cell_monitor"}));
     assert!(missing.get("error").is_some(), "{missing}");
     assert_eq!(missing["blocks"], json!(["load", "supply"]), "{missing}");
 
     let fallback = call(
         &ctx,
-        "remove_region",
+        "remove_symbols",
         json!({
             "block": "cell_monitor",
             "bbox": [r1_at.x - 1.0, r1_at.y - 1.0, r1_at.x + 1.0, r1_at.y + 1.0]
@@ -145,7 +145,7 @@ fn delete_labels_by_net_reports_disconnected_pins_and_query_uuids() {
         ]),
     );
     for pin in ["R1.2", "R2.1"] {
-        let result = call(&ctx, "label", json!({"pin": pin, "net": "SIGNAL"}));
+        let result = call(&ctx, "connect", json!({"pin": pin, "net": "SIGNAL"}));
         assert!(result.get("error").is_none(), "fixture failed: {result}");
     }
     let label_uuids = SchDoc::read(ctx.sch_path())
@@ -153,14 +153,14 @@ fn delete_labels_by_net_reports_disconnected_pins_and_query_uuids() {
         .labels()
         .map(|label| label.uuid.clone())
         .collect::<Vec<_>>();
-    let lookup = call(&ctx, "get_net", json!({"name": "SIGNAL"}));
+    let lookup = call(&ctx, "read_schematic", json!({"net": "SIGNAL"}));
     let lookup = lookup.as_str().unwrap();
     assert!(
         label_uuids.iter().all(|uuid| lookup.contains(uuid)),
         "{lookup}"
     );
 
-    let removed = call(&ctx, "delete_labels", json!({"net": "SIGNAL"}));
+    let removed = call(&ctx, "delete_wires", json!({"labels": true, "net": "SIGNAL"}));
     assert_eq!(removed["changed"]["removed"], 2, "{removed}");
     assert_eq!(
         removed["changed"]["now_unconnected"]
@@ -186,7 +186,7 @@ fn remove_region_cuts_a_crossing_wire_and_names_the_outside_end() {
 
     let removed = call(
         &ctx,
-        "remove_region",
+        "remove_symbols",
         json!({"bbox": [5.08, -2.54, 15.24, 2.54]}),
     );
 
@@ -229,7 +229,7 @@ fn removing_a_regulator_block_takes_flags_stubs_and_labels_cleanly() {
     );
     assert!(wired.get("error").is_none(), "fixture failed: {wired}");
     for (pin, net) in [("U1.1", "VIN"), ("U1.2", "GND")] {
-        let flag = call(&ctx, "add_power", json!({"pin": pin, "net": net}));
+        let flag = call(&ctx, "connect", json!({"pin": pin, "net": net}));
         assert!(flag.get("error").is_none(), "fixture failed: {flag}");
     }
 
@@ -284,7 +284,7 @@ fn bluepill_power_region_can_be_replaced_without_new_dangling_remnants() {
     };
     let removed = call(
         &ctx,
-        "remove_region",
+        "remove_symbols",
         json!({"bbox": [410.0, 18.0, 432.0, 34.0]}),
     );
     assert!(removed.get("error").is_none(), "{removed}");

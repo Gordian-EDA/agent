@@ -539,8 +539,8 @@ impl FixPlanner {
                 .or(affected)?;
             return Some((
                 ToolFix {
-                    tool: "add_power",
-                    args: json!({"net": net, "pin": anchor.id}),
+                    tool: "connect",
+                    args: json!({"from": anchor.id, "net": net}),
                 },
                 format!(
                     "One rail symbol on {} drives every power-input pin on {net}.",
@@ -821,9 +821,10 @@ impl FixPlanner {
         names.dedup();
         Some((
             ToolFix {
-                tool: "delete_labels",
+                tool: "delete_wires",
                 args: json!({
-                    "uuids": self.stray_labels.iter().map(|(uuid, _)| uuid).collect::<Vec<_>>()
+                    "uuids": self.stray_labels.iter().map(|(uuid, _)| uuid).collect::<Vec<_>>(),
+                    "labels": true
                 }),
             },
             format!(
@@ -987,15 +988,14 @@ impl FixPlanner {
         if self.pins.iter().filter(|pin| pin.refdes == refdes).count() != 2 {
             return None;
         }
-        let turned = (self.rotations[refdes] + 180.0).rem_euclid(360.0);
         Some((
             ToolFix {
-                tool: "move_symbols",
-                args: json!({"moves": [{"ref": refdes, "rot": turned, "turn_in_place": true}]}),
+                tool: "delete_wires",
+                args: json!({"refs": [refdes]}),
             },
             format!(
-                "A half turn in place puts each of {refdes}'s two pins where the other one was, \
-                 so they exchange nets and no wire moves."
+                "{refdes}'s two pins are on each other's nets: take its wires off, then `connect` \
+                 each pin to the net the other one had."
             ),
         ))
     }
@@ -1184,8 +1184,8 @@ fn conventional_footprint(part: &str) -> Option<&'static str> {
 fn footprint_assignment(reference: &str, footprint: &str, part: &str) -> (ToolFix, String) {
     (
         ToolFix {
-            tool: "assign_footprints",
-            args: json!({"assignments": [{"reference": reference, "footprint": footprint}]}),
+            tool: "set_fields",
+            args: json!({"footprints": {reference: footprint}}),
         },
         format!("{footprint} is the best installed catalog match for {part}."),
     )
@@ -2030,8 +2030,8 @@ mod tests {
             pin("U3.1", "GND", "power_in", Some("GND"), 30.0),
         ]);
         let expected = ToolFix {
-            tool: "add_power",
-            args: json!({"net": "GND", "pin": "U1.8"}),
+            tool: "connect",
+            args: json!({"from": "U1.8", "net": "GND"}),
         };
         let findings = ["U1.8", "U2.4", "U3.1"].map(|reference| {
             let mut finding = finding(
@@ -2215,11 +2215,8 @@ mod tests {
         assert_eq!(
             footprint_assignment("R5", "Resistor_SMD:R_0805_2012Metric", "Device:R").0,
             ToolFix {
-                tool: "assign_footprints",
-                args: json!({"assignments": [{
-                    "reference": "R5",
-                    "footprint": "Resistor_SMD:R_0805_2012Metric"
-                }]}),
+                tool: "set_fields",
+                args: json!({"footprints": {"R5": "Resistor_SMD:R_0805_2012Metric"}}),
             }
         );
     }

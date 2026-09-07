@@ -35,7 +35,7 @@ fn add_resistors(ctx: &AgentRuntime, refs: &[&str]) {
         .iter()
         .map(|reference| json!({"lib_id": "Device:R", "ref": reference}))
         .collect::<Vec<_>>();
-    let result = call(ctx, "add_symbols", json!({"parts": parts}));
+    let result = call(ctx, "place_parts", json!({"parts": parts}));
     assert!(result.get("error").is_none(), "fixture failed: {result}");
 }
 
@@ -49,7 +49,7 @@ fn connect_joins_every_net_carried_by_its_named_endpoints() {
 
     let seeded = call(&ctx, "connect", json!({"from": "R1.2", "to": "R2.1"}));
     assert!(seeded.get("error").is_none(), "fixture failed: {seeded}");
-    let named = call(&ctx, "label", json!({"pin": "R3.1", "net": "3V3"}));
+    let named = call(&ctx, "connect", json!({"pin": "R3.1", "net": "3V3"}));
     assert!(named.get("error").is_none(), "fixture failed: {named}");
 
     let joined = call(&ctx, "connect", json!({"from": "R3.1", "to": "R1.2"}));
@@ -62,13 +62,13 @@ fn connect_joins_every_net_carried_by_its_named_endpoints() {
         "{joined}"
     );
     assert_eq!(joined["joined"]["survivor"], "3V3", "{joined}");
-    let net = call(&ctx, "get_net", json!({"name": "3V3"})).to_string();
+    let net = call(&ctx, "read_schematic", json!({"net": "3V3"})).to_string();
     for pin in ["R1.2", "R2.1", "R3.1"] {
         assert!(net.contains(pin), "{pin} absent from joined net: {net}");
     }
 
     for (pin, net) in [("R4.1", "CHG"), ("R5.1", "DSG")] {
-        let result = call(&ctx, "label", json!({"pin": pin, "net": net}));
+        let result = call(&ctx, "connect", json!({"pin": pin, "net": net}));
         assert!(result.get("error").is_none(), "fixture failed: {result}");
     }
     let joined = call(&ctx, "connect", json!({"from": "R4.1", "to": "R5.1"}));
@@ -76,7 +76,7 @@ fn connect_joins_every_net_carried_by_its_named_endpoints() {
     assert_eq!(joined["joined"]["from_net"], "CHG", "{joined}");
     assert_eq!(joined["joined"]["to_net"], "DSG", "{joined}");
     let survivor = joined["joined"]["survivor"].as_str().unwrap();
-    let merged = call(&ctx, "get_net", json!({"name": survivor})).to_string();
+    let merged = call(&ctx, "read_schematic", json!({"net": survivor})).to_string();
     assert!(
         merged.contains("R4.1") && merged.contains("R5.1"),
         "{merged}"
@@ -95,13 +95,9 @@ fn connect_accepts_a_net_name_as_either_endpoint() {
         return;
     };
     add_resistors(&ctx, &["R1", "R2", "R3", "R4"]);
-    let power = call(
-        &ctx,
-        "add_symbols",
-        json!({"parts": [{"lib_id": "power:GND", "ref": "PWR3"}]}),
-    );
+    let power = call(&ctx, "connect", json!({"pin": "R4.2", "net": "GND"}));
     assert!(power.get("error").is_none(), "fixture failed: {power}");
-    let named = call(&ctx, "label", json!({"pin": "R1.1", "net": "VREF"}));
+    let named = call(&ctx, "connect", json!({"pin": "R1.1", "net": "VREF"}));
     assert!(named.get("error").is_none(), "fixture failed: {named}");
 
     let existing = call(&ctx, "connect", json!({"from": "R2.1", "to": "VREF"}));
@@ -111,9 +107,9 @@ fn connect_accepts_a_net_name_as_either_endpoint() {
     assert!(created.get("error").is_none(), "{created}");
     assert_eq!(created["net_endpoint"]["created"], true, "{created}");
 
-    let vref = call(&ctx, "get_net", json!({"name": "VREF"})).to_string();
+    let vref = call(&ctx, "read_schematic", json!({"net": "VREF"})).to_string();
     assert!(vref.contains("R1.1") && vref.contains("R2.1"), "{vref}");
-    let sense = call(&ctx, "get_net", json!({"name": "NEW_SENSE"})).to_string();
+    let sense = call(&ctx, "read_schematic", json!({"net": "NEW_SENSE"})).to_string();
     assert!(sense.contains("R3.1"), "{sense}");
     let power_only = call(&ctx, "connect", json!({"from": "R4.1", "to": "GND"}));
     assert!(power_only.get("error").is_none(), "{power_only}");
@@ -129,13 +125,13 @@ fn add_power_authorizes_the_power_net_and_the_named_pins_net() {
     add_resistors(&ctx, &["R1", "R2"]);
     let seeded = call(&ctx, "connect", json!({"from": "R1.1", "to": "R2.1"}));
     assert!(seeded.get("error").is_none(), "fixture failed: {seeded}");
-    let named = call(&ctx, "label", json!({"pin": "R1.1", "net": "3V3"}));
+    let named = call(&ctx, "connect", json!({"pin": "R1.1", "net": "3V3"}));
     assert!(named.get("error").is_none(), "fixture failed: {named}");
 
-    let powered = call(&ctx, "add_power", json!({"pin": "R1.1", "net": "GND"}));
+    let powered = call(&ctx, "connect", json!({"pin": "R1.1", "net": "GND"}));
 
     assert!(powered.get("error").is_none(), "{powered}");
-    let ground = call(&ctx, "get_net", json!({"name": "GND"})).to_string();
+    let ground = call(&ctx, "read_schematic", json!({"net": "GND"})).to_string();
     assert!(
         ground.contains("R1.1") && ground.contains("R2.1"),
         "{ground}"
@@ -202,14 +198,14 @@ fn copied_derived_net_names_resolve_in_payloads_and_connect() {
         connected["resolved_nets"][&suffixed], "@R1.2",
         "{connected}"
     );
-    let net = call(&ctx, "get_net", json!({"name": "N_R1_2"})).to_string();
+    let net = call(&ctx, "read_schematic", json!({"net": "N_R1_2"})).to_string();
     for pin in ["R1.2", "R2.1", "R3.1", "R4.1", "C1.1"] {
         assert!(net.contains(pin), "{pin} absent from resolved net: {net}");
     }
 
     let missing = call(
         &ctx,
-        "label",
+        "connect",
         json!({"pin": "R3.2", "net": "Net-(U99-NOPE)"}),
     );
     assert!(
@@ -218,77 +214,6 @@ fn copied_derived_net_names_resolve_in_payloads_and_connect() {
         ),
         "{missing}"
     );
-}
-
-#[test]
-fn remove_symbols_declares_every_net_at_the_selected_symbols() {
-    let Some(ctx) = sheet() else {
-        eprintln!("SKIP: KiCad 10 not configured");
-        return;
-    };
-    let added = call(
-        &ctx,
-        "add_symbols",
-        json!({"parts": [
-            {"lib_id": "Device:R", "ref": "R1"},
-            {"lib_id": "power:GND", "ref": "#PWR01"},
-            {"lib_id": "power:VCC", "ref": "#PWR02", "value": "3V3"}
-        ]}),
-    );
-    assert!(added.get("error").is_none(), "fixture failed: {added}");
-    let doc = sch_doc::SchDoc::read(ctx.sch_path()).unwrap();
-    let pin = sch_doc::placed_pins(&doc)
-        .into_iter()
-        .find(|pin| pin.refdes == "R1" && pin.number == "1")
-        .unwrap()
-        .at;
-    let mut source = std::fs::read_to_string(ctx.sch_path()).unwrap();
-    for reference in ["#PWR01", "#PWR02"] {
-        let symbol = doc.symbol_by_ref(reference).unwrap();
-        let power_pin = sch_doc::placed_pins(&doc)
-            .into_iter()
-            .find(|candidate| candidate.refdes == reference)
-            .unwrap();
-        source = sch_floorplan::test_util::replace_symbol_at(
-            &source,
-            reference,
-            [
-                pin.x - (power_pin.at.x - symbol.at.x),
-                pin.y - (power_pin.at.y - symbol.at.y),
-            ],
-        );
-    }
-    std::fs::write(ctx.sch_path(), source).unwrap();
-
-    let mut positioned = sch_doc::SchDoc::read(ctx.sch_path()).unwrap();
-    for (reference, value) in [("#PWR01", "GND"), ("#PWR02", "3V3")] {
-        let uuid = positioned.symbol_by_ref(reference).unwrap().uuid.clone();
-        positioned.set_field(&uuid, "Value", value).unwrap();
-    }
-    let markers = positioned
-        .items()
-        .iter()
-        .filter_map(|item| match item {
-            sch_doc::Item::NoConnect(marker) if marker.at.near_eq(pin, geom::EPS) => {
-                Some(marker.uuid.clone())
-            }
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    positioned.remove_drawing(&markers);
-    positioned.write(ctx.sch_path()).unwrap();
-    let before = call(&ctx, "get_net", json!({"name": "3V3"})).to_string();
-    assert!(before.contains("R1.1"), "fixture did not overlap: {before}");
-    let removed = call(&ctx, "remove_symbols", json!({"refs": ["#PWR02"]}));
-    assert!(removed.get("error").is_none(), "{removed}");
-    assert_eq!(removed["changed"]["removed"]["power"], 1, "{removed}");
-    let netlist = ctx.env().netlist(ctx.sch_path()).expect("KiCad 10 netlist");
-    let rail = netlist
-        .nets
-        .iter()
-        .find(|net| net.nodes.contains(&("R1".to_string(), "1".to_string())))
-        .map(|net| net.name.as_str());
-    assert_eq!(rail, Some("GND"), "{netlist:?}");
 }
 
 #[test]
