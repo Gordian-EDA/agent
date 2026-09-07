@@ -152,10 +152,19 @@ fn home_frame(all: &[Item], movable: usize) -> Option<Rect> {
     sch_flex::pack::block_frame(all, &members)
 }
 
+/// One frame per block among `which`. A part of no block — a sheet that arrived drawn
+/// by a person, or a placement never outlined — is a frame of its own: as one hull
+/// they would hide every hole the drawing has, and a group that shares a net with one
+/// of them belongs in the hole beside it, not outside the whole drawing.
 fn block_frames(all: &[Item], which: impl Iterator<Item = usize>) -> Vec<Rect> {
-    let mut blocks: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
+    let mut blocks: BTreeMap<String, Vec<usize>> = BTreeMap::new();
     for i in which {
-        blocks.entry(all[i].block.as_str()).or_default().push(i);
+        let block = &all[i].block;
+        let key = match block.is_empty() || sch_model::result::synthesized_block(block) {
+            true => format!("\u{0}{i}"),
+            false => block.clone(),
+        };
+        blocks.entry(key).or_default().push(i);
     }
     blocks
         .into_values()

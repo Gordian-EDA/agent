@@ -1599,6 +1599,14 @@ pub fn swap_symbol(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         })
         .collect();
     let was = refs::nets_touching(edit.before(), &[refdes.to_string()]);
+    // Rail glyphs and flags seated on the part's pins go where the pins go: a swap
+    // that transposes two pins carries the glyph on each to the other's net.
+    let welded: Vec<String> = placed_pins(&edit.doc)
+        .into_iter()
+        .filter(|pin| pin.refdes.starts_with('#'))
+        .filter(|pin| old_pins.iter().any(|old| old.at.near_eq(pin.at, geom::EPS)))
+        .map(|pin| pin.refdes)
+        .collect();
 
     let source = symbol_source(ctx);
     let mut dropped: Vec<String> = Vec::new();
@@ -1876,7 +1884,7 @@ pub fn swap_symbol(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             "redrawn_segments": redraw.redrawn_segments,
             "labels_added": redraw.labels_added,
         }),
-        Allow::nothing().nets(was.clone()).part(refdes).creating(),
+        Allow::nothing().joining_nets(was.clone()).part(refdes).parts(welded).creating(),
     )?;
     if result.get("error").is_some() {
         result["suggestion"] = suggestion;

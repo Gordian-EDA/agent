@@ -322,7 +322,7 @@ struct FixPlanner {
     stray_labels: Vec<(String, String)>,
     pins: Vec<FixPin>,
     parts: BTreeMap<String, String>,
-    rotations: BTreeMap<String, f64>,
+    lib_ids: BTreeMap<String, String>,
     default_footprints: BTreeMap<String, String>,
 }
 
@@ -360,9 +360,9 @@ impl FixPlanner {
                     .map(|footprint| (reference.clone(), footprint))
             })
             .collect();
-        let rotations = doc
+        let lib_ids = doc
             .symbols()
-            .map(|symbol| (symbol.refdes().to_string(), symbol.at.rot))
+            .map(|symbol| (symbol.refdes().to_string(), symbol.lib_id.clone()))
             .collect();
         let strays: BTreeSet<String> = sch_doc::stray_labels(doc).into_iter().collect();
         let stray_labels = doc
@@ -375,7 +375,7 @@ impl FixPlanner {
             stray_labels,
             pins,
             parts,
-            rotations,
+            lib_ids,
             default_footprints,
         }
     }
@@ -976,26 +976,27 @@ impl FixPlanner {
             .is_some_and(|lib_id| lib_id.eq_ignore_ascii_case("power:PWR_FLAG"))
     }
 
-    /// A reversed two-pin indicator is repaired by turning the symbol in place:
-    /// a half turn lands each pin exactly where the other one was, so the two
-    /// pins exchange nets and every wire, junction and label stays put.
+    /// A reversed two-pin indicator is repaired by a transposing swap of its own
+    /// symbol: the two pins exchange nets in place and every wire, junction and
+    /// label stays put.
     fn polarity(&self, finding: &Finding) -> Option<(ToolFix, String)> {
         let refdes = finding
             .refs
             .iter()
             .map(|reference| reference.split('.').next().unwrap_or(reference))
-            .find(|reference| self.rotations.contains_key(*reference))?;
+            .find(|reference| self.lib_ids.contains_key(*reference))?;
         if self.pins.iter().filter(|pin| pin.refdes == refdes).count() != 2 {
             return None;
         }
+        let lib_id = self.lib_ids.get(refdes)?.clone();
         Some((
             ToolFix {
-                tool: "delete_wires",
-                args: json!({"refs": [refdes]}),
+                tool: "swap_symbol",
+                args: json!({"ref": refdes, "lib_id": lib_id, "pin_map": {"1": "2", "2": "1"}}),
             },
             format!(
-                "{refdes}'s two pins are on each other's nets: take its wires off, then `connect` \
-                 each pin to the net the other one had."
+                "{refdes}'s two pins are on each other's nets: a transposing swap exchanges them \
+                 in place, and no wire moves."
             ),
         ))
     }
@@ -2002,7 +2003,7 @@ mod tests {
             bare_rails: BTreeSet::new(),
             pins,
             parts: BTreeMap::new(),
-            rotations: BTreeMap::new(),
+            lib_ids: BTreeMap::new(),
             default_footprints: BTreeMap::new(),
         }
     }

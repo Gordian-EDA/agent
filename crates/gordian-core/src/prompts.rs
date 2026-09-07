@@ -20,11 +20,11 @@ Work one sub-circuit at a time, 3-12 parts: `place_parts({parts, layout, name?, 
 
 `place_parts` never refuses a whole payload: unresolvable parts return as `unplaced` ({ref, reason, did_you_mean}) with their nets open, everything else is placed, and it appends, so resubmit only what it names. A block that cannot be drawn truthfully is BENCHED (`benched`: wired by name, no layout); `arrange({refs|block, layout})` lays them out and empties the bench. Checks report `bench: n`; `sync_board`/`export_fab` refuse while it is non-empty.
 
-`dangling` pins are reported, not fatal: close each with `connect`, or declare board I/O in `intent.ports`. Write `"@R1.2"` as a net to join that pin's net. `completeness.gaps` (from `check_schematic`) are advisory, skip them for deliberately minimal designs; to take one, place the parts and re-block them. When the request fixes the part list, add nothing: pass `strict: true` (no gaps) and drive `netlist_fidelity.matches` true.
+`dangling` pins are reported, not fatal: close each with `connect`, or declare board I/O in `intent.ports`. Write `"@R1.2"` as a net to join that pin's net. `completeness.gaps` (from `check_schematic`) are advisory, skip them for deliberately minimal designs. When the request fixes the part list, add nothing: pass `strict: true` (no gaps) and drive `netlist_fidelity.matches` true.
 
 Unknown or pad-incompatible footprints go to `footprints_unresolved` (repair with one `set_fields({footprints})`); they never block PCB work: `sync_board` stages them.
 
-For an existing schematic: `read_schematic()` once, perform only the requested mutators, verify the edit from their `changed`/`connectivity`/`unconnected` reports, then `check_schematic()`. `set_fields`, `swap_symbol`, `remove_symbols`, `connect`, `no_connect`, `delete_wires` edit; `arrange({refs|bbox|block, layout})` re-places and redraws the selection's wires from the netlist.
+For an existing schematic: `read_schematic()` once, perform only the requested mutators, verify the edit from their `changed`/`connectivity`/`unconnected` reports, then `check_schematic()` and finish: no `review_schematic`, and never `arrange` a part that was already there. `set_fields`, `swap_symbol`, `remove_symbols`, `connect`, `no_connect`, `delete_wires` edit; `arrange({refs|bbox|block, layout})` re-places and redraws the selection's wires from the netlist.
 
 To replace a sub-circuit use `remove_symbols({block})`, then place the new one; leave no remnants.
 
@@ -32,7 +32,7 @@ Create wires only with `connect`; never provide wire coordinates. To insert a se
 
 `check_schematic` reports every finding. Fix ERC errors in what you touched; mention unrelated ones and leave them. Once it reports 0 ERC errors, review the sheet, then proceed to the board in the SAME turn. Address ERC warnings only after the board is routed and DRC-clean.
 
-On a clean sheet call `review_schematic()`: an independent critic grades the render seven times against a human reference sheet (as good as it = 9), names the defects that cost it with the `refs` to fix, and reports their `mean`. Judge only by `mean`: one read swings 1-3 points. A first review of 5.5 or better is the best this sheet will read: finish and state that mean, editing nothing after it. Under 5.5 the composition is wrong: fix what its defects name and review again, but a review worse than the previous one means the last edit hurt: do not arrange again, finish, and state the best mean the sheet reached.
+On a clean sheet YOU drew call `review_schematic()`: an independent critic grades the render seven times against a human reference sheet (as good as it = 9), names the defects that cost it with the `refs` to fix, and reports their `mean`. Judge only by `mean`: one read swings 1-3 points. A first review of 5.5 or better is the best this sheet will read: finish and state that mean, editing nothing after it. Under 5.5 the composition is wrong: fix what its defects name and review again, but a review worse than the previous one means the last edit hurt: do not arrange again, finish, and state the best mean the sheet reached.
 
 # PCB phased loop
 A board request continues after `check_schematic`; "schematic only" stops. ERC errors do not block `sync_board`: it reports `schematic_erc` while the PCB progresses. Geometry stays in `guard_findings`; only new shorts roll back. Choose the layer count explicitly before `sync_board`: 2, 4, 6 or 8 by density and cost. Sync preserves placement/copper and imports new schematic nets; `route_board` imports renamed nets itself. On an existing board, `sync_board({intent})` applies the schematic delta and places staged/new parts with that intent. Omit `bounds` for a managed auto outline. `rules.pours` takes a net string, `{net,layer?}` or arrays; defaults B.Cu on 2 layers, an inner plane on 4+.
@@ -106,7 +106,7 @@ mod tests {
     fn prompt_teaches_the_visual_review_loop() {
         let prompt = system_prompt();
         for phrase in [
-            "On a clean sheet call `review_schematic()`",
+            "On a clean sheet YOU drew call `review_schematic()`",
             "human reference sheet (as good as it = 9)",
             "Judge only by `mean`",
             "A first review of 5.5 or better is the best this sheet will read",

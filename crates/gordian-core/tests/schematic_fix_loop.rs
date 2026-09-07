@@ -101,15 +101,12 @@ fn a_reversed_led_is_repaired_by_the_half_turn_the_finding_names() {
         .find(|finding| finding["code"] == "led-polarity")
         .expect("reversed LED finding");
     let fix = finding["fix"].clone();
-    assert_eq!(fix["tool"], "delete_wires", "{finding:#}");
-    assert_eq!(fix["args"]["refs"], json!(["D1"]), "{finding:#}");
+    assert_eq!(fix["tool"], "swap_symbol", "{finding:#}");
+    assert_eq!(fix["args"]["ref"], "D1", "{finding:#}");
+    assert_eq!(fix["args"]["pin_map"], json!({"1": "2", "2": "1"}), "{finding:#}");
 
-    tool(&ctx, "delete_wires", fix["args"].clone());
-    tool(
-        &ctx,
-        "connect",
-        json!({"pairs": [{"from": "D1.1", "net": "GND"}, {"from": "D1.2", "net": "LED_K"}]}),
-    );
+    let swapped = tool(&ctx, "swap_symbol", fix["args"].clone());
+    assert!(swapped.get("error").is_none(), "{swapped:#}");
     let repaired = tool(&ctx, "check_schematic", json!({"detail": true}));
     assert!(
         !repaired["findings"]
