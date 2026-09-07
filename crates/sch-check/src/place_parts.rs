@@ -1024,9 +1024,15 @@ pub fn layout_tree_schema() -> Value {
                      (neighbours in a row must share a net, so they get a straight wire) — \
                      never put unrelated parts side by side. Anything hanging off a node (a \
                      shunt cap to GND, a pull-up, a bias resistor) goes in a col with the \
-                     series part it attaches to. Around an IC: \
-                     {row:[{col:[input-side parts]}, {part:IC}, {col:[output-side parts]}]}. \
-                     Decoupling caps: a row of caps right after the IC. Two parts that meet \
+                     series part it attaches to. An IC is the HUB of its block: it sits in \
+                     the middle of a row, and each group that serves one of its pins is a \
+                     child of the col on the side that pin is on. An MCU with a crystal, a \
+                     reset button and boot straps on its left-hand pins and decoupling caps: \
+                     {row:[{col:[{row:[{part:Y1},{col:[{part:C1},{part:C2}]}]}, \
+                     {row:[{part:SW1},{part:R1}]}, {row:[{part:JP1},{part:JP2}]}]}, \
+                     {part:U1}, {col:[{part:C3},{part:C4}]}]}. Never a col that ends in the \
+                     IC with its support parts stacked above it — that reads as a pile. \
+                     Decoupling caps: a col right after the IC. Two parts that meet \
                      only through a rail (GND, +3V3) need no adjacency — power symbols join \
                      them. Symmetric halves (H-bridge, differential pair, dual channel) are \
                      two mirrored cols side by side in one row. Keep a block to 3-12 parts \
