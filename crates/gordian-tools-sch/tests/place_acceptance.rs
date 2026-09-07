@@ -399,7 +399,6 @@ fn a_layout_key_no_part_declares_does_not_move_the_parts() {
                 {"ref": "R1", "part": "Device:R", "block": "power_entry", "pins": {"1": "IN", "2": "MID"}},
                 {"ref": "R2", "part": "Device:R", "block": "power_entry", "pins": {"1": "MID", "2": "GND"}}
             ],
-            "blocks": {"power_entry": {"title": "Power entry"}},
             "layout": {"power": {"row": [{"part": "R1"}, {"part": "R2"}]}}
         }),
     );

@@ -35,30 +35,12 @@ pub struct PlacePartsInput {
     /// typesetter measures the symbols and computes every coordinate from it.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub layout: BTreeMap<BlockName, Tree>,
-    /// Region → how it is documented on the sheet: the caption drawn on its frame
-    /// and a note explaining a decision. Regions left out are captioned with their
-    /// own name and carry no note.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub blocks: BTreeMap<BlockName, BlockDoc>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub intent: Option<Intent>,
     /// The request fixes the part list: nothing may be added beyond what it
     /// names. Recorded on the project, so every later check honours it too.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub strict: bool,
-}
-
-/// What a region says about itself on the drawn sheet.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
-#[serde(deny_unknown_fields)]
-pub struct BlockDoc {
-    /// Frame caption. Defaults to the region's own name.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub title: Option<String>,
-    /// One line under the frame, for the decision a reader cannot infer from the
-    /// netlist — "150 kHz, sized for 500 mA", "pull-ups on the host side only".
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub note: Option<String>,
 }
 
 /// One part and its pin connections.
@@ -408,18 +390,6 @@ pub fn into_design(
         design
             .blocks
             .insert(default_block.to_string(), Block::default());
-    }
-    for (name, doc) in &input.blocks {
-        match design.blocks.get_mut(name) {
-            Some(block) => {
-                block.title = doc.title.clone();
-                block.note = doc.note.clone();
-            }
-            None => diags.push(Diagnostic::warning(
-                "unknown-block",
-                format!("`blocks` names region `{name}`, which no part joins — ignored"),
-            )),
-        }
     }
     for (name, tree) in &input.layout {
         match design.blocks.get_mut(name) {
@@ -1179,22 +1149,6 @@ pub fn place_parts_input_schema() -> Value {
                      Blocks — outlines and titles — are made afterwards with \
                      create_and_update_block and tiled with arrange_blocks.",
                 "additionalProperties": true
-            },
-            "blocks": {
-                "type": "object",
-                "description":
-                    "Region -> {title?, note?}: the caption drawn on that region's frame \
-                     and one line of explanation under it. Write a `note` wherever a human \
-                     would say why — a switching frequency, a sizing choice, which side a \
-                     pull-up belongs on.",
-                "additionalProperties": {
-                    "type": "object",
-                    "properties": {
-                        "title": {"type": "string"},
-                        "note": {"type": "string"}
-                    },
-                    "additionalProperties": false
-                }
             },
             "intent": {
                 "type": "object",

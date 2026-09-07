@@ -473,6 +473,24 @@ fn place_parts_inner(
     mismatch.disturbed = disturbed(&before, &connect::extract(doc));
     let committed = mismatch.is_empty();
     if committed {
+        // The region the payload placed a part under is the name the model calls the
+        // group by until it is outlined: `arrange({block})` and the pieces that move
+        // together both read it.
+        for (region, contents) in &design.blocks {
+            if sch_model::result::synthesized_block(region) {
+                continue;
+            }
+            for refdes in contents.components.keys().filter(|r| new_refs.contains(*r)) {
+                let uuids: Vec<String> = doc
+                    .symbols()
+                    .filter(|s| s.refdes() == refdes)
+                    .map(|s| s.uuid.clone())
+                    .collect();
+                for uuid in uuids {
+                    doc.set_field(&uuid, sch_model::result::AP_BLOCK, region)?;
+                }
+            }
+        }
         let landed_on = overlaps_created(&overlaps_before, doc);
         if !landed_on.is_empty() {
             doc.restore(snapshot)?;

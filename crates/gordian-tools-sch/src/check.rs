@@ -1807,6 +1807,25 @@ fn inspect_schematic(path: &Path, ctx: &AgentRuntime) -> Result<Inspection> {
         });
     }
 
+    if let Some(groups) = sch_floorplan::blocks::unblocked_groups(&doc).filter(|g| *g >= 2) {
+        let message = format!("{groups} placed groups and no block outlined");
+        let (refs, nets, at) = locator.locate(&message, std::iter::empty::<String>(), std::iter::empty::<String>());
+        findings.push(Finding {
+            severity: "warning".to_string(),
+            source: "composition",
+            code: "no-blocks".to_string(),
+            message,
+            refs,
+            nets,
+            at,
+            fix: None,
+            why: "A reader finds a sub-circuit by its outline and title. Outline each one with \
+                  create_and_update_block, then tile them with arrange_blocks."
+                .to_string(),
+            advisory: true,
+        });
+    }
+
     if let Some(Ok(fidelity)) = &fidelity {
         findings.extend(fidelity_findings(&locator, fidelity));
     }

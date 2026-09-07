@@ -675,3 +675,17 @@ pub fn parts_outside_blocks(doc: &SchDoc) -> Option<Vec<String>> {
             .collect(),
     )
 }
+
+/// How many placement regions the sheet holds while none of them is outlined: the
+/// count of distinct region tags on its parts, `None` once any outline exists.
+pub fn unblocked_groups(doc: &SchDoc) -> Option<usize> {
+    if doc.items().iter().any(|item| matches!(item, Item::Rectangle(_))) {
+        return None;
+    }
+    let regions: BTreeSet<&str> = doc
+        .symbols()
+        .filter(|s| !s.refdes().starts_with('#'))
+        .filter_map(|s| s.fields.get(sch_model::result::AP_BLOCK).map(|f| f.value.as_str()))
+        .collect();
+    Some(regions.len())
+}
