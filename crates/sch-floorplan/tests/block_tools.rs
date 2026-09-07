@@ -144,3 +144,39 @@ fn parts_outside_every_block_are_named_once_a_block_exists() {
     outside.sort();
     assert_eq!(outside, refs(&["C3", "D1", "R1", "R2", "R3", "U2"]));
 }
+
+/// A block redefined with parts that were placed elsewhere pulls those parts beside
+/// the rest before it is outlined, so the outline is a block and not a page.
+#[test]
+fn a_block_gathers_its_far_pieces_before_it_is_outlined() {
+    let Some(env) = KicadInstallation::detect() else {
+        eprintln!("SKIP: no KiCad environment detected");
+        return;
+    };
+    let mut doc = sheet(&env);
+    let refs = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    let partition = sch_doc::connect::extract(&doc).partition();
+    // R1 and D1 drift a long way off, as a part added to a block later does.
+    blocks::create_block(&mut doc, "LED", &refs(&["R1", "D1"]), None).unwrap();
+    let led = sch_floorplan::reseat::pieces(&doc)
+        .unwrap()
+        .into_iter()
+        .find(|p| p.uuids.contains(&doc.symbol_by_ref("D1").unwrap().uuid))
+        .unwrap();
+    doc.translate_items(&led.uuids, 152.4, 152.4);
+    let apart = {
+        let pts: Vec<geom::Point2> = ["U1", "C1", "C2", "R1", "D1"].iter().map(|r| at(&doc, r)).collect();
+        geom::Rect::bounding(&pts).unwrap()
+    };
+    let report = blocks::create_block(&mut doc, "POWER", &refs(&["U1", "C1", "C2", "R1", "D1"]), Some("Power")).unwrap();
+    for part in ["U1", "C1", "C2", "R1", "D1"] {
+        assert!(report.frame.contains(at(&doc, part)), "{part} outside the outline");
+    }
+    assert!(
+        report.frame.width() * report.frame.height() < 0.6 * apart.width() * apart.height(),
+        "outline {:?} is no tighter than the parts' spread {apart:?}",
+        report.frame
+    );
+    assert_eq!(sch_doc::connect::extract(&doc).partition(), partition);
+    assert!(sch_floorplan::visual::body_overlaps(&doc).is_empty());
+}

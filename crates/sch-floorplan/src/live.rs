@@ -192,6 +192,10 @@ pub struct PlaceReport {
 pub struct ArrangeReport {
     /// Reference designators the operation covered, in refdes order.
     pub moved: Vec<String>,
+    /// Blocks whose outline was redrawn around the moved parts; the grid they were
+    /// tiled in no longer holds, so `arrange_blocks` is due again.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub outlines_refit: Vec<String>,
     /// Symbols this call took off the bench, now laid out.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub left_bench: Vec<String>,
@@ -863,11 +867,12 @@ fn rearrange_inner(
         doc.restore(snapshot)?;
         return Err(Error::BodyOverlap(Overlaps(landed_on)));
     }
-    if laid_out {
-        let moved: Vec<String> = placed.iter().map(|it| it.refdes.clone()).collect();
-        crate::blocks::refit_outlines(doc, &moved);
-    }
+    let outlines_refit = match laid_out {
+        true => crate::blocks::refit_outlines(doc, &placed.iter().map(|it| it.refdes.clone()).collect::<Vec<_>>()),
+        false => Vec::new(),
+    };
     Ok(ArrangeReport {
+        outlines_refit,
         // The restore put every benched symbol back on the bench too.
         left_bench: match laid_out {
             true => left_bench,

@@ -170,7 +170,7 @@ pub(crate) fn wired(doc: &SchDoc) -> Option<(Vec<usize>, Sets)> {
 }
 
 /// The pieces, given the joined sets and each block's first symbol.
-fn pieces_of(
+pub(crate) fn pieces_of(
     doc: &SchDoc,
     joinable: &[usize],
     sets: &mut Sets,

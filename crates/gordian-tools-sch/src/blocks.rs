@@ -71,6 +71,7 @@ pub fn create_and_update_block(input: Value, ctx: &AgentRuntime) -> Result<Value
     edit.commit(
         json!({
             "block": report.name,
+            "ignored": report.ignored,
             "parts": report.parts,
             "frame": [report.frame.min_x, report.frame.min_y, report.frame.max_x, report.frame.max_y],
         }),

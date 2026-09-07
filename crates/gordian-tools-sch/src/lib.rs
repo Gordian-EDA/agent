@@ -105,7 +105,7 @@ pub fn tool_defs() -> Vec<Tool> {
         ),
         (
             "create_and_update_block",
-            "Make the listed placed parts one block: outline them and write the title inside the outline's bottom edge. The parts must stand alone — every drawn wire from one of them ends on another of them (blocks meet only through net labels) — and connect to each other. A title the sheet already has is redefined with these parts. Power flags and rails named among the parts are ignored. Standalone parts outside every block are allowed.",
+            "Make the listed placed parts one block: outline them and write the title inside the outline's bottom edge. The parts must stand alone — every drawn wire from one of them ends on another of them (blocks meet only through net labels) — and connect to each other. A title the sheet already has is redefined with these parts. Power flags, rails and refs not on the sheet named among the parts are ignored and reported. Standalone parts outside every block are allowed.",
             blocks::create_block_schema(),
         ),
         (

@@ -30,6 +30,9 @@ const CAPTION_BAND: f64 = TITLE_SIZE * 1.6;
 pub struct BlockReport {
     pub name: String,
     pub parts: Vec<String>,
+    /// Refs the call named that are not on the sheet — usually a power symbol the
+    /// model called `PWR1` while placing it, which the sheet holds as `#PWR…`.
+    pub ignored: Vec<String>,
     pub frame: Rect,
 }
 
@@ -55,17 +58,26 @@ pub enum BlockError {
 }
 
 /// Make `name` the block of `refs`: tag the parts, outline them, title the outline.
-/// Power furniture named among `refs` is ignored — a block's rails come with its parts.
-/// Calling it again for a name the sheet already has redefines that block.
+/// Power furniture named among `refs` is ignored — a block's rails come with its parts —
+/// and so is a ref the sheet does not hold, reported back. Calling it again for a name
+/// the sheet already has redefines that block.
 pub fn create_block(
     doc: &mut SchDoc,
     name: &str,
     refs: &[String],
     title: Option<&str>,
 ) -> Result<BlockReport, BlockError> {
-    let members: BTreeSet<String> = refs.iter().filter(|r| !r.starts_with('#')).cloned().collect();
+    let on_sheet: BTreeSet<String> = doc.symbols().map(|s| s.refdes().to_string()).collect();
+    let named: BTreeSet<String> = refs.iter().filter(|r| !r.starts_with('#')).cloned().collect();
+    let (members, ignored): (BTreeSet<String>, Vec<String>) = {
+        let (known, unknown): (Vec<String>, Vec<String>) = named.into_iter().partition(|r| on_sheet.contains(r));
+        (known.into_iter().collect(), unknown)
+    };
     if members.is_empty() {
-        return Err(BlockError::NoParts);
+        return Err(match ignored.first() {
+            Some(unknown) => BlockError::UnknownPart(unknown.clone()),
+            None => BlockError::NoParts,
+        });
     }
     let symbols: Vec<usize> = doc
         .items()
@@ -76,19 +88,12 @@ pub fn create_block(
             _ => None,
         })
         .collect();
-    for refdes in &members {
-        if !symbols.iter().any(|i| matches!(&doc.items()[*i], Item::Symbol(s) if s.refdes() == refdes)) {
-            return Err(BlockError::UnknownPart(refdes.clone()));
-        }
-    }
     standalone(doc, &members)?;
     connected(doc, &members)?;
 
-    // The name is the tag every member carries; a member of an older block leaves it.
-    for refdes in &members {
-        doc.set_field(refdes, sch_model::result::AP_BLOCK, name)
-            .map_err(|e| BlockError::Doc(e.to_string()))?;
-    }
+    // The name is the tag every member carries, every unit of it; a member of an older
+    // block leaves it.
+    tag(doc, &members, name)?;
     let leavers: Vec<String> = doc
         .items()
         .iter()
@@ -103,18 +108,31 @@ pub fn create_block(
             _ => None,
         })
         .collect();
-    for refdes in &leavers {
-        doc.set_field(refdes, sch_model::result::AP_BLOCK, sch_model::result::DEFAULT_BLOCK)
-            .map_err(|e| BlockError::Doc(e.to_string()))?;
-    }
+    tag(doc, &leavers.into_iter().collect(), sch_model::result::DEFAULT_BLOCK)?;
 
     drop_outline_of(doc, &symbols, name);
+    gather(doc, &members);
     let frame = outline(doc, &symbols, title.unwrap_or(name));
     Ok(BlockReport {
         name: name.to_string(),
         parts: members.into_iter().collect(),
+        ignored,
         frame,
     })
+}
+
+/// Write the block tag on every unit instance of each refdes.
+fn tag(doc: &mut SchDoc, refs: &BTreeSet<String>, name: &str) -> Result<(), BlockError> {
+    let uuids: Vec<String> = doc
+        .symbols()
+        .filter(|s| refs.contains(s.refdes()))
+        .map(|s| s.uuid.clone())
+        .collect();
+    for uuid in uuids {
+        doc.set_field(&uuid, sch_model::result::AP_BLOCK, name)
+            .map_err(|e| BlockError::Doc(e.to_string()))?;
+    }
+    Ok(())
 }
 
 /// Draw the outline of the parts at `symbols` — parts, their labels and stubs, their
@@ -207,6 +225,53 @@ pub fn refit_outlines(doc: &mut SchDoc, refs: &[String]) -> Vec<String> {
         redrawn.push(name);
     }
     redrawn
+}
+
+/// Bring the block's separate drawings together before it is outlined: a part added
+/// to a block later was placed wherever the sheet had room, and an outline around
+/// both is a page-sized box. Each smaller piece is moved rigidly to the first side of
+/// the largest — right, below, left, above — where it lands on nothing; a piece with
+/// no such side stays. Nothing here is re-typeset, and the netlist is proven equal.
+fn gather(doc: &mut SchDoc, members: &BTreeSet<String>) {
+    let Some((joinable, mut sets)) = wired(doc) else { return };
+    let Some(all) = crate::reseat::pieces_of(doc, &joinable, &mut sets, &BTreeMap::new()) else { return };
+    let member_uuids: BTreeSet<String> = doc
+        .symbols()
+        .filter(|s| members.contains(s.refdes()))
+        .map(|s| s.uuid.clone())
+        .collect();
+    let mut mine: Vec<&Piece> = all.iter().filter(|p| p.uuids.iter().any(|u| member_uuids.contains(u))).collect();
+    if mine.len() < 2 {
+        return;
+    }
+    mine.sort_by(|a, b| (b.frame.width() * b.frame.height()).total_cmp(&(a.frame.width() * a.frame.height())));
+    let partition = connect::extract(doc).partition();
+    let overlaps = crate::visual::body_overlaps(doc).len();
+    let whole = doc.snapshot();
+    let mut cluster = mine[0].frame;
+    for piece in &mine[1..] {
+        let f = piece.frame;
+        let sides = [
+            (cluster.max_x + BLOCK_GAP, cluster.min_y),
+            (cluster.min_x, cluster.max_y + BLOCK_GAP),
+            (cluster.min_x - BLOCK_GAP - f.width(), cluster.min_y),
+            (cluster.min_x, cluster.min_y - BLOCK_GAP - f.height()),
+        ];
+        for (x, y) in sides {
+            let before = doc.snapshot();
+            let (dx, dy) = (GRID_50_MIL.snap(x - f.min_x), GRID_50_MIL.snap(y - f.min_y));
+            doc.translate_items(&piece.uuids, dx, dy);
+            if crate::visual::body_overlaps(doc).len() <= overlaps {
+                let moved = Rect::new(f.min_x + dx, f.min_y + dy, f.max_x + dx, f.max_y + dy);
+                cluster = union(&cluster, &moved);
+                break;
+            }
+            let _ = doc.restore(before);
+        }
+    }
+    if connect::extract(doc).partition() != partition {
+        let _ = doc.restore(whole);
+    }
 }
 
 /// A drawn wire from a member's pin must end on a member's pin: a wire that reaches
@@ -376,6 +441,17 @@ pub fn arrange_blocks(doc: &mut SchDoc, rows: &[Vec<String>]) -> Result<ArrangeB
     let Some(all) = pieces(doc) else {
         return Err(BlockError::Unsupported);
     };
+    // Outlines and titles are set absolutely by the cell they belong to, so none of
+    // them travels with a piece — whichever piece the geometry filed it under.
+    let furniture: BTreeSet<String> = doc
+        .items()
+        .iter()
+        .filter_map(|item| match item {
+            Item::Rectangle(r) => Some(r.uuid.clone()),
+            Item::Text(t) if t.size() >= TITLE_SIZE - 0.01 => Some(t.uuid.clone()),
+            _ => None,
+        })
+        .collect();
     let mut cells: BTreeMap<String, Cell> = BTreeMap::new();
     for name in rows.iter().flatten() {
         if cells.contains_key(name) {
@@ -388,7 +464,7 @@ pub fn arrange_blocks(doc: &mut SchDoc, rows: &[Vec<String>]) -> Result<ArrangeB
         if piece.blocks.len() > 1 {
             return Err(BlockError::Joined(piece.blocks.iter().cloned().collect::<Vec<_>>().join(", ")));
         }
-        if let Some(cell) = cell_of(doc, name, piece)? {
+        if let Some(cell) = cell_of(doc, name, piece, &furniture)? {
             cells.insert(name.clone(), cell);
         }
     }
@@ -430,34 +506,49 @@ pub fn arrange_blocks(doc: &mut SchDoc, rows: &[Vec<String>]) -> Result<ArrangeB
     })
 }
 
-/// The block's outline, contents and title within its piece; `None` when it draws no
-/// contents, which nothing can centre.
-fn cell_of(doc: &SchDoc, name: &str, piece: &Piece) -> Result<Option<Cell>, BlockError> {
-    let mut outline = None;
-    let mut content: Option<Rect> = None;
-    let mut caption = None;
-    for item in doc.items() {
-        let Some(uuid) = item.uuid() else { continue };
-        if !piece.uuids.contains(uuid) {
-            continue;
-        }
-        match item {
-            Item::Rectangle(r) => outline = Some((r.uuid.clone(), Rect::from_points(r.start, r.end))),
-            Item::Text(t) if t.size() >= TITLE_SIZE - 0.01 => caption = Some((t.uuid.clone(), t.at.point())),
-            Item::Text(_) => {}
-            _ => {
-                if let Some(b) = doc.item_bbox(item) {
-                    content = Some(content.map_or(b, |c| union(&c, &b)));
-                }
+/// The block's outline and title — found by the title, which NAMES the block, since the
+/// outline may well enclose a neighbour's parts before the blocks are arranged — and the
+/// contents its piece draws; `None` when it draws no contents, which nothing can centre.
+fn cell_of(doc: &SchDoc, name: &str, piece: &Piece, furniture: &BTreeSet<String>) -> Result<Option<Cell>, BlockError> {
+    let titles = |item: &Item| match item {
+        Item::Text(t) if t.size() >= TITLE_SIZE - 0.01 => Some((t.uuid.clone(), t.at.point(), t.text.clone())),
+        _ => None,
+    };
+    let caption = doc
+        .items()
+        .iter()
+        .filter_map(titles)
+        .find(|(_, _, text)| text == name)
+        .or_else(|| doc.items().iter().filter_map(titles).find(|(uuid, _, _)| piece.uuids.contains(uuid)))
+        .map(|(uuid, at, _)| (uuid, at));
+    let rect_at = |keep: &dyn Fn(&str, &Rect) -> bool| {
+        doc.items().iter().find_map(|item| match item {
+            Item::Rectangle(r) if keep(&r.uuid, &Rect::from_points(r.start, r.end)) => {
+                Some((r.uuid.clone(), Rect::from_points(r.start, r.end)))
             }
-        }
-    }
+            _ => None,
+        })
+    };
+    let outline = match &caption {
+        Some((_, at)) => rect_at(&|_, r| r.contains(*at)),
+        None => rect_at(&|uuid, _| piece.uuids.contains(uuid)),
+    };
     let Some(outline) = outline else {
         return Err(BlockError::UnknownBlock(format!("{name} (it has no outline; create it first)")));
     };
+    let mut content: Option<Rect> = None;
+    for item in doc.items() {
+        let Some(uuid) = item.uuid() else { continue };
+        if !piece.uuids.contains(uuid) || furniture.contains(uuid) || matches!(item, Item::Text(_)) {
+            continue;
+        }
+        if let Some(b) = doc.item_bbox(item) {
+            content = Some(content.map_or(b, |c| union(&c, &b)));
+        }
+    }
     Ok(content.map(|content| Cell {
         name: name.to_string(),
-        uuids: piece.uuids.clone(),
+        uuids: piece.uuids.difference(furniture).cloned().collect(),
         outline,
         content,
         caption,
@@ -471,14 +562,8 @@ fn seat_cell(doc: &mut SchDoc, cell: &Cell, target: Rect) -> Result<(), BlockErr
     let body = Rect::new(target.min_x, target.min_y, target.max_x, target.max_y - CAPTION_BAND);
     let dx = GRID_50_MIL.snap((body.min_x + body.max_x) / 2.0 - (cell.content.min_x + cell.content.max_x) / 2.0);
     let dy = GRID_50_MIL.snap((body.min_y + body.max_y) / 2.0 - (cell.content.min_y + cell.content.max_y) / 2.0);
-    let drawing: BTreeSet<String> = cell
-        .uuids
-        .iter()
-        .filter(|u| **u != cell.outline.0 && cell.caption.as_ref().is_none_or(|(c, _)| c != *u))
-        .cloned()
-        .collect();
     if dx != 0.0 || dy != 0.0 {
-        doc.translate_items(&drawing, dx, dy);
+        doc.translate_items(&cell.uuids, dx, dy);
     }
     doc.set_rectangle(
         &cell.outline.0,

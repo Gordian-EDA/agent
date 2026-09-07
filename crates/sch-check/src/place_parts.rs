@@ -65,6 +65,10 @@ pub struct BlockDoc {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct PartSpec {
+    /// Accepted and ignored: a unit belongs on a layout leaf, and the model writes it
+    /// here often enough that refusing the payload costs more than it teaches.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unit: Option<u8>,
     /// Refdes, e.g. `U1`; omitted to allocate from the library prefix.
     #[serde(default, rename = "ref", skip_serializing_if = "Option::is_none")]
     pub refdes: Option<RefDes>,
