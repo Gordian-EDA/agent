@@ -691,11 +691,30 @@ impl<P: Provider> Agent<P> {
     /// cannot do this — the critic is the model itself. Both halves are deadlined
     /// like any other tool; neither writes the design, so an expired render needs
     /// no settling, unlike a mutation.
-    async fn review_schematic(&self) -> ToolOutcome {
+    async fn review_schematic(&self, args: &Value) -> ToolOutcome {
         if !self.client.vision() {
             return into_outcome(Ok(json!({
                 "error": "this model has no vision input; review_schematic needs to see the render",
             })));
+        }
+        // The critic grades a drawing this agent made. A sheet that holds parts it never
+        // placed is someone's drawing: its defects are not this turn's to fix, and every
+        // review of it so far ended with the model re-laying-out what it was told to leave.
+        if args.get("existing").and_then(Value::as_bool) != Some(true)
+            && let Ok(doc) = sch_doc::SchDoc::read(self.runtime.sch_path())
+        {
+            let foreign = gordian_tools_sch::review::foreign_parts(&doc);
+            if !foreign.is_empty() {
+                return into_outcome(Ok(json!({
+                    "skipped": "existing sheet",
+                    "note": format!(
+                        "{} were on this sheet before this agent placed anything, so the sheet is \
+                         not graded against a reference: an edit ends when check_schematic is \
+                         clean. Pass `existing: true` only if the request is to redraw the sheet.",
+                        foreign.join(", ")
+                    ),
+                })));
+            }
         }
         let ctx = Arc::clone(&self.runtime);
         let render = tokio::task::spawn_blocking(move || gordian_tools_sch::review::prepare(&ctx));
@@ -1416,7 +1435,7 @@ impl<P: Provider> Agent<P> {
 
     async fn run_tool_call(&self, call: &ToolCall) -> (String, Vec<Binary>, Option<String>, bool) {
         let outcome = if call.fn_name == "review_schematic" {
-            self.review_schematic().await
+            self.review_schematic(&call.fn_arguments).await
         } else {
             run_kicad_tool(&self.runtime, &self.settling, call).await
         };

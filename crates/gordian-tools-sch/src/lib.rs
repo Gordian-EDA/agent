@@ -130,7 +130,7 @@ pub fn tool_defs() -> Vec<Tool> {
             "An independent visual critic scores the rendered sheet 0-10 against a human-drawn reference sheet rated 9 (as good as it = 9, clearly better = 10) and returns the defects that cost it, each with `at_mm` sheet coordinates, the `refs` involved and a concrete `fix`. Call it once `check_schematic` is clean on a sheet you drew; below 9, re-lay-out the blocks the defects name and review again. Not for an edit of someone's existing sheet: its parts are not yours to move.",
             json!({
                 "type": "object",
-                "properties": {},
+                "properties": { "existing": { "type": "boolean", "description": "Pass true only when the request is to redraw an existing sheet; a sheet holding parts this agent did not place is otherwise not graded." } },
                 "additionalProperties": false
             }),
         ),

@@ -393,3 +393,13 @@ mod tests {
         assert_eq!(defects(&verdict)[0]["refs"], json!(["R3"]));
     }
 }
+
+/// The parts on the sheet this agent never placed: they carry no region tag, and an
+/// edit request leaves them where they are.
+pub fn foreign_parts(doc: &sch_doc::SchDoc) -> Vec<String> {
+    doc.symbols()
+        .filter(|s| !s.refdes().starts_with('#'))
+        .filter(|s| s.fields.get(sch_model::result::AP_BLOCK).is_none())
+        .map(|s| s.refdes().to_string())
+        .collect()
+}

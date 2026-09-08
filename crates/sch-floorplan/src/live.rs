@@ -231,7 +231,7 @@ pub enum Selection {
 }
 
 impl Selection {
-    fn resolve(&self, doc: &SchDoc) -> BTreeSet<String> {
+    pub fn resolve(&self, doc: &SchDoc) -> BTreeSet<String> {
         match self {
             Selection::Refs(refs) => refs.iter().cloned().collect(),
             Selection::Bbox([x1, y1, x2, y2]) => {
@@ -475,11 +475,9 @@ fn place_parts_inner(
     if committed {
         // The region the payload placed a part under is the name the model calls the
         // group by until it is outlined: `arrange({block})` and the pieces that move
-        // together both read it.
+        // together both read it, and a part with any tag at all is one this agent
+        // placed, as against a part that arrived drawn by a person.
         for (region, contents) in &design.blocks {
-            if sch_model::result::synthesized_block(region) {
-                continue;
-            }
             for refdes in contents.components.keys().filter(|r| new_refs.contains(*r)) {
                 let uuids: Vec<String> = doc
                     .symbols()

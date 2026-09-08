@@ -30,6 +30,10 @@ struct SelectionInput {
     block: Option<String>,
     intent: Option<sch_check::Intent>,
     layout: Option<ArrangeLayout>,
+    /// The request really is to re-lay-out parts that were on the sheet before this
+    /// agent drew anything; without it those parts are refused.
+    #[serde(default)]
+    existing: bool,
 }
 
 /// `arrange` lays out ONE selection, so its `layout` is one tree — but `place_parts`
@@ -94,6 +98,10 @@ pub(crate) fn selection_schema(engine: bool) -> Value {
         "block": {
             "type": "string",
             "description": "Select every symbol of this block, by its title or the region name it was placed under (case and punctuation do not matter), bench included."
+        },
+        "existing": {
+            "type": "boolean",
+            "description": "Pass true only when the request itself asks to re-lay-out parts that were on the sheet before this agent placed anything; otherwise a selection holding such a part is refused."
         }
     });
     if engine {
@@ -1058,6 +1066,24 @@ pub(crate) fn arrange(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let mut selection = selection(&input)?;
     let mut edit = Edit::open(ctx)?;
     let selection_notes = resolve_arrangeable_refs(&edit.doc, &mut selection);
+    // A part this agent never placed carries no region tag: it is someone's drawing,
+    // and moving it is not what an edit request asked for.
+    let chosen = selection.resolve(&edit.doc);
+    let foreign: Vec<String> = crate::review::foreign_parts(&edit.doc)
+        .into_iter()
+        .filter(|r| chosen.contains(r))
+        .collect();
+    if !foreign.is_empty() && !input.existing {
+        return Ok(json!({
+            "error": format!(
+                "{} were on the sheet before this agent placed anything and stay where they are; \
+                 arrange only what you placed, or pass `existing: true` if the request is to \
+                 re-lay-out the existing drawing",
+                foreign.join(", ")
+            ),
+            "existing_parts": foreign,
+        }));
+    }
     if matches!(&selection, Selection::Refs(refs) if refs.is_empty()) {
         return Ok(selection_notes.finish(json!({
             "changed": "no arrangeable parts selected",
