@@ -138,6 +138,48 @@ pub struct Agent<'a> {
     base_sheet: Option<render::Sheet>,
     base_nets: BTreeMap<String, BTreeSet<String>>,
     baseline_issues: BTreeSet<String>,
+    seed: Option<Seed>,
+    seed_cosmetics: BTreeSet<String>,
+    pinned_paper: Option<String>,
+}
+
+/// A skill design built, checked and rendered as v1 before the model was asked
+/// anything: the run's opening message hands the model a finished sheet instead
+/// of asking it to re-type a design that is already known to be good.
+struct Seed {
+    name: String,
+    /// Whether the build passed its own checks.
+    clean: bool,
+    /// The `build` report the model would have seen for it.
+    report: String,
+    /// Its rendered sheet.
+    image: Option<Binary>,
+}
+
+impl Seed {
+    /// What the model is told instead of being asked to compose a design.
+    fn briefing(&self, paper: &str) -> String {
+        let next = if self.clean {
+            "First check the request's explicit requirements against that design: a stated part \
+             count (\"at least 18 non-power parts\"), every named part, connector and feature. If \
+             all of them are already there, do NOT rebuild: call `erc` and `review` in the same \
+             turn, then `finish`. Otherwise `build` the design once with exactly what is missing \
+             added (or the values the request asks for), keeping every other part, pin key, net \
+             and layout tree exactly as it is."
+        } else {
+            "The checks found ISSUES: fix exactly those with one more `build` of the same design, \
+             then `erc` and `review`."
+        };
+        format!(
+            "BUILD 1 IS ALREADY DONE. The design JSON of the verified skill `{}` (printed above \
+             under `## Skill: {}`) has been laid out, compiled and checked for you; its report is \
+             below and its render is attached.\n{next}\nKeep `\"paper\": \"{paper}\"`: the engine \
+             grows the sheet by itself when the content does not fit and says so in a note, so a \
+             larger paper you choose only leaves the sheet empty and the reviewer calls that \
+             sprawl.\n\nBUILD 1 REPORT:\n{}",
+            self.name, self.name, self.report
+        )
+    }
 }
 
 impl<'a> Agent<'a> {
@@ -191,6 +233,9 @@ impl<'a> Agent<'a> {
             base_sheet: None,
             base_nets: BTreeMap::new(),
             baseline_issues: BTreeSet::new(),
+            seed: None,
+            seed_cosmetics: BTreeSet::new(),
+            pinned_paper: None,
         })
     }
 
@@ -240,9 +285,67 @@ impl<'a> Agent<'a> {
         Ok(())
     }
 
+    /// Build `design` as v1 before the model is asked anything.
+    ///
+    /// This is the `build` tool on the exact design a matching skill ships, so
+    /// the work directory, the clean-build hook and the report are the ones the
+    /// model would have produced by re-typing it — without the drift that
+    /// re-typing introduces. The skill's `paper` is pinned for the rest of the
+    /// run: the engine already grows the sheet when the content does not fit, so
+    /// a model-chosen escalation only leaves the sheet empty.
+    pub fn seed(&mut self, name: &str, design: &Value) {
+        self.started = Instant::now();
+        let started = Instant::now();
+        self.seed_cosmetics = self.cosmetic_residue(design);
+        let report = self.t_build(design);
+        let clean = self.last_build.is_some() && self.last_build == self.last_ok_build;
+        let image = self.t_render().1;
+        event(format!(
+            "skills: built the {name} starter as v1 in {:.1}s: {}",
+            started.elapsed().as_secs_f64(),
+            one_line(&report, 600)
+        ));
+        self.record("build", &report);
+        self.pinned_paper = design
+            .get("paper")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        self.seed = Some(Seed {
+            name: name.to_string(),
+            clean,
+            report,
+            image,
+        });
+    }
+
+    /// The text collisions a starter already carries, laid out once in advance.
+    ///
+    /// A starter is a fixed layout, so its residual defects are not the model's
+    /// doing, and the only ones worth handing back are the ones the model can
+    /// act on. Two labels drawn a grid unit apart are not: the netlist is right,
+    /// the engine has no better placement to offer, and a model told to fix it
+    /// re-composes the whole sheet — which is how a one-shot turns into six
+    /// builds. They become the run's baseline, exactly as a pre-existing sheet's
+    /// issues do in edit mode, and are reported once instead of chased.
+    fn cosmetic_residue(&self, design: &Value) -> BTreeSet<String> {
+        let probe = self.work_dir.join("seed_probe.kicad_sch");
+        let Ok(report) = sch::build(&self.lib, design, &probe) else {
+            return BTreeSet::new();
+        };
+        let _ = std::fs::remove_file(&probe);
+        report
+            .issues
+            .iter()
+            .filter(|issue| cosmetic(issue))
+            .map(|issue| text_defect_key(issue))
+            .collect()
+    }
+
     /// Run the loop to a finish, a build ceiling or the loop deadline.
     pub async fn run(&mut self, prompt: &str, skills: &str) -> Result<Outcome> {
-        self.started = Instant::now();
+        if self.seed.is_none() {
+            self.started = Instant::now();
+        }
         let system = system_prompt(self.edit_mode());
         let defs = tool_defs(self.edit_mode());
         let mut messages = vec![ChatMessage::user(self.opening_message(prompt, skills))];
@@ -359,6 +462,17 @@ impl<'a> Agent<'a> {
                 parts.push(ContentPart::Binary(binary(&sheet.grid)));
             }
         }
+        if let Some(seed) = self.seed.as_ref() {
+            parts.push(ContentPart::from_text(seed.briefing(
+                self.pinned_paper.as_deref().unwrap_or("the size it is on"),
+            )));
+            if let Some(png) = seed.image.clone() {
+                parts.push(ContentPart::from_text(
+                    "Render of build 1 (grid units on the axes):".to_string(),
+                ));
+                parts.push(ContentPart::Binary(png));
+            }
+        }
         MessageContent::from_parts(parts)
     }
 
@@ -435,6 +549,8 @@ impl<'a> Agent<'a> {
         if self.builds >= self.budget.max_builds {
             return "Build limit reached. Call finish now.".to_string();
         }
+        let (design, pinned) = pin_paper(design, self.pinned_paper.as_deref());
+        let design = &design;
         self.builds += 1;
         let n = self.builds;
         let sch_path = self.work_dir.join(format!("v{n}.kicad_sch"));
@@ -454,14 +570,19 @@ impl<'a> Agent<'a> {
             self.work_dir.join(format!("v{n}_raw.json")),
             serde_json::to_string_pretty(&report.raw).unwrap_or_default(),
         );
-        let pre: Vec<String> = report
+        let accepted = report
             .issues
             .iter()
-            .filter(|i| self.baseline_issues.contains(*i))
-            .cloned()
-            .collect();
-        report.issues.retain(|i| !self.baseline_issues.contains(i));
+            .filter(|i| {
+                self.baseline_issues.contains(*i)
+                    || self.seed_cosmetics.contains(&text_defect_key(i))
+            })
+            .count();
+        report.issues.retain(|i| {
+            !self.baseline_issues.contains(i) && !self.seed_cosmetics.contains(&text_defect_key(i))
+        });
         let parts_now = part_ids(&report.raw);
+        report.issues.extend(self.reversed_leds(&report));
         if let Some(base) = self.base.as_ref() {
             let was: BTreeSet<String> = base.parts.iter().map(|p| p.id.clone()).collect();
             report
@@ -489,11 +610,15 @@ impl<'a> Agent<'a> {
             }
         )];
         out.extend(report.notes.iter().cloned());
-        if !pre.is_empty() {
-            out.push(format!(
-                "({} pre-existing issues of the original design are ignored)",
-                pre.len()
-            ));
+        out.extend(pinned);
+        if accepted > 0 {
+            out.push(match self.base.is_some() {
+                true => format!("({accepted} pre-existing issues of the original design are ignored)"),
+                false => format!(
+                    "({accepted} text-placement defect(s) the starter layout already had are \
+                     accepted as cosmetic - do not try to fix them)"
+                ),
+            });
         }
         if !report.issues.is_empty() {
             out.push("ISSUES (must fix):".to_string());
@@ -525,6 +650,52 @@ impl<'a> Agent<'a> {
         ));
         self.last_report = Some(report);
         out.join("\n")
+    }
+
+    /// LEDs wired the wrong way round: an indicator conducts from A to K, so an
+    /// anode sitting on ground never lights whatever the resistor is.
+    ///
+    /// The pin map is the model's most repeated mistake — `Device:LED` numbers
+    /// its cathode 1 — and neither the checker nor KiCad ERC can see it, since
+    /// both diode pins are passive.
+    fn reversed_leds(&self, report: &sch::BuildReport) -> Vec<String> {
+        let ground = |net: &str| {
+            let net = net.to_ascii_uppercase();
+            net.starts_with("GND") || net.ends_with("GND") || net == "VSS" || net == "0V"
+        };
+        let mut issues = Vec::new();
+        for part in report.raw.get("parts").and_then(Value::as_array).into_iter().flatten() {
+            let (Some(id), Some(lib)) = (
+                part.get("id").and_then(Value::as_str),
+                part.get("lib").and_then(Value::as_str),
+            ) else {
+                continue;
+            };
+            let Some(info) = self.lib.get(lib) else { continue };
+            if !info.description.to_ascii_lowercase().contains("light emitting") {
+                continue;
+            }
+            let net_of = |name: &str| {
+                let pin = info.pins.iter().find(|p| p.name == name)?;
+                let member = format!("{id}.{}", pin.number);
+                report
+                    .netlist
+                    .iter()
+                    .find(|(_, pins)| pins.contains(&member))
+                    .map(|(net, _)| net.clone())
+            };
+            let (Some(anode), Some(cathode)) = (net_of("A"), net_of("K")) else {
+                continue;
+            };
+            if ground(&anode) && !ground(&cathode) {
+                issues.push(format!(
+                    "{id} is reversed: its anode A is on {anode} and its cathode K on {cathode}. An \
+                     LED conducts A -> K, so the supply and its series resistor belong on A and \
+                     ground on K - swap the two nets ({lib} numbers K as pin 1 and A as pin 2)."
+                ));
+            }
+        }
+        issues
     }
 
     fn t_erc(&mut self) -> String {
@@ -774,6 +945,68 @@ impl FinishState {
 
 /// Human-readable differences between two netlists; `N$` autonames and pins of
 /// removed parts are ignored.
+/// Whether an issue is about where a string was DRAWN rather than about the
+/// circuit: two texts on top of each other, or a text over a symbol body.
+///
+/// The netlist is unaffected, and the layout engine has already placed the text
+/// as well as it can, so the model's only lever is to re-compose the whole sheet
+/// — which is how a starter that is otherwise finished turns into six builds.
+fn cosmetic(issue: &str) -> bool {
+    issue.ends_with("texts must not overlap") || issue.ends_with("- move/rotate it")
+}
+
+/// A text-placement defect stripped of everything a re-layout changes: the
+/// coordinates it was drawn at and the generated reference of a power symbol.
+///
+/// The same two labels collide again after every re-composition, a few units
+/// away and under a new `#PWR` number, so an accepted defect has to be
+/// recognised by WHAT collides, not by where.
+fn text_defect_key(issue: &str) -> String {
+    let mut key = String::with_capacity(issue.len());
+    let mut rest = issue;
+    while let Some(at) = rest.find(" at (") {
+        key.push_str(&rest[..at]);
+        rest = match rest[at..].find(')') {
+            Some(end) => &rest[at + end + 1..],
+            None => "",
+        };
+    }
+    key.push_str(rest);
+    let mut from = 0;
+    while let Some(at) = key[from..].find("#PWR").map(|i| from + i + 4) {
+        let digits = key[at..]
+            .find(|c: char| !c.is_ascii_digit())
+            .map_or(key.len(), |n| at + n);
+        key.replace_range(at..digits, "");
+        from = at;
+    }
+    key
+}
+
+/// Hold a seeded design's paper size against a model that tries to change it.
+///
+/// The engine enlarges the sheet itself when the content does not fit, and says
+/// so in a note, so every escalation the model asks for is one the layout did
+/// not need: it leaves the drawing floating in a corner of a much larger page,
+/// which is the defect the reviewer punishes hardest.
+fn pin_paper(design: &Value, pinned: Option<&str>) -> (Value, Option<String>) {
+    let (Some(pinned), Some(asked)) = (pinned, design.get("paper").and_then(Value::as_str)) else {
+        return (design.clone(), None);
+    };
+    if asked == pinned {
+        return (design.clone(), None);
+    }
+    let mut design = design.clone();
+    design["paper"] = json!(pinned);
+    (
+        design,
+        Some(format!(
+            "note: paper kept at {pinned} (you asked for {asked}); the engine enlarges the sheet \
+             on its own when the content does not fit"
+        )),
+    )
+}
+
 /// The references of every part in a laid-out raw design.
 fn part_ids(raw: &Value) -> BTreeSet<String> {
     raw.get("parts")
@@ -1094,6 +1327,69 @@ mod tests {
             .missing()
             .is_empty()
         );
+    }
+
+    /// The same collision re-drawn a few units away, under a new power-symbol
+    /// reference, is the same accepted defect.
+    #[test]
+    fn a_text_defect_is_recognised_wherever_it_is_redrawn() {
+        let a = "label 'NRST' at (152,54) overlaps label 'VBAT' at (151,52) - texts must not overlap";
+        let b = "label 'NRST' at (194,128) overlaps label 'VBAT' at (193,126) - texts must not overlap";
+        assert_eq!(text_defect_key(a), text_defect_key(b));
+        assert_eq!(
+            text_defect_key(a),
+            "label 'NRST' overlaps label 'VBAT' - texts must not overlap"
+        );
+
+        let p = |n| format!("power text '+3V3' of #PWR{n} at (116,66.2) overlaps the body of J1 - move/rotate it");
+        assert_eq!(text_defect_key(&p("016")), text_defect_key(&p("044")));
+
+        assert_ne!(
+            text_defect_key(a),
+            text_defect_key("label 'BOOT0' at (152,54) overlaps label 'VBAT' at (151,52) - texts must not overlap")
+        );
+    }
+
+    /// Only drawing defects are cosmetic; anything about the circuit is not.
+    #[test]
+    fn cosmetic_covers_text_placement_and_nothing_else() {
+        assert!(cosmetic("label 'A' at (1,2) overlaps label 'B' at (1,3) - texts must not overlap"));
+        assert!(cosmetic("power text '+3V3' of #PWR1 at (1,2) overlaps the body of J1 - move/rotate it"));
+        assert!(!cosmetic("wire (132,89)-(132,99) passes through the body of R6"));
+        assert!(!cosmetic("nets '+5V', 'GND' are shorted together as '+5V'"));
+    }
+
+    /// A seeded run holds the skill's paper; an unseeded one leaves the model's
+    /// choice alone.
+    #[test]
+    fn a_pinned_paper_survives_a_rebuild() {
+        let asked = json!({"paper": "A2", "parts": []});
+        let (design, note) = pin_paper(&asked, Some("A3"));
+        assert_eq!(design["paper"], "A3");
+        assert!(note.unwrap().contains("kept at A3"));
+
+        assert_eq!(pin_paper(&asked, Some("A2")), (asked.clone(), None));
+        assert_eq!(pin_paper(&asked, None), (asked.clone(), None));
+        let no_paper = json!({"parts": []});
+        assert_eq!(pin_paper(&no_paper, Some("A3")), (no_paper.clone(), None));
+    }
+
+    /// A clean seed tells the model to grade the sheet, not to redraw it; a
+    /// seed with issues tells it to fix exactly those.
+    #[test]
+    fn the_seed_briefing_reports_the_build_that_already_happened() {
+        let seed = |clean| Seed {
+            name: "stm32f103-blue-pill".into(),
+            clean,
+            report: "BUILD 1: OK (no hard issues)".into(),
+            image: None,
+        };
+        let clean = seed(true).briefing("A3");
+        assert!(clean.contains("BUILD 1 IS ALREADY DONE"));
+        assert!(clean.contains("do NOT rebuild"));
+        assert!(clean.contains("`\"paper\": \"A3\"`"));
+        assert!(clean.contains("BUILD 1: OK (no hard issues)"));
+        assert!(seed(false).briefing("A3").contains("fix exactly those"));
     }
 
     #[test]

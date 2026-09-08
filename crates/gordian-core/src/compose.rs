@@ -209,15 +209,15 @@ async fn round(
 ///
 /// A round that runs into the wall clock is wasted whole, and its model calls are
 /// the least predictable part of the run — measured rounds ranged from 40 s to
-/// 75 s. The caller's deadline is itself capped at 60 s (see
-/// `run::COMPOSE_MAX`), so the first-round guess is pinned to that same ceiling:
-/// any looser and a fully-budgeted first round would never even start; any
-/// tighter and it would risk starting one it cannot finish. The hard cap still
-/// comes from the `tokio::time::timeout` around the round itself, so a guess
-/// that turns out optimistic costs only that round, never the deadline.
+/// 75 s. The caller's deadline is itself capped at 60 s (see `run::COMPOSE_MAX`),
+/// and the check happens after that deadline was computed, so the first-round
+/// guess must sit strictly under that ceiling: pinned to it, a fully-budgeted
+/// pass never starts a single round. The hard cap still comes from the
+/// `tokio::time::timeout` around the round itself, so an optimistic guess costs
+/// only that round, never the deadline.
 fn round_cost(started: Instant, done: usize) -> Duration {
     match done {
-        0 => Duration::from_secs(60),
+        0 => Duration::from_secs(45),
         done => started.elapsed().mul_f64(1.6) / done as u32,
     }
 }
@@ -279,14 +279,15 @@ mod tests {
     #[test]
     fn the_first_round_is_costed_conservatively_and_then_by_measurement() {
         let started = Instant::now() - Duration::from_secs(60);
-        assert_eq!(round_cost(started, 0), Duration::from_secs(60));
+        assert_eq!(round_cost(started, 0), Duration::from_secs(45));
         assert!(round_cost(started, 2) >= Duration::from_secs(48));
     }
 
-    /// The first-round guess matches the compose pass's own wall-clock cap
-    /// (`run::COMPOSE_MAX`): a fully-budgeted cap must still let a round start.
+    /// The first-round guess must be strictly under the compose pass's own
+    /// wall-clock cap (`run::COMPOSE_MAX`), which is already a few instants old
+    /// by the time it is checked: a fully-budgeted pass must still start a round.
     #[test]
     fn the_first_round_guess_fits_inside_the_compose_cap() {
-        assert_eq!(round_cost(Instant::now(), 0), Duration::from_secs(60));
+        assert!(round_cost(Instant::now(), 0) < Duration::from_secs(60));
     }
 }

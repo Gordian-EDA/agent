@@ -75,6 +75,14 @@ pub async fn run(
 
     let loop_started = Instant::now();
     agent.on_clean_build(&hook);
+    // Skill-first: a skill the trigger pass claims outright is built as v1 here,
+    // so the run does not pay a model request - nor the drift of a re-typed
+    // design - for a layout that is already known to build and score.
+    if !agent.edit_mode()
+        && let Some(starter) = skills::starter(&options.prompt)
+    {
+        agent.seed(&starter.name, &starter.design);
+    }
     let outcome = agent.run(&options.prompt, &skill_block).await?;
     let loop_seconds = loop_started.elapsed().as_secs_f64();
     event(format!(

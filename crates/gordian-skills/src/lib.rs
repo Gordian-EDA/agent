@@ -23,6 +23,34 @@ pub struct Skill {
     pub body: String,
 }
 
+impl Skill {
+    /// Whether the deterministic trigger pass — not the fuzzy fallback — claims
+    /// `prompt`. Only such a match is specific enough to build unattended.
+    pub fn matches_trigger(&self, prompt: &str) -> bool {
+        trigger_score(self, &prompt.to_lowercase()) > 0.0
+    }
+
+    /// The ready-to-build design JSON: the first ```json block under `## Layout`.
+    ///
+    /// `None` when the section is missing or the block does not parse, which
+    /// leaves the caller on the ordinary model-driven path.
+    pub fn design(&self) -> Option<serde_json::Value> {
+        let (at, _) = self
+            .body
+            .match_indices("## Layout")
+            .find(|(i, _)| *i == 0 || self.body.as_bytes()[i - 1] == b'\n')?;
+        let (_, rest) = self.body[at..].split_once("```json")?;
+        let (block, _) = rest.split_once("\n```")?;
+        match serde_json::from_str(block) {
+            Ok(design) => Some(design),
+            Err(err) => {
+                tracing::warn!(skill = %self.name, %err, "skill Layout JSON does not parse");
+                None
+            }
+        }
+    }
+}
+
 /// A fuzzy match must reach this fraction of a pattern's self-match score to count.
 const FUZZY_MIN: f64 = 0.80;
 
@@ -436,6 +464,38 @@ mod tests {
                 "prompt: {prompt}"
             );
         }
+    }
+
+    /// Every skill carries a design the run can build without asking the model.
+    #[test]
+    fn every_skill_layout_block_is_a_buildable_design() {
+        for skill in repo_skills() {
+            let design = skill
+                .design()
+                .unwrap_or_else(|| panic!("{} has no parseable Layout JSON", skill.name));
+            assert!(
+                design["parts"].as_array().is_some_and(|p| !p.is_empty()),
+                "{} has no parts",
+                skill.name
+            );
+            assert!(design["layout"].is_array(), "{} has no layout", skill.name);
+        }
+    }
+
+    #[test]
+    fn a_broken_layout_block_yields_no_design() {
+        let mut skill = stub("x", "", &["x"]);
+        skill.body = "## Layout\n```json\n{not json}\n```".into();
+        assert!(skill.design().is_none());
+        skill.body = "## Parts\nno layout here".into();
+        assert!(skill.design().is_none());
+    }
+
+    #[test]
+    fn only_the_trigger_pass_claims_a_prompt() {
+        let skill = stub("hbridge", "H-bridge", &["h-bridge", "motor driver"]);
+        assert!(skill.matches_trigger("a 12V H-Bridge please"));
+        assert!(!skill.matches_trigger("a discrete hbridge for a brushed motor"));
     }
 
     #[test]
