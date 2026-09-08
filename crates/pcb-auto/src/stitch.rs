@@ -105,6 +105,17 @@ pub fn stitch_islands(
     net: &str,
     clearance: f64,
 ) -> anyhow::Result<usize> {
+    stitch_islands_forced(board, islands, net, clearance, false)
+}
+
+/// `force` treats every island but the largest as stranded, whatever the connectivity model says.
+pub fn stitch_islands_forced(
+    board: &mut Board,
+    islands: &[Island],
+    net: &str,
+    clearance: f64,
+    force: bool,
+) -> anyhow::Result<usize> {
     let copper = board.copper_layers();
     if copper.len() < 2 || islands.len() < 2 {
         return Ok(0);
@@ -169,6 +180,13 @@ pub fn stitch_islands(
     // looking connected that KiCad reports as open; being wrong the other way only costs a via,
     // and every via this places is clearance-checked before it goes in.
     // the component holding the largest island is the plane; everything else has to reach it
+    let biggest = (0..islands.len())
+        .max_by(|a, b| {
+            polygon_area(&islands[*a].poly)
+                .abs()
+                .partial_cmp(&polygon_area(&islands[*b].poly).abs())
+                .unwrap()
+        });
     let main = (0..islands.len())
         .max_by(|a, b| {
             polygon_area(&islands[*a].poly)
@@ -245,7 +263,12 @@ pub fn stitch_islands(
             if added >= MAX_VIAS {
                 break;
             }
-            if main == Some(uf.find(isl.index)) {
+            let joined = if force {
+                Some(isl.index) == biggest
+            } else {
+                main == Some(uf.find(isl.index))
+            };
+            if joined {
                 continue; // already part of the plane
             }
             // The largest island on the far side is the one worth reaching; try them all, biggest

@@ -615,6 +615,10 @@ pub fn auto_layout(
     }
     step_shrink(&mut run, &mut board);
     step_gnd_zone(&mut run, &mut board);
+    // MEASURED AND REJECTED: `crate::fanout::fanout_ground` here ties 17 ground pins to the plane
+    // before any copper exists, and the router does reach 47/48 nets with it -- but its vias are
+    // obstacles, and the board came back 0.968 in 82 s against 0.976 in 62 s without. It did not
+    // even stop the fill fragmenting; it only moved which islands broke off.
     board.save(Some(pcb))?;
 
     // The rules DRC will check the board against, written before anything is routed so the
@@ -750,6 +754,7 @@ pub fn auto_layout(
             .cloned()
             .collect();
         if left.is_empty() {
+            mend_poured(&mut run, pcb, &rules, &touch_up_rules, &mut report, &poured)?;
             return Ok(finish(run, report));
         }
         let before = std::fs::read(pcb)?;
@@ -760,7 +765,7 @@ pub fn auto_layout(
             &RouteOptions {
                 passes: TOUCH_UP_PASSES,
                 timeout_s: budget,
-                rules: touch_up_rules,
+                rules: touch_up_rules.clone(),
                 net_widths: BTreeMap::new(),
                 only_nets: left.clone(),
                 ..Default::default()
@@ -797,7 +802,112 @@ pub fn auto_layout(
         }
     }
 
+    mend_poured(&mut run, pcb, &rules, &touch_up_rules, &mut report, &BTreeSet::new())?;
+    force_mend(&mut run, pcb, &rules, &mut report)?;
     Ok(finish(run, report))
+}
+
+/// Last resort on a pour DRC still calls broken: mend it on KiCad's verdict, not on our model.
+fn force_mend(
+    run: &mut Run,
+    pcb: &Path,
+    rules: &Rules,
+    report: &mut CheckReport,
+) -> anyhow::Result<()> {
+    if report.unconnected == 0 || run.left_s() < 10.0 {
+        return Ok(());
+    }
+    let before = std::fs::read(pcb)?;
+    let mut board = Board::load(pcb)?;
+    mend_forced(run, &mut board, pcb, rules)?;
+    let after = checks::check(run.kicad, pcb)?;
+    if after.unconnected < report.unconnected && after.errors <= report.errors {
+        *report = after;
+    } else {
+        std::fs::write(pcb, &before)?;
+    }
+    Ok(())
+}
+
+/// Route the pins a fragmented pour stranded.
+///
+/// At export time the pour is whole, so every pin of it counts as plane-connected and is held out
+/// of the network; the fill only breaks up once the router has laid its copper. A second export
+/// against the broken fill offers exactly the pins that are now on a piece of pour reaching
+/// nothing — and it has to KEEP the net's copper, because ripping a poured net is what makes the
+/// router lay nothing back.
+fn mend_poured(
+    run: &mut Run,
+    pcb: &Path,
+    rules: &Rules,
+    route_rules: &Rules,
+    report: &mut CheckReport,
+    _poured: &BTreeSet<String>,
+) -> anyhow::Result<()> {
+    // Only worth a router run while the pour still has pins the plane does not reach. MEASURED:
+    // on a board whose remaining opens are all zone-to-zone this closes nothing and costs ten
+    // seconds, so it is gated on there being a stranded PIN to route, not merely a broken fill.
+    if report.unconnected == 0 || run.left_s() < 14.0 || !report.has_stranded_pin {
+        return Ok(());
+    }
+    let board = Board::load(pcb)?;
+    let poured: Vec<String> = board
+        .zones()
+        .into_iter()
+        .filter(|z| z.keepout.is_none() && !z.net_name.is_empty())
+        .map(|z| z.net_name)
+        .collect();
+    let targets: Vec<String> = report
+        .unrouted_nets
+        .iter()
+        .filter(|n| poured.contains(n))
+        .cloned()
+        .collect();
+    if targets.is_empty() {
+        return Ok(());
+    }
+    let before = std::fs::read(pcb)?;
+    let mut work = Board::load(pcb)?;
+    let budget = (run.left_s() - 8.0).max(5.0) as u64;
+    match freerouting::route(
+        &mut work,
+        &RouteOptions {
+            passes: TOUCH_UP_PASSES,
+            timeout_s: budget,
+            rules: route_rules.clone(),
+            net_widths: BTreeMap::new(),
+            only_nets: targets.clone(),
+            keep_existing: true,
+            ..Default::default()
+        },
+        run.kicad,
+    ) {
+        Ok(r) => {
+            crate::tidy::tidy(&mut work);
+            work.strip_zone_fills();
+            work.save(Some(pcb))?;
+            mend(run, &mut work, pcb, rules)?;
+            let after = checks::check(run.kicad, pcb)?;
+            if after.unconnected < report.unconnected {
+                run.note(format!(
+                    "stranded pour pins on {targets:?}: {} track(s), {} left",
+                    r.tracks_added, after.unconnected
+                ));
+                *report = after;
+            } else {
+                std::fs::write(pcb, &before)?;
+                run.note(format!(
+                    "pour touch-up on {targets:?} closed nothing ({} still open)",
+                    after.unconnected
+                ));
+            }
+        }
+        Err(e) => {
+            std::fs::write(pcb, &before)?;
+            run.note(format!("pour touch-up failed: {}", first_line(&e.to_string())));
+        }
+    }
+    Ok(())
 }
 
 /// Mend the ground pour: one refill, then every fix that fill supports.
@@ -806,6 +916,26 @@ pub fn auto_layout(
 /// stitching vias go in first because a via is cheaper and tidier than a track, and whatever no
 /// via could reach is routed back to the plane. Both write into the board; the file is saved once.
 fn mend(run: &mut Run, board: &mut Board, pcb: &Path, rules: &Rules) -> anyhow::Result<()> {
+    mend_with(run, board, pcb, rules, false)
+}
+
+/// `force` abandons the connectivity model and treats every island but the largest as stranded.
+///
+/// The model joins islands through vias and plated through-holes, and on a real board it still
+/// disagrees with KiCad often enough to leave pieces unmended. When DRC says the pour is in
+/// pieces and the modelled pass found nothing to do, KiCad's verdict wins: every via this places
+/// is clearance-checked anyway, so being wrong here costs a via, not a violation.
+fn mend_forced(run: &mut Run, board: &mut Board, pcb: &Path, rules: &Rules) -> anyhow::Result<()> {
+    mend_with(run, board, pcb, rules, true)
+}
+
+fn mend_with(
+    run: &mut Run,
+    board: &mut Board,
+    pcb: &Path,
+    rules: &Rules,
+    force: bool,
+) -> anyhow::Result<()> {
     if !run.opts.gnd_zone || run.left_s() < 8.0 {
         return Ok(());
     }
@@ -819,9 +949,10 @@ fn mend(run: &mut Run, board: &mut Board, pcb: &Path, rules: &Rules) -> anyhow::
             return Ok(());
         }
     };
-    let vias = crate::stitch::stitch_islands(board, &islands, &gnd.name, rules.clearance)
+    let vias = crate::stitch::stitch_islands_forced(board, &islands, &gnd.name, rules.clearance, force)
         .unwrap_or(0);
-    let routed = crate::repair::repair_islands(board, &islands, &gnd.name, rules).unwrap_or(0);
+    let routed =
+        crate::repair::repair_islands_forced(board, &islands, &gnd.name, rules, force).unwrap_or(0);
     if vias + routed > 0 {
         board.strip_zone_fills();
         board.save(Some(pcb))?;

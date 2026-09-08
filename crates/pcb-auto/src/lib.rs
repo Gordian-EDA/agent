@@ -9,6 +9,7 @@ pub mod checks;
 pub mod dsn;
 pub mod fab;
 pub mod freerouting;
+pub mod fanout;
 pub mod geom;
 pub mod model;
 pub mod pipeline;

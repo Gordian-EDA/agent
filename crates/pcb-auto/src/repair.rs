@@ -325,6 +325,17 @@ pub fn repair_islands(
     net: &str,
     rules: &Rules,
 ) -> anyhow::Result<usize> {
+    repair_islands_forced(board, islands, net, rules, false)
+}
+
+/// `force` treats every island but the largest as stranded, whatever the connectivity model says.
+pub fn repair_islands_forced(
+    board: &mut Board,
+    islands: &[Island],
+    net: &str,
+    rules: &Rules,
+    force: bool,
+) -> anyhow::Result<usize> {
     let Some(gnd) = board.net_by_name(net) else {
         return Ok(0);
     };
@@ -333,7 +344,15 @@ pub fn repair_islands(
     }
     let (comp, main) = components(board, islands, gnd.id);
     let Some(main) = main else { return Ok(0) };
-    let stranded: Vec<usize> = (0..islands.len()).filter(|&i| comp[i] != main).collect();
+    let biggest = (0..islands.len()).max_by(|a, b| {
+        polygon_area(&islands[*a].poly)
+            .abs()
+            .partial_cmp(&polygon_area(&islands[*b].poly).abs())
+            .unwrap()
+    });
+    let stranded: Vec<usize> = (0..islands.len())
+        .filter(|&i| if force { Some(i) != biggest } else { comp[i] != main })
+        .collect();
     if stranded.is_empty() {
         return Ok(0);
     }

@@ -28,6 +28,9 @@ pub struct CheckReport {
     pub courtyard_overlaps: Vec<(String, String)>,
     pub parts_outside_outline: Vec<String>,
     pub outline_mm: (f64, f64),
+    /// True when some missing connection names a pad, not just two pieces of one pour. Two
+    /// zone-to-zone items are a fill that broke up; a pad means a pin nothing reaches.
+    pub has_stranded_pin: bool,
 }
 
 /// Connections the netlist asks for: one per pad past the first on every net.
@@ -98,8 +101,12 @@ pub fn check(kicad: &KicadInstallation, pcb: &Path) -> anyhow::Result<CheckRepor
     for v in judged().filter(|v| v.severity == "error") {
         *by_type.entry(v.kind.clone()).or_default() += 1;
     }
+    let mut has_stranded_pin = false;
     let mut counts: BTreeMap<String, usize> = BTreeMap::new();
     for u in &report.unconnected_items {
+        if u.items.iter().any(|i| i.description.contains("ad ")) {
+            has_stranded_pin = true;
+        }
         for item in &u.items {
             if let Some(n) = net_in_description(&item.description) {
                 *counts.entry(n).or_default() += 1;
@@ -132,5 +139,6 @@ pub fn check(kicad: &KicadInstallation, pcb: &Path) -> anyhow::Result<CheckRepor
         courtyard_overlaps: overlaps,
         parts_outside_outline: outside,
         outline_mm: bb.map(|b| (b.w(), b.h())).unwrap_or((0.0, 0.0)),
+        has_stranded_pin,
     })
 }

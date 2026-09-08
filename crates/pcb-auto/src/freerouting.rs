@@ -35,6 +35,10 @@ pub struct RouteOptions {
     pub rules: Rules,
     /// Route only these nets, protecting every other net's copper; empty routes everything.
     pub only_nets: Vec<String>,
+    /// Keep the target nets' own copper instead of ripping it up first. A poured net has to be
+    /// routed this way: ripping ground leaves the router a board with no ground tracks and a pour
+    /// asserting its pins are already joined, so it lays nothing back.
+    pub keep_existing: bool,
 }
 
 impl Default for RouteOptions {
@@ -46,6 +50,7 @@ impl Default for RouteOptions {
             net_widths: BTreeMap::new(),
             rules: Rules::default(),
             only_nets: Vec::new(),
+            keep_existing: false,
         }
     }
 }
@@ -177,7 +182,7 @@ pub fn route(
     kicad: &KicadInstallation,
 ) -> anyhow::Result<RouteResult> {
     let only: HashSet<String> = opts.only_nets.iter().cloned().collect();
-    if !only.is_empty() {
+    if !only.is_empty() && !opts.keep_existing {
         // A retry re-lays these nets from scratch: their own copper goes, everything else
         // stays and is handed to the router as protected wiring.
         let ids: HashSet<i64> = board
