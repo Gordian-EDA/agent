@@ -527,7 +527,7 @@ fn node_nets(k: &MNode, gl: &GroupLayout) -> HashSet<String> {
             Some(pi) => gl.parts[pi]
                 .pinmap
                 .values()
-                .filter(|n| gl.signal_nets.contains_key(*n))
+                .filter(|n| gl.signal_nets.contains_key(n))
                 .cloned()
                 .collect(),
             None => HashSet::new(),
@@ -833,7 +833,7 @@ fn lint_layout(
         changed = false;
         for i in 0..layout.len() {
             let ids = id_set(&layout[i]);
-            if !(!ids.is_empty() && ids.len() < 3) || big_part(&ids) {
+            if ids.is_empty() || ids.len() >= 3 || big_part(&ids) {
                 continue;
             }
             let mine = nets_of_tree(&layout[i]["tree"]);
@@ -954,7 +954,7 @@ fn face_neighbours(kids: &mut [MNode], kind: &str, raw_nodes: &[Value], gl: &Gro
     let rails: HashSet<String> = gl
         .nets
         .keys()
-        .filter(|n| !gl.signal_nets.contains_key(*n))
+        .filter(|n| !gl.signal_nets.contains_key(n))
         .cloned()
         .collect();
     for i in 0..kids.len() {
@@ -1316,12 +1316,12 @@ fn circuit_geos_mut(d: &mut Value) -> (Vec<(String, Geo)>, Vec<String>) {
         .unwrap_or_default();
     let mut used: HashSet<String> = HashSet::new();
     let mut blocks: Vec<Block> = Vec::new();
-    for li in 0..layout.len() {
+    for blk in layout.iter_mut() {
         let mut ids = Vec::new();
-        if layout[li].get("tree").is_some() {
-            collect(&mut layout[li]["tree"], &mut ids);
+        if blk.get("tree").is_some() {
+            collect(&mut blk["tree"], &mut ids);
         }
-        let title = title_of(&layout[li]);
+        let title = title_of(blk);
         let mut members = Vec::new();
         for i in &ids {
             if !by_id.contains_key(i) {
@@ -1340,8 +1340,8 @@ fn circuit_geos_mut(d: &mut Value) -> (Vec<(String, Geo)>, Vec<String>) {
             }
         }
         if !members.is_empty() {
-            let has_tree = layout[li].get("tree").is_some();
-            blocks.push(Block { title, members, blk: layout[li].clone(), has_tree });
+            let has_tree = blk.get("tree").is_some();
+            blocks.push(Block { title, members, blk: blk.clone(), has_tree });
         }
     }
     let (new_layout, lint_notes) = lint_layout(&layout, &parts, &by_id, &power);
@@ -1351,10 +1351,10 @@ fn circuit_geos_mut(d: &mut Value) -> (Vec<(String, Geo)>, Vec<String>) {
         // re-collect membership after the lints changed the trees
         used.clear();
         blocks.clear();
-        for li in 0..layout.len() {
+        for blk in layout.iter_mut() {
             let mut ids = Vec::new();
-            if layout[li].get("tree").is_some() {
-                collect(&mut layout[li]["tree"], &mut ids);
+            if blk.get("tree").is_some() {
+                collect(&mut blk["tree"], &mut ids);
             }
             let members: Vec<usize> = ids
                 .iter()
@@ -1363,11 +1363,11 @@ fn circuit_geos_mut(d: &mut Value) -> (Vec<(String, Geo)>, Vec<String>) {
                 .collect();
             used.extend(ids.iter().filter(|i| by_id.contains_key(*i)).cloned());
             if !members.is_empty() {
-                let has_tree = layout[li].get("tree").is_some();
+                let has_tree = blk.get("tree").is_some();
                 blocks.push(Block {
-                    title: title_of(&layout[li]),
+                    title: title_of(blk),
                     members,
-                    blk: layout[li].clone(),
+                    blk: blk.clone(),
                     has_tree,
                 });
             }

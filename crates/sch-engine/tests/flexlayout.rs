@@ -98,6 +98,17 @@ fn compare(name: &str, got: &Value, want: &Value, fails: &mut Vec<String>) {
     }
 }
 
+fn fixture_names() -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(fixtures())
+        .expect("fixtures dir")
+        .flatten()
+        .filter(|e| e.path().join("raw.json").is_file())
+        .map(|e| e.file_name().to_string_lossy().to_string())
+        .collect();
+    names.sort();
+    names
+}
+
 #[test]
 fn build_flex_design_matches_python() {
     // loading the library installs the process-wide symbol index the layout engine reads
@@ -106,13 +117,7 @@ fn build_flex_design_matches_python() {
         return;
     };
     let dir = fixtures();
-    let mut names: Vec<String> = std::fs::read_dir(&dir)
-        .expect("fixtures dir")
-        .flatten()
-        .filter(|e| e.path().join("raw.json").is_file())
-        .map(|e| e.file_name().to_string_lossy().to_string())
-        .collect();
-    names.sort();
+    let names = fixture_names();
     assert!(!names.is_empty(), "no fixtures under {}", dir.display());
     let mut fails: Vec<String> = Vec::new();
     for name in &names {
@@ -144,4 +149,78 @@ fn build_flex_design_matches_python() {
         names.len(),
         fails.join("\n  ")
     );
+}
+
+/// Element order must match too — except for `power`/`wires`, where Python's PWR_FLAG placement iterates a
+/// `set` of flagged nets and so is not reproducible run to run (only the multiset above is well defined).
+#[test]
+fn raw_element_order_matches_python() {
+    let Some(_lib) = library() else { return };
+    let dir = fixtures();
+    let mut fails = Vec::new();
+    for name in fixture_names() {
+        let p = dir.join(&name);
+        let d: Value = serde_json::from_str(&std::fs::read_to_string(p.join("design.json")).unwrap()).unwrap();
+        let want: Value = serde_json::from_str(&std::fs::read_to_string(p.join("raw.json")).unwrap()).unwrap();
+        let (got, _) = sch_engine::flexlayout::build_flex_design(&d);
+        for k in ["parts", "labels", "nc", "texts", "rects"] {
+            let a: Vec<String> = got.get(k).and_then(|v| v.as_array()).into_iter().flatten().map(canon).collect();
+            let b: Vec<String> = want.get(k).and_then(|v| v.as_array()).into_iter().flatten().map(canon).collect();
+            if a != b {
+                let i = a.iter().zip(b.iter()).position(|(x, y)| x != y).unwrap_or(a.len().min(b.len()));
+                fails.push(format!(
+                    "{name}/{k}: {} vs {} elems, first diff at {i}:\n    got  {:?}\n    want {:?}",
+                    a.len(), b.len(), a.get(i), b.get(i)
+                ));
+            }
+        }
+    }
+    assert!(fails.is_empty(), "{}", fails.join("\n"));
+}
+
+/// Designs the Python reference rejects must be rejected with the same messages.
+#[test]
+fn layout_errors_match_python() {
+    let Some(_lib) = library() else { return };
+    let dir = fixtures();
+    let mut fails = Vec::new();
+    let mut seen = 0;
+    for e in std::fs::read_dir(&dir).expect("fixtures dir").flatten() {
+        let p = e.path();
+        if p.join("raw.json").is_file() || !p.join("report.json").is_file() {
+            continue;
+        }
+        let name = e.file_name().to_string_lossy().to_string();
+        let report: Value = serde_json::from_str(&std::fs::read_to_string(p.join("report.json")).unwrap()).unwrap();
+        if !report["layout_failed"].as_bool().unwrap_or(false) {
+            continue;
+        }
+        seen += 1;
+        let d: Value = serde_json::from_str(&std::fs::read_to_string(p.join("design.json")).unwrap()).unwrap();
+        let (_, errors) = sch_engine::flexlayout::build_flex_design(&d);
+        // TODO(S2): PartInst::new's "did you mean" hint does not reproduce Python's difflib
+        // get_close_matches ranking yet, so the suggestion list is normalised away here.
+        let strip_hint = |s: &str| -> String {
+            match (s.find(" (did you mean "), s.find("?); ")) {
+                (Some(a), Some(b)) if b > a => format!("{}{}", &s[..a], &s[b + 2..]),
+                _ => s.to_string(),
+            }
+        };
+        let want: Vec<&str> = report["issues"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .chain(report["notes"].as_array().into_iter().flatten())
+            .filter_map(|v| v.as_str())
+            .collect();
+        let mut want: Vec<String> = want.iter().map(|s| strip_hint(s)).collect();
+        want.sort();
+        let mut got: Vec<String> = errors.iter().map(|s| strip_hint(s)).collect();
+        got.sort();
+        if got != want {
+            fails.push(format!("{name}:\n    got  {got:#?}\n    want {want:#?}"));
+        }
+    }
+    assert!(seen > 0, "no layout-failure fixtures");
+    assert!(fails.is_empty(), "{}", fails.join("\n"));
 }

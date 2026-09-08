@@ -32,6 +32,8 @@ pub struct BuildReport {
     pub paper: String,
     /// The laid-out raw design (absolute grid units) — Python's `d_raw`.
     pub raw: serde_json::Value,
+    /// The checker's `net: pins` listing, exactly as Python's `Checker.netlist_text` renders it.
+    pub netlist_lines: String,
 }
 
 impl BuildReport {
@@ -39,16 +41,17 @@ impl BuildReport {
         self.issues.is_empty()
     }
 
-    /// Compact `net: pins` listing, at most `limit` nets.
+    /// `net: pins` listing with the auto-named `N$n` nets last, as Python's `Checker.netlist_text` renders it.
     pub fn netlist_text(&self, limit: usize) -> String {
-        let mut lines: Vec<String> = self
-            .netlist
+        let mut nets: Vec<(&String, &BTreeSet<String>)> = self.netlist.iter().collect();
+        nets.sort_by(|a, b| (a.0.starts_with("N$"), a.0).cmp(&(b.0.starts_with("N$"), b.0)));
+        let mut lines: Vec<String> = nets
             .iter()
-            .take(limit)
             .map(|(net, pins)| format!("{net}: {}", pins.iter().cloned().collect::<Vec<_>>().join(" ")))
             .collect();
-        if self.netlist.len() > limit {
-            lines.push(format!("... {} more nets", self.netlist.len() - limit));
+        if lines.len() > limit {
+            lines.truncate(limit);
+            lines.push(format!("... ({} more nets)", self.netlist.len() - limit));
         }
         lines.join("\n")
     }
@@ -107,6 +110,7 @@ fn finish(
         netlist: built.nets,
         paper,
         raw,
+        netlist_lines: built.netlist_text,
     })
 }
 
