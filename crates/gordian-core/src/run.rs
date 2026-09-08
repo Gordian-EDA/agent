@@ -3,7 +3,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use gordian_llm::Provider;
@@ -13,6 +13,7 @@ use serde_json::{Value, json};
 use crate::agent::{Agent, Budget, event};
 use crate::board::{self, BoardOutcome};
 use crate::critic;
+use crate::engines::pcb;
 use crate::{compose, inputs, render, skills};
 
 /// What one `gordian agent` invocation was asked for.
@@ -133,6 +134,13 @@ pub async fn run(
         None => BoardOutcome::default(),
     };
     publish_board(&mut board_outcome, &board_stem, &options.project_dir);
+    publish_fab(
+        kicad,
+        &mut board_outcome,
+        schematic.as_deref(),
+        &options.project_dir,
+        deadline,
+    );
 
     let renders = final_renders(kicad, agent.out_sch(), &options.project_dir);
     if let Some(design) = design.as_ref() {
@@ -226,6 +234,43 @@ fn publish_board(outcome: &mut BoardOutcome, stem: &Path, project_dir: &Path) {
         if std::fs::copy(&png, &delivered).is_ok() {
             outcome.front_png = Some(delivered);
         }
+    }
+}
+
+/// Gerbers, drill, placement and BOM take a few seconds; below this much runway
+/// left in the budget, fab export is skipped rather than risk overrunning delivery.
+const FAB_MIN_REMAINING: Duration = Duration::from_secs(8);
+
+/// Export the fabrication bundle for a published board into `<project>/fab/`, plus
+/// a back-side render beside the front one. A no-op when there is no board, or too
+/// little budget left to spend a few more seconds on it.
+fn publish_fab(
+    kicad: &KicadInstallation,
+    outcome: &mut BoardOutcome,
+    schematic: Option<&Path>,
+    project_dir: &Path,
+    deadline: Instant,
+) {
+    let Some(pcb) = outcome.pcb.as_deref().filter(|p| p.is_file()) else {
+        return;
+    };
+    if deadline.saturating_duration_since(Instant::now()) < FAB_MIN_REMAINING {
+        outcome
+            .notes
+            .push("fab: skipped, too little budget remaining".to_string());
+        return;
+    }
+    match pcb::export_fab(kicad, pcb, schematic, &project_dir.join("fab")) {
+        Ok(files) => outcome.fab_files = files,
+        Err(error) => {
+            let note = format!("fab: export failed: {error:#}");
+            event(format!("board: {note}"));
+            outcome.notes.push(note);
+        }
+    }
+    let back_png = project_dir.join("board-back.png");
+    if pcb::render(kicad, pcb, &back_png, pcb::Side::Back).is_ok() {
+        outcome.back_png = Some(back_png);
     }
 }
 

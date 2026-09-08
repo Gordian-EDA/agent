@@ -184,5 +184,14 @@ mod stub {
         ) -> Result<()> {
             bail!("pcb-auto is not linked into this build")
         }
+
+        pub fn export_fab(
+            _kicad: &KicadInstallation,
+            _pcb: &Path,
+            _sch: Option<&Path>,
+            _out_dir: &Path,
+        ) -> Result<Vec<std::path::PathBuf>> {
+            bail!("pcb-auto is not linked into this build")
+        }
     }
 }

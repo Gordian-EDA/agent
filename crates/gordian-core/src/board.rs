@@ -18,6 +18,8 @@ use crate::engines::pcb;
 pub struct BoardOutcome {
     pub pcb: Option<PathBuf>,
     pub front_png: Option<PathBuf>,
+    pub back_png: Option<PathBuf>,
+    pub fab_files: Vec<PathBuf>,
     pub parts: usize,
     pub completion: f64,
     pub unrouted: usize,
@@ -35,6 +37,8 @@ impl BoardOutcome {
         json!({
             "pcb": self.pcb.as_ref().map(|p| p.display().to_string()),
             "render": self.front_png.as_ref().map(|p| p.display().to_string()),
+            "render_back": self.back_png.as_ref().map(|p| p.display().to_string()),
+            "fab_files": self.fab_files.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
             "parts": self.parts,
             "completion": self.completion,
             "unrouted": self.unrouted,
