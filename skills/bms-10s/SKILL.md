@@ -1126,10 +1126,10 @@ Hand it to `build` as-is:
      {
       "col": [
        {
-        "part": "R30"
+        "part": "R29"
        },
        {
-        "part": "R29"
+        "part": "R30"
        }
       ],
       "gap": 7

@@ -469,20 +469,15 @@ the request:
    "tree": {
     "row": [
      {
+      "part": "J1"
+     },
+     {
       "col": [
        {
-        "part": "J1"
+        "part": "R1"
        },
        {
-        "row": [
-         {
-          "part": "R1"
-         },
-         {
-          "part": "R2"
-         }
-        ],
-        "gap": 2
+        "part": "R2"
        }
       ],
       "gap": 3
@@ -501,26 +496,21 @@ the request:
    "title": "POWER RAILS",
    "note": "5 V then 3.3 V AMS1117 chain off VBUS",
    "tree": {
-    "col": [
+    "row": [
      {
-      "row": [
-       {
-        "part": "C1"
-       },
-       {
-        "part": "U3"
-       },
-       {
-        "part": "C2"
-       }
-      ],
-      "gap": 5
+      "part": "C1"
      },
      {
-      "row": [
-       {
-        "part": "U4"
-       },
+      "part": "U3"
+     },
+     {
+      "part": "C2"
+     },
+     {
+      "part": "U4"
+     },
+     {
+      "col": [
        {
         "part": "C3"
        },
@@ -528,10 +518,10 @@ the request:
         "part": "J6"
        }
       ],
-      "gap": 5
+      "gap": 6
      }
     ],
-    "gap": 5
+    "gap": 6
    }
   },
   {

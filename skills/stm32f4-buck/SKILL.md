@@ -109,7 +109,7 @@ Hand it to `build` as-is, adapting values and header assignments to the request:
  "rev": "1.0",
  "date": "2026-09-08",
  "company": "Gordian EDA",
- "paper": "A3",
+ "paper": "A2",
  "comments": [
   "STM32F405RGTx controller, USB-C device, SWD",
   "5 V USB to 3.3 V TPS54302 synchronous buck"
@@ -930,49 +930,52 @@ Hand it to `build` as-is, adapting values and header assignments to the request:
    "title": "RESET BOOT CLOCK",
    "note": "10k/100nF reset, 100k BOOT0 pulldown with jumper, 8 MHz HSE on PH0/PH1",
    "tree": {
-    "row": [
+    "col": [
      {
-      "col": [
+      "row": [
        {
-        "part": "R10"
-       },
-       {
-        "row": [
+        "col": [
          {
-          "part": "SW1"
+          "part": "R10"
          },
          {
-          "part": "C16"
+          "row": [
+           {
+            "part": "SW1"
+           },
+           {
+            "part": "C16"
+           }
+          ],
+          "gap": 4
+         }
+        ],
+        "gap": 4
+       },
+       {
+        "col": [
+         {
+          "part": "JP1"
+         },
+         {
+          "part": "R11"
          }
         ],
         "gap": 4
        }
       ],
-      "gap": 4
-     },
-     {
-      "col": [
-       {
-        "part": "JP1"
-       },
-       {
-        "part": "R11"
-       }
-      ],
-      "gap": 4
+      "gap": 6
      },
      {
       "row": [
        {
-        "part": "C17",
-        "rot": 90
+        "part": "C17"
        },
        {
         "part": "Y1"
        },
        {
-        "part": "C18",
-        "rot": 90
+        "part": "C18"
        }
       ],
       "gap": 4
@@ -1032,25 +1035,34 @@ Hand it to `build` as-is, adapting values and header assignments to the request:
    "title": "SWD AND GPIO HEADERS",
    "note": "Cortex 10-pin debug plus four 6-pin GPIO headers, each with a supply pin",
    "tree": {
-    "row": [
+    "col": [
      {
-      "part": "J3"
+      "row": [
+       {
+        "part": "J3"
+       },
+       {
+        "part": "J4"
+       },
+       {
+        "part": "J5"
+       }
+      ],
+      "gap": 6
      },
      {
-      "part": "J4"
-     },
-     {
-      "part": "J5"
-     },
-     {
-      "part": "J6"
-     },
-     {
-      "part": "J7"
+      "row": [
+       {
+        "part": "J6"
+       },
+       {
+        "part": "J7"
+       }
+      ],
+      "gap": 6
      }
     ],
-    "gap": 5,
-    "wrap": 400
+    "gap": 6
    }
   }
  ]

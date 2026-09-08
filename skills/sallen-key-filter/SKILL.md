@@ -367,6 +367,10 @@ it to `build` as-is, adapting values and jack footprints to the request:
       "gap": 4
      },
      {
+      "part": "U1",
+      "unit": 1
+     },
+     {
       "col": [
        {
         "part": "R7"
@@ -376,13 +380,9 @@ it to `build` as-is, adapting values and jack footprints to the request:
        }
       ],
       "gap": 4
-     },
-     {
-      "part": "U1",
-      "unit": 1
      }
     ],
-    "gap": 5
+    "gap": 3
    }
   },
   {
