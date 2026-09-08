@@ -22,7 +22,7 @@ const RIM_SAMPLES: usize = 8;
 const MAX_VIAS: usize = 60;
 
 /// One filled piece of a pour.
-pub(crate) struct Island {
+pub struct Island {
     pub index: usize,
     pub layer: String,
     pub poly: Vec<Point>,
@@ -47,7 +47,7 @@ impl Obstacle {
 }
 
 /// Refill `pcb`'s zones on a scratch copy and read back the ground pour's filled islands.
-pub(crate) fn filled_islands(
+pub fn filled_islands(
     kicad: &KicadInstallation,
     pcb: &Path,
     net: &str,
@@ -94,12 +94,19 @@ pub fn stitch_pours(
     net: &str,
     clearance: f64,
 ) -> anyhow::Result<usize> {
-    let copper = board.copper_layers();
-    if copper.len() < 2 {
-        return Ok(0);
-    }
     let islands = filled_islands(kicad, pcb, net)?;
-    if islands.len() < 2 {
+    stitch_islands(board, &islands, net, clearance)
+}
+
+/// The same stitching against a fill somebody else already paid for.
+pub fn stitch_islands(
+    board: &mut Board,
+    islands: &[Island],
+    net: &str,
+    clearance: f64,
+) -> anyhow::Result<usize> {
+    let copper = board.copper_layers();
+    if copper.len() < 2 || islands.len() < 2 {
         return Ok(0);
     }
     // Where the pour is ALLOWED to be on each layer, as opposed to where it currently fills. A
@@ -120,7 +127,7 @@ pub fn stitch_pours(
 
     // per layer, the islands to tie and the fill on the other side to tie them to
     let mut by_layer: HashMap<&str, Vec<&Island>> = HashMap::new();
-    for i in &islands {
+    for i in islands {
         by_layer.entry(i.layer.as_str()).or_default().push(i);
     }
     let (top, bottom) = (copper[0].as_str(), copper[copper.len() - 1].as_str());

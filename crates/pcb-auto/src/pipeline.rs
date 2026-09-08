@@ -15,7 +15,7 @@ use kicad_footprint::{FootprintCatalog, FootprintId};
 use crate::checks::{self, CheckReport};
 use crate::freerouting::{self, RouteOptions};
 use crate::geom::{inset_polygon, BBox};
-use crate::model::{parse_footprint_module, Board};
+use crate::model::{parse_footprint_module, Board, Rules};
 use crate::place::{self, PlanOptions};
 use crate::project;
 use crate::rules;
@@ -48,9 +48,10 @@ const HOLE_COURTYARD_MM: f64 = 6.4;
 const REPAIR_PASSES: u32 = 6;
 /// A touch-up asks the router for a handful of named nets on a board that is otherwise finished.
 const TOUCH_UP_PASSES: u32 = 4;
-/// A stitching pass changes the fill it just measured, so it is worth repeating — but a board
-/// that still fragments after this many rounds has a placement problem, not a stitching one.
-const STITCH_ROUNDS: usize = 2;
+/// Completion above which the whole-board reroute is skipped in favour of the touch-up. Set so
+/// the reroute still runs on a nearly-finished board: measured, it is worth about a connection,
+/// and batching the pour refills bought back the time it costs.
+const REROUTE_BELOW: f64 = 1.01;
 
 /// What outline the board should end up with.
 #[derive(Debug, Clone)]
@@ -667,11 +668,13 @@ pub fn auto_layout(
     // ---- tie the pour back together --------------------------------------------
     // Tracks cut the plane into islands; every pair of them is a missing connection until a via
     // bridges them, and on a two-layer board that is most of what a clean route leaves open.
-    stitch(&mut run, &mut board, pcb, rules.clearance)?;
+    mend(&mut run, &mut board, pcb, &rules)?;
 
     // ---- retry whatever is left, while there is budget for it ---------------------
     let mut report = checks::check(kicad, pcb)?;
-    if report.unconnected > 0 && run.left_s() > 20.0 {
+    // Only when the main route left real work: past this the targeted touch-up below is both
+    // cheaper and more likely to help than re-exporting the whole board.
+    if report.completion < REROUTE_BELOW && report.unconnected > 0 && run.left_s() > 20.0 {
         let left: Vec<String> = report.unrouted_nets.clone();
         let _ = &left;
         run.note(format!(
@@ -710,7 +713,7 @@ pub fn auto_layout(
                 crate::tidy::tidy(&mut retry);
                 retry.strip_zone_fills();
                 retry.save(Some(pcb))?;
-                stitch(&mut run, &mut retry, pcb, rules.clearance)?;
+                mend(&mut run, &mut retry, pcb, &rules)?;
                 let after = checks::check(kicad, pcb)?;
                 if after.unconnected <= report.unconnected {
                     report = after;
@@ -749,7 +752,7 @@ pub fn auto_layout(
                 crate::tidy::tidy(&mut last);
                 last.strip_zone_fills();
                 last.save(Some(pcb))?;
-                stitch(&mut run, &mut last, pcb, rules.clearance)?;
+                mend(&mut run, &mut last, pcb, &rules)?;
                 let after = checks::check(kicad, pcb)?;
                 if after.unconnected < report.unconnected {
                     run.note(format!(
@@ -773,47 +776,39 @@ pub fn auto_layout(
     Ok(finish(run, report))
 }
 
-/// Tie the ground pour back into one piece, repeating while each pass still finds islands: a
-/// stitching via changes the fill, which can strand a fragment the previous pass could not see.
-fn stitch(run: &mut Run, board: &mut Board, pcb: &Path, clearance: f64) -> anyhow::Result<()> {
-    if !run.opts.gnd_zone {
+/// Mend the ground pour: one refill, then every fix that fill supports.
+///
+/// A `kicad-cli` refill is several seconds, so the stitcher and the repair router share one:
+/// stitching vias go in first because a via is cheaper and tidier than a track, and whatever no
+/// via could reach is routed back to the plane. Both write into the board; the file is saved once.
+fn mend(run: &mut Run, board: &mut Board, pcb: &Path, rules: &Rules) -> anyhow::Result<()> {
+    if !run.opts.gnd_zone || run.left_s() < 8.0 {
         return Ok(());
     }
     let Some(gnd) = ground_net(board) else {
         return Ok(());
     };
-    let mut total = 0usize;
-    for _ in 0..STITCH_ROUNDS {
-        if run.left_s() < 8.0 {
-            break;
+    let islands = match crate::stitch::filled_islands(run.kicad, pcb, &gnd.name) {
+        Ok(i) => i,
+        Err(e) => {
+            run.note(format!("pour fill unreadable: {}", first_line(&e.to_string())));
+            return Ok(());
         }
-        match crate::stitch::stitch_pours(run.kicad, board, pcb, &gnd.name, clearance) {
-            Ok(0) => break,
-            Ok(n) => {
-                total += n;
-                board.strip_zone_fills();
-                board.save(Some(pcb))?;
-            }
-            Err(e) => {
-                run.note(format!("pour stitching failed: {}", first_line(&e.to_string())));
-                break;
-            }
+    };
+    let vias = crate::stitch::stitch_islands(board, &islands, &gnd.name, rules.clearance)
+        .unwrap_or(0);
+    let routed = crate::repair::repair_islands(board, &islands, &gnd.name, rules).unwrap_or(0);
+    if vias + routed > 0 {
+        board.strip_zone_fills();
+        board.save(Some(pcb))?;
+        let mut what = Vec::new();
+        if vias > 0 {
+            what.push(format!("{vias} stitching via(s)"));
         }
-    }
-    if total > 0 {
-        run.note(format!("{total} ground stitching via(s)"));
-    }
-    // whatever a via could not reach gets a track instead
-    if run.left_s() > 10.0 {
-        match crate::repair::repair_pour(run.kicad, board, pcb, &gnd.name, &board.design_rules()) {
-            Ok(0) => {}
-            Ok(n) => {
-                board.strip_zone_fills();
-                board.save(Some(pcb))?;
-                run.note(format!("{n} stranded pour piece(s) routed back to the plane"));
-            }
-            Err(e) => run.note(format!("pour repair failed: {}", first_line(&e.to_string()))),
+        if routed > 0 {
+            what.push(format!("{routed} piece(s) routed back to the plane"));
         }
+        run.note(format!("ground pour: {}", what.join(", ")));
     }
     Ok(())
 }

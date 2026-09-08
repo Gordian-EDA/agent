@@ -235,6 +235,11 @@ pub fn plan_once(board: &Board, fps: &[Footprint], opts: &PlanOptions, seed: u64
     let candidates_parent: Vec<usize> = (0..parts.len())
         .filter(|&i| !(parts.list[i].pads.len() <= 2 && parts.list[i].movable))
         .collect();
+    // MEASURED AND REJECTED: also treating a 4-pin crystal with a grounded case as a two-pin
+    // satellite does seat it beside the oscillator pins (the reviewer's placement score went to
+    // 8-9 and its standing complaint vanished), but it crowds the hub's perimeter and cost
+    // completion 0.976 -> 0.952 on the same sheet. Pad count stays the test until the satellite
+    // slotter can make room rather than compete for it.
     for i in 0..parts.len() {
         if parts.list[i].role != Role::Free || parts.list[i].pads.len() != 2 {
             continue;

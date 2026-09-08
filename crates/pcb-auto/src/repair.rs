@@ -322,14 +322,25 @@ pub fn repair_pour(
     net: &str,
     rules: &Rules,
 ) -> anyhow::Result<usize> {
+    let islands = filled_islands(kicad, pcb, net)?;
+    repair_islands(board, &islands, net, rules)
+}
+
+/// The same repair against a fill somebody else already paid for. A refill costs several seconds
+/// of `kicad-cli`, so the stitcher and the router share one.
+pub fn repair_islands(
+    board: &mut Board,
+    islands: &[Island],
+    net: &str,
+    rules: &Rules,
+) -> anyhow::Result<usize> {
     let Some(gnd) = board.net_by_name(net) else {
         return Ok(0);
     };
-    let islands = filled_islands(kicad, pcb, net)?;
     if islands.len() < 2 {
         return Ok(0);
     }
-    let (comp, main) = components(board, &islands, gnd.id);
+    let (comp, main) = components(board, islands, gnd.id);
     let Some(main) = main else { return Ok(0) };
     let stranded: Vec<usize> = (0..islands.len()).filter(|&i| comp[i] != main).collect();
     if stranded.is_empty() {
