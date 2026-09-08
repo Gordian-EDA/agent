@@ -1777,6 +1777,7 @@ dependencies = [
  "geom",
  "pcb-model",
  "serde_json",
+ "tracing",
 ]
 
 [[package]]
