@@ -12,6 +12,20 @@ fn fixtures() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")
 }
 
+/// Python's `Geo` keeps whole grid steps as ints and stub arithmetic as floats; `Geo::to_json`
+/// writes every whole coordinate as an int. Compare numbers by value.
+fn canon(v: &Value) -> Value {
+    match v {
+        Value::Array(a) => Value::Array(a.iter().map(canon).collect()),
+        Value::Object(o) => Value::Object(o.iter().map(|(k, v)| (k.clone(), canon(v))).collect()),
+        Value::Number(n) => match n.as_f64() {
+            Some(f) if f.fract() == 0.0 => Value::from(f as i64),
+            _ => v.clone(),
+        },
+        other => other.clone(),
+    }
+}
+
 #[test]
 fn raw_boxes_match_python() {
     let dir = PathBuf::from(std::env::var("KICAD_SYMBOL_DIR").unwrap_or_else(|_| SYMBOL_DIR.to_string()));
@@ -124,7 +138,7 @@ fn connect_pins_matches_python() {
             failures.push(format!("case {i}: {e}"));
             continue;
         }
-        if g.to_json() != c["geo"] {
+        if canon(&g.to_json()) != canon(&c["geo"]) {
             failures.push(format!("case {i} ({}): geometry differs\n got  {}\n want {}",
                 c["lib"], g.to_json(), c["geo"]));
             continue;
