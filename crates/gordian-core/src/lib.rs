@@ -1,60 +1,26 @@
-//! Gordian's KiCAD schematic + PCB design agent.
+//! The Gordian schematic + PCB agent.
 //!
-//! This crate IS the agent: the [`Agent`] turn loop, the conversation history
-//! (unwind / clear / [`Agent::compact`]), the schematic/PCB
-//! tool registry ([`tools`]), the composed-sheet emit
-//! the SVG→PNG [`render`], the schematic checks, and the PCB workflow
-//! mechanics, and the [`prompts`] system prompt.
-//!
-//! The loop is built around ONE external seam — the [`Provider`] trait, whose one
-//! production impl is [`GenaiProvider`], the genai-backed LLM (see the [`gordian_llm`]
-//! module) — plus the KiCAD tools it drives directly. The only decoupling that
-//! remains is this library vs. the [`gordian`](../gordian/index.html) CLI binary,
-//! so a future web frontend reuses the lib. To build a working agent:
-//!
-//! ```ignore
-//! let config = gordian_core::GordianConfig::default();
-//! let ctx = gordian_core::AgentRuntime::for_project_with_config(
-//!     env,
-//!     project_dir,
-//!     config.clone(),
-//! )?;
-//! let agent = gordian_core::Agent::new(
-//!     gordian_core::GenaiProvider::from_config(&config.llm)?,
-//!     ctx,
-//!     gordian_core::prompts::system_prompt(),
-//! );
-//! ```
-//!
-//! The [`testing`] module's [`testing::ScriptedClient`] drives provider behavior
-//! without a network; tools always run against a real [`AgentRuntime`].
+//! One run is: the design loop ([`agent`]) drives seven tools over the
+//! deterministic schematic engine until a sheet passes its own checks, KiCad ERC
+//! and an anchored visual critic ([`critic`]); the composition pass ([`compose`])
+//! then polishes the layout trees while the board stage ([`board`]) routes the
+//! same netlist; [`run`] bounds all of it by one wall clock and writes
+//! `report.json`.
 
-mod agent;
-pub mod prompts;
-pub mod review;
-pub mod review_kicad;
-mod review_stop;
-pub mod session;
-pub mod testing;
-mod thrash;
+pub mod agent;
+pub mod board;
+pub mod compose;
+pub mod critic;
+mod engines;
+pub mod prompt;
+pub mod render;
+pub mod run;
+pub mod skills;
 pub mod tools;
 
-pub use agent::{Agent, AgentEvent, ContextStats, StopReason, TurnOutcome};
-pub use gordian_runtime::AgentRuntime;
-pub use gordian_runtime::config::{
-    AgentConfig, CONFIG_SCHEMA_VERSION, ConfigError, DEFAULT_MAX_TOKENS, DEFAULT_RENDER_MAX_PX,
-    DEFAULT_SCHEMATIC_FILENAME, DEFAULT_SEARCH_LIMIT, GordianConfig, KicadConfig,
-    LlmConfig, LlmReasoningEffort, ProjectConfig, ReviewConfig, ToolConfig,
-};
+pub use agent::{Agent, Budget, Outcome, Usage};
+pub use gordian_llm::{GenaiProvider, Provider};
+pub use gordian_runtime::GordianConfig;
 pub use gordian_runtime::platform;
-pub use gordian_runtime::tool::{ReviewOutcome, ToolEffect, ToolOutcome};
-pub use review::{review, review_image};
-
-// Re-export the LLM (the production `GenaiProvider`, the `Provider` seam, and
-// the genai conversation types they speak) so callers can build on
-// `gordian_core::*` alone.
-pub use gordian_llm::{
-    Binary, ChatMessage, ChatRole, ChatStreamEvent, ContentPart, EventStream, GenaiProvider,
-    MessageContent, Provider, StreamChunk, StreamEnd, Tool, ToolCall, ToolResponse, Usage,
-    completed_text, drain_stream, token_usage,
-};
+pub use prompt::system_prompt;
+pub use run::{Report, RunOptions};

@@ -1,0 +1,516 @@
+(pcb pcbagent
+  (parser
+    (string_quote ")
+    (space_in_quoted_tokens on)
+    (host_cad "pcbagent")
+    (host_version "0.1")
+  )
+  (resolution um 10)
+  (unit um)
+  (structure
+    (layer F.Cu
+      (type signal)
+      (property
+        (index 0)
+      )
+    )
+    (layer B.Cu
+      (type signal)
+      (property
+        (index 1)
+      )
+    )
+    (autoroute_settings
+      (fanout off)
+      (autoroute on)
+      (postroute on)
+      (vias on)
+      (via_costs 100)
+      (layer_rule F.Cu
+        (active on)
+        (preferred_direction horizontal)
+        (preferred_direction_trace_costs 1.0)
+        (against_preferred_direction_trace_costs 2.5)
+      )
+      (layer_rule B.Cu
+        (active on)
+        (preferred_direction vertical)
+        (preferred_direction_trace_costs 1.0)
+        (against_preferred_direction_trace_costs 2.5)
+      )
+    )
+    (boundary
+      (path pcb 0  45000 -54500  102000 -54500  102000 -111500  45000 -111500  45000 -54500)
+    )
+    (plane GND (polygon B.Cu 0  101133.4 -55424.1  101072.1 -110437.1  45511.7 -110375.9  45500.5 -105486.5  97949.5 -105486.5  97949.5 -105486.5  45500.5 -105486.5  45500.5 -100406.5  84949.5 -100406.5  87050.5 -100406.5  97949.5 -100406.5  97949.5 -100406.5  87050.5 -100406.5  84949.5 -100406.5  45500.5 -100406.5  45500.5 -97866.5  84949.5 -97866.5  87050.5 -97866.5  97949.5 -97866.5  97949.5 -97866.5  87050.5 -97866.5  84949.5 -97866.5  45500.5 -97866.5  45500.5 -95326.5  84949.5 -95326.5  87050.5 -95326.5  97949.5 -95326.5  97949.5 -95326.5  87050.5 -95326.5  84949.5 -95326.5  45500.5 -95326.5  45500.5 -92786.5  84949.5 -92786.5  87050.5 -92786.5  97949.5 -92786.5  97949.5 -92786.5  87050.5 -92786.5  84949.5 -92786.5  45500.5 -92786.5  45500.5 -90246.5  84949.5 -90246.5  87050.5 -90246.5  97949.5 -90246.5  97949.5 -90246.5  87050.5 -90246.5  84949.5 -90246.5  45500.5 -90246.5  45500.5 -87706.5  84949.5 -87706.5  87050.5 -87706.5  97949.5 -87706.5  97949.5 -87706.5  87050.5 -87706.5  84949.5 -87706.5  45500.5 -87706.5  45500.5 -85166.5  84949.5 -85166.5  87050.5 -85166.5  97949.5 -85166.5  97949.5 -85166.5  87050.5 -85166.5  84949.5 -85166.5  45500.5 -85166.5  45500.5 -82626.5  84949.5 -82626.5  87050.5 -82626.5  97949.5 -82626.5  97949.5 -82626.5  87050.5 -82626.5  84949.5 -82626.5  45500.5 -82626.5  45500.5 -80086.5  84949.5 -80086.5  87050.5 -80086.5  97949.5 -80086.5  97949.5 -80086.5  87050.5 -80086.5  84949.5 -80086.5  45500.5 -80086.5  45500.5 -77546.5  84949.5 -77546.5  87050.5 -77546.5  97949.5 -77546.5  97949.5 -77546.5  87050.5 -77546.5  84949.5 -77546.5  45500.5 -77546.5  45500.5 -75006.5  84949.5 -75006.5  87050.5 -75006.5  97949.5 -75006.5  97949.5 -75006.5  87050.5 -75006.5  84949.5 -75006.5  45500.5 -75006.5  45500.5 -72466.5  84949.5 -72466.5  87050.5 -72466.5  97949.5 -72466.5  97949.5 -72466.5  87050.5 -72466.5  84949.5 -72466.5  45500.5 -72466.5  45500.5 -69926.5  84949.5 -69926.5  87050.5 -69926.5  97949.5 -69926.5  97949.5 -69926.5  87050.5 -69926.5  84949.5 -69926.5  45500.5 -69926.5  45500.5 -67386.5  84949.5 -67386.5  87050.5 -67386.5  97949.5 -67386.5  97949.5 -67386.5  87050.5 -67386.5  84949.5 -67386.5  45500.5 -67386.5  45500.5 -64846.5  84949.5 -64846.5  87050.5 -64846.5  97949.5 -64846.5  97949.5 -64846.5  87050.5 -64846.5  84949.5 -64846.5  45500.5 -64846.5  45500.5 -62476.5  46369.5 -62476.5  48438.3 -62314.6  50949.5 -62296.5  53050.5 -62306.5  84949.5 -62306.5  87050.5 -62306.5  92949.5 -62296.5  95050.5 -62306.5  97949.5 -62306.5  97949.5 -62306.5  95050.5 -62306.5  92949.5 -62296.5  87048.5 -62296.5  84949.5 -62306.5  53050.5 -62306.5  50949.5 -62296.5  48434.7 -62296.5  46369.5 -62476.5  45500.5 -62476.5  45500.5 -59936.5  46369.5 -59936.5  48438.3 -59774.6  50949.5 -59756.5  53050.5 -59766.5  84949.5 -59766.5  87050.5 -59766.5  92949.5 -59756.5  95050.5 -59766.5  97949.5 -59766.5  97949.5 -59766.5  95050.5 -59766.5  92949.5 -59756.5  87048.5 -59756.5  84949.5 -59766.5  53050.5 -59766.5  50949.5 -59756.5  48434.7 -59756.5  46369.5 -59936.5  45500.5 -59936.5  45500.5 -56460.2  84949.5 -56460.2  87050.5 -56460.3  92949.5 -56450.2  95050.5 -56460.2  97949.5 -56460.2  97949.5 -56460.2  95050.5 -56460.2  92949.5 -56450.2  87048.5 -56450.2  84949.5 -56460.2  45500.5 -56460.2  45573 -55362.9  101133.4 -55424.1))
+    (via Via[0-1]_600:300_um)
+    (rule
+      (width 200)
+      (clearance 210)
+      (clearance 50 (type smd_smd))
+    )
+  )
+  (placement
+    (component Package_QFP:LQFP-48_7x7mm_P0.5mm
+      (place U1 78500.0 -73000.0 front 0.0000 (PN STM32F103C8T6))
+    )
+    (component Package_TO_SOT_SMD:SOT-223-3_TabPin2
+      (place U2 92500.0 -78000.0 front 90.0000 (PN AMS1117-3.3))
+    )
+    (component Connector_USB:USB_Micro-B_Amphenol_10103594-0001LF_Horizontal
+      (place J1 64000.0 -59130.0 front 180.0000 (PN USB_B_Micro))
+    )
+    (component Connector_PinHeader_2.54mm:PinHeader_1x20_P2.54mm_Vertical
+      (place J2 86000.0 -57330.0 front 0.0000 (PN Conn_01x20))
+      (place J3 99000.0 -57330.0 front 0.0000 (PN Conn_01x20))
+    )
+    (component Connector_PinHeader_2.54mm:PinHeader_1x04_P2.54mm_Vertical
+      (place J4 94000.0 -57320.0 front 0.0000 (PN SWD))
+    )
+    (component Connector_PinHeader_2.54mm:PinHeader_1x03_P2.54mm_Vertical
+      (place JP1 47420.0 -57500.0 front 0.0000 (PN BOOT0))
+      (place JP2 52000.0 -57320.0 front 0.0000 (PN BOOT1))
+    )
+    (component Crystal:Crystal_SMD_HC49-SD
+      (place Y1 70000.0 -81000.0 front 90.0000 (PN 8MHz))
+    )
+    (component Crystal:Crystal_SMD_3215-2Pin_3.2x1.5mm
+      (place Y2 89500.0 -69830.0 front 90.0000 (PN 32.768kHz))
+    )
+    (component Button_Switch_SMD:SW_SPST_TL3342
+      (place SW1 80500.0 -88000.0 front 90.0000 (PN RESET))
+    )
+    (component LED_SMD:LED_0805_2012Metric
+      (place D1 71500.0 -58330.0 front 90.0000 (PN PWR))
+    )
+    (component LED_SMD:LED_0805_2012Metric::1
+      (place D2 89500.0 -60630.0 front 270.0000 (PN PC13))
+    )
+    (component Resistor_SMD:R_0805_2012Metric
+      (place R1 74000.0 -58330.0 front 270.0000 (PN 1k))
+      (place R2 90000.0 -57500.0 front 180.0000 (PN 1k))
+      (place R3 70500.0 -61500.0 front 0.0000 (PN 22R))
+      (place R4 79500.0 -66000.0 front 0.0000 (PN 22R))
+      (place R5 95000.0 -68330.0 front 0.0000 (PN 1k5))
+      (place R6 82000.0 -98000.0 front 0.0000 (PN 10k))
+      (place R7 55500.0 -60500.0 front 90.0000 (PN 10k))
+      (place R8 52000.0 -68000.0 front 270.0000 (PN 10k))
+    )
+    (component Capacitor_SMD:C_0805_2012Metric
+      (place C1 90000.0 -98000.0 front 0.0000 (PN 100nF))
+      (place C2 92000.0 -106500.0 front 180.0000 (PN 100nF))
+      (place C3 91000.0 -104000.0 front 0.0000 (PN 100nF))
+      (place C4 47420.0 -71000.0 front 270.0000 (PN 100nF))
+      (place C5 90000.0 -101500.0 front 0.0000 (PN 100nF))
+      (place C6 82000.0 -94500.0 front 270.0000 (PN 100nF))
+      (place C9 74500.0 -86000.0 front 270.0000 (PN 20pF))
+      (place C10 70500.0 -72500.0 front 180.0000 (PN 20pF))
+      (place C11 90000.0 -65000.0 front 0.0000 (PN 12pF))
+      (place C12 93500.0 -71000.0 front 0.0000 (PN 12pF))
+      (place C13 90000.0 -94000.0 front 180.0000 (PN 100nF))
+    )
+    (component Capacitor_SMD:C_1206_3216Metric
+      (place C7 95500.0 -105000.0 front 90.0000 (PN 10uF))
+      (place C8 94500.0 -99000.0 front 90.0000 (PN 10uF))
+    )
+  )
+  (library
+    (image Package_QFP:LQFP-48_7x7mm_P0.5mm
+      (pin Pad1_polygon 1 -4162.5 2750.0)
+      (pin Pad1_polygon 2 -4162.5 2250.0)
+      (pin Pad1_polygon 3 -4162.5 1750.0)
+      (pin Pad1_polygon 4 -4162.5 1250.0)
+      (pin Pad1_polygon 5 -4162.5 750.0)
+      (pin Pad1_polygon 6 -4162.5 250.0)
+      (pin Pad1_polygon 7 -4162.5 -250.0)
+      (pin Pad1_polygon 8 -4162.5 -750.0)
+      (pin Pad1_polygon 9 -4162.5 -1250.0)
+      (pin Pad1_polygon 10 -4162.5 -1750.0)
+      (pin Pad1_polygon 11 -4162.5 -2250.0)
+      (pin Pad1_polygon 12 -4162.5 -2750.0)
+      (pin Pad2_polygon 13 -2750.0 -4162.5)
+      (pin Pad2_polygon 14 -2250.0 -4162.5)
+      (pin Pad2_polygon 15 -1750.0 -4162.5)
+      (pin Pad2_polygon 16 -1250.0 -4162.5)
+      (pin Pad2_polygon 17 -750.0 -4162.5)
+      (pin Pad2_polygon 18 -250.0 -4162.5)
+      (pin Pad2_polygon 19 250.0 -4162.5)
+      (pin Pad2_polygon 20 750.0 -4162.5)
+      (pin Pad2_polygon 21 1250.0 -4162.5)
+      (pin Pad2_polygon 22 1750.0 -4162.5)
+      (pin Pad2_polygon 23 2250.0 -4162.5)
+      (pin Pad2_polygon 24 2750.0 -4162.5)
+      (pin Pad1_polygon 25 4162.5 -2750.0)
+      (pin Pad1_polygon 26 4162.5 -2250.0)
+      (pin Pad1_polygon 27 4162.5 -1750.0)
+      (pin Pad1_polygon 28 4162.5 -1250.0)
+      (pin Pad1_polygon 29 4162.5 -750.0)
+      (pin Pad1_polygon 30 4162.5 -250.0)
+      (pin Pad1_polygon 31 4162.5 250.0)
+      (pin Pad1_polygon 32 4162.5 750.0)
+      (pin Pad1_polygon 33 4162.5 1250.0)
+      (pin Pad1_polygon 34 4162.5 1750.0)
+      (pin Pad1_polygon 35 4162.5 2250.0)
+      (pin Pad1_polygon 36 4162.5 2750.0)
+      (pin Pad2_polygon 37 2750.0 4162.5)
+      (pin Pad2_polygon 38 2250.0 4162.5)
+      (pin Pad2_polygon 39 1750.0 4162.5)
+      (pin Pad2_polygon 40 1250.0 4162.5)
+      (pin Pad2_polygon 41 750.0 4162.5)
+      (pin Pad2_polygon 42 250.0 4162.5)
+      (pin Pad2_polygon 43 -250.0 4162.5)
+      (pin Pad2_polygon 44 -750.0 4162.5)
+      (pin Pad2_polygon 45 -1250.0 4162.5)
+      (pin Pad2_polygon 46 -1750.0 4162.5)
+      (pin Pad2_polygon 47 -2250.0 4162.5)
+      (pin Pad2_polygon 48 -2750.0 4162.5)
+    )
+    (image Package_TO_SOT_SMD:SOT-223-3_TabPin2
+      (pin Pad3_polygon 1 -3150.0 2300.0)
+      (pin Pad3_polygon 2 -3150.0 -0.0)
+      (pin Pad4_polygon 2 3150.0 0.0)
+      (pin Pad3_polygon 3 -3150.0 -2300.0)
+    )
+    (image Connector_USB:USB_Micro-B_Amphenol_10103594-0001LF_Horizontal
+      (pin Pad5_polygon 1 -1325.0 1765.0)
+      (pin Pad5_polygon 2 -675.0 1765.0)
+      (pin Pad5_polygon 3 -25.0 1765.0)
+      (pin Pad5_polygon 4 625.0 1765.0)
+      (pin Pad5_polygon 5 1275.0 1765.0)
+      (pin Pad6_polygon 6 -985.0 -1385.0)
+      (pin Pad6_polygon 6 935.0 -1385.0)
+      (pin Pad7_polygon SH -2975.0 565.0)
+      (pin Pad8_polygon SH -2875.0 1865.0)
+      (pin Pad9_polygon SH -2755.0 -185.0)
+      (pin Pad10_path SH -2755.0 -1115.0)
+      (pin Pad11_path SH -2445.0 1885.0)
+      (pin Pad11_path SH 2395.0 1885.0)
+      (pin Pad10_path SH 2705.0 -1115.0)
+      (pin Pad9_polygon SH 2725.0 -185.0)
+      (pin Pad8_polygon SH 2875.0 1885.0)
+      (pin Pad7_polygon SH 2975.0 565.0)
+    )
+    (image Connector_PinHeader_2.54mm:PinHeader_1x20_P2.54mm_Vertical
+      (pin Pad12_polygon 1 0.0 0.0)
+      (pin Pad13_circle 2 0.0 -2540.0)
+      (pin Pad13_circle 3 0.0 -5080.0)
+      (pin Pad13_circle 4 0.0 -7620.0)
+      (pin Pad13_circle 5 0.0 -10160.0)
+      (pin Pad13_circle 6 0.0 -12700.0)
+      (pin Pad13_circle 7 0.0 -15240.0)
+      (pin Pad13_circle 8 0.0 -17780.0)
+      (pin Pad13_circle 9 0.0 -20320.0)
+      (pin Pad13_circle 10 0.0 -22860.0)
+      (pin Pad13_circle 11 0.0 -25400.0)
+      (pin Pad13_circle 12 0.0 -27940.0)
+      (pin Pad13_circle 13 0.0 -30480.0)
+      (pin Pad13_circle 14 0.0 -33020.0)
+      (pin Pad13_circle 15 0.0 -35560.0)
+      (pin Pad13_circle 16 0.0 -38100.0)
+      (pin Pad13_circle 17 0.0 -40640.0)
+      (pin Pad13_circle 18 0.0 -43180.0)
+      (pin Pad13_circle 19 0.0 -45720.0)
+      (pin Pad13_circle 20 0.0 -48260.0)
+    )
+    (image Connector_PinHeader_2.54mm:PinHeader_1x04_P2.54mm_Vertical
+      (pin Pad12_polygon 1 0.0 0.0)
+      (pin Pad13_circle 2 0.0 -2540.0)
+      (pin Pad13_circle 3 0.0 -5080.0)
+      (pin Pad13_circle 4 0.0 -7620.0)
+    )
+    (image Connector_PinHeader_2.54mm:PinHeader_1x03_P2.54mm_Vertical
+      (pin Pad12_polygon 1 0.0 0.0)
+      (pin Pad13_circle 2 0.0 -2540.0)
+      (pin Pad13_circle 3 0.0 -5080.0)
+    )
+    (image Crystal:Crystal_SMD_HC49-SD
+      (pin Pad14_polygon 1 -4250.0 -0.0)
+      (pin Pad14_polygon 2 4250.0 0.0)
+    )
+    (image Crystal:Crystal_SMD_3215-2Pin_3.2x1.5mm
+      (pin Pad15_polygon 1 1250.0 0.0)
+      (pin Pad15_polygon 2 -1250.0 -0.0)
+    )
+    (image Button_Switch_SMD:SW_SPST_TL3342
+      (pin Pad16_polygon 1 -3150.0 1900.0)
+      (pin Pad16_polygon 1 3150.0 1900.0)
+      (pin Pad16_polygon 2 -3150.0 -1900.0)
+      (pin Pad16_polygon 2 3150.0 -1900.0)
+    )
+    (image LED_SMD:LED_0805_2012Metric
+      (pin Pad17_polygon 1 -937.5 -0.0)
+      (pin Pad17_polygon 2 937.5 0.0)
+    )
+    (image LED_SMD:LED_0805_2012Metric::1
+      (pin Pad18_polygon 1 -937.5 -0.0)
+      (pin Pad18_polygon 2 937.5 0.0)
+    )
+    (image Resistor_SMD:R_0805_2012Metric
+      (pin Pad19_polygon 1 -912.5 -0.0)
+      (pin Pad19_polygon 2 912.5 0.0)
+    )
+    (image Capacitor_SMD:C_0805_2012Metric
+      (pin Pad20_polygon 1 -950.0 0.0)
+      (pin Pad20_polygon 2 950.0 0.0)
+    )
+    (image Capacitor_SMD:C_1206_3216Metric
+      (pin Pad21_polygon 1 -1475.0 -0.0)
+      (pin Pad21_polygon 2 1475.0 0.0)
+    )
+    (padstack Pad1_polygon
+      (shape (polygon F.Cu 0  737.5 -75.0  733.8 -98.2  723.2 -119.1  706.6 -135.7  685.7 -146.3  662.5 -150.0  -662.5 -150.0  -685.7 -146.3  -706.6 -135.7  -723.2 -119.1  -733.8 -98.2  -737.5 -75.0  -737.5 75.0  -733.8 98.2  -723.2 119.1  -706.6 135.7  -685.7 146.3  -662.5 150.0  662.5 150.0  685.7 146.3  706.6 135.7  723.2 119.1  733.8 98.2  737.5 75.0  737.5 -75.0))
+      (attach off)
+    )
+    (padstack Pad2_polygon
+      (shape (polygon F.Cu 0  150.0 -662.5  146.3 -685.7  135.7 -706.6  119.1 -723.2  98.2 -733.8  75.0 -737.5  -75.0 -737.5  -98.2 -733.8  -119.1 -723.2  -135.7 -706.6  -146.3 -685.7  -150.0 -662.5  -150.0 662.5  -146.3 685.7  -135.7 706.6  -119.1 723.2  -98.2 733.8  -75.0 737.5  75.0 737.5  98.2 733.8  119.1 723.2  135.7 706.6  146.3 685.7  150.0 662.5  150.0 -662.5))
+      (attach off)
+    )
+    (padstack Pad3_polygon
+      (shape (polygon F.Cu 0  1000.0 -375.0  981.6 -490.9  928.4 -595.4  845.4 -678.4  740.9 -731.6  625.0 -750.0  -625.0 -750.0  -740.9 -731.6  -845.4 -678.4  -928.4 -595.4  -981.6 -490.9  -1000.0 -375.0  -1000.0 375.0  -981.6 490.9  -928.4 595.4  -845.4 678.4  -740.9 731.6  -625.0 750.0  625.0 750.0  740.9 731.6  845.4 678.4  928.4 595.4  981.6 490.9  1000.0 375.0  1000.0 -375.0))
+      (attach off)
+    )
+    (padstack Pad4_polygon
+      (shape (polygon F.Cu 0  1000.0 -1400.0  975.5 -1554.5  904.5 -1693.9  793.9 -1804.5  654.5 -1875.5  500.0 -1900.0  -500.0 -1900.0  -654.5 -1875.5  -793.9 -1804.5  -904.5 -1693.9  -975.5 -1554.5  -1000.0 -1400.0  -1000.0 1400.0  -975.5 1554.5  -904.5 1693.9  -793.9 1804.5  -654.5 1875.5  -500.0 1900.0  500.0 1900.0  654.5 1875.5  793.9 1804.5  904.5 1693.9  975.5 1554.5  1000.0 1400.0  1000.0 -1400.0))
+      (attach off)
+    )
+    (padstack Pad5_polygon
+      (shape (polygon F.Cu 0  -200.0 -825.0  -200.0 825.0  200.0 825.0  200.0 -825.0  -200.0 -825.0))
+      (attach off)
+    )
+    (padstack Pad6_polygon
+      (shape (polygon F.Cu 0  -715.0 -1250.0  -715.0 1250.0  715.0 1250.0  715.0 -1250.0  -715.0 -1250.0))
+      (attach off)
+    )
+    (padstack Pad7_polygon
+      (shape (polygon F.Cu 0  -912.5 350.0  912.5 350.0  912.5 -350.0  -912.5 -350.0  -912.5 350.0))
+      (attach off)
+    )
+    (padstack Pad8_polygon
+      (shape (polygon F.Cu 0  -1000.0 750.0  1000.0 750.0  1000.0 -750.0  -1000.0 -750.0  -1000.0 750.0))
+      (attach off)
+    )
+    (padstack Pad9_polygon
+      (shape (polygon F.Cu 0  -675.0 1000.0  675.0 1000.0  675.0 -1000.0  -675.0 -1000.0  -675.0 1000.0))
+      (attach off)
+    )
+    (padstack Pad10_path
+      (shape (path F.Cu 1350.0  0.0 -175.0  0.0 175.0))
+      (shape (path B.Cu 1350.0  0.0 -175.0  0.0 175.0))
+      (attach off)
+    )
+    (padstack Pad11_path
+      (shape (path F.Cu 1100.0  0.0 -200.0  0.0 200.0))
+      (shape (path B.Cu 1100.0  0.0 -200.0  0.0 200.0))
+      (attach off)
+    )
+    (padstack Pad12_polygon
+      (shape (polygon F.Cu 0  -850.0 850.0  850.0 850.0  850.0 -850.0  -850.0 -850.0  -850.0 850.0))
+      (shape (polygon B.Cu 0  -850.0 850.0  850.0 850.0  850.0 -850.0  -850.0 -850.0  -850.0 850.0))
+      (attach off)
+    )
+    (padstack Pad13_circle
+      (shape (circle F.Cu 1700.0))
+      (shape (circle B.Cu 1700.0))
+      (attach off)
+    )
+    (padstack Pad14_polygon
+      (shape (polygon F.Cu 0  2250.0 -750.0  2237.8 -827.3  2202.3 -896.9  2146.9 -952.3  2077.3 -987.8  2000.0 -1000.0  -2000.0 -1000.0  -2077.3 -987.8  -2146.9 -952.3  -2202.3 -896.9  -2237.8 -827.3  -2250.0 -750.0  -2250.0 750.0  -2237.8 827.3  -2202.3 896.9  -2146.9 952.3  -2077.3 987.8  -2000.0 1000.0  2000.0 1000.0  2077.3 987.8  2146.9 952.3  2202.3 896.9  2237.8 827.3  2250.0 750.0  2250.0 -750.0))
+      (attach off)
+    )
+    (padstack Pad15_polygon
+      (shape (polygon F.Cu 0  -500.0 900.0  500.0 900.0  500.0 -900.0  -500.0 -900.0  -500.0 900.0))
+      (attach off)
+    )
+    (padstack Pad16_polygon
+      (shape (polygon F.Cu 0  -850.0 500.0  850.0 500.0  850.0 -500.0  -850.0 -500.0  -850.0 500.0))
+      (attach off)
+    )
+    (padstack Pad17_polygon
+      (shape (polygon F.Cu 0  487.5 -456.2  475.6 -531.6  440.9 -599.5  387.0 -653.4  319.1 -688.1  243.8 -700.0  -243.8 -700.0  -319.1 -688.1  -387.0 -653.4  -440.9 -599.5  -475.6 -531.6  -487.5 -456.3  -487.5 456.2  -475.6 531.6  -440.9 599.5  -387.0 653.4  -319.1 688.1  -243.8 700.0  243.8 700.0  319.1 688.1  387.0 653.4  440.9 599.5  475.6 531.6  487.5 456.3  487.5 -456.2))
+      (attach off)
+    )
+    (padstack Pad18_polygon
+      (shape (polygon F.Cu 0  487.5 -456.2  475.6 -531.6  440.9 -599.5  387.0 -653.4  319.1 -688.1  243.8 -700.0  -243.7 -700.0  -319.1 -688.1  -387.0 -653.4  -440.9 -599.5  -475.6 -531.6  -487.5 -456.3  -487.5 456.2  -475.6 531.6  -440.9 599.5  -387.0 653.4  -319.1 688.1  -243.7 700.0  243.7 700.0  319.1 688.1  387.0 653.4  440.9 599.5  475.6 531.6  487.5 456.3  487.5 -456.2))
+      (attach off)
+    )
+    (padstack Pad19_polygon
+      (shape (polygon F.Cu 0  512.5 -450.0  500.3 -527.3  464.8 -596.9  409.4 -652.3  339.8 -687.8  262.5 -700.0  -262.5 -700.0  -339.8 -687.8  -409.4 -652.3  -464.8 -596.9  -500.3 -527.3  -512.5 -450.0  -512.5 450.0  -500.3 527.3  -464.8 596.9  -409.4 652.3  -339.8 687.8  -262.5 700.0  262.5 700.0  339.8 687.8  409.4 652.3  464.8 596.9  500.3 527.3  512.5 450.0  512.5 -450.0))
+      (attach off)
+    )
+    (padstack Pad20_polygon
+      (shape (polygon F.Cu 0  500.0 -475.0  487.8 -552.3  452.3 -621.9  396.9 -677.3  327.3 -712.8  250.0 -725.0  -250.0 -725.0  -327.3 -712.8  -396.9 -677.3  -452.3 -621.9  -487.8 -552.3  -500.0 -475.0  -500.0 475.0  -487.8 552.3  -452.3 621.9  -396.9 677.3  -327.3 712.8  -250.0 725.0  250.0 725.0  327.3 712.8  396.9 677.3  452.3 621.9  487.8 552.3  500.0 475.0  500.0 -475.0))
+      (attach off)
+    )
+    (padstack Pad21_polygon
+      (shape (polygon F.Cu 0  575.0 -650.0  562.8 -727.3  527.3 -796.9  471.9 -852.3  402.3 -887.8  325.0 -900.0  -325.0 -900.0  -402.3 -887.8  -471.9 -852.3  -527.3 -796.9  -562.8 -727.3  -575.0 -650.0  -575.0 650.0  -562.8 727.3  -527.3 796.9  -471.9 852.3  -402.3 887.8  -325.0 900.0  325.0 900.0  402.3 887.8  471.9 852.3  527.3 796.9  562.8 727.3  575.0 650.0  575.0 -650.0))
+      (attach off)
+    )
+    (padstack Via[0-1]_600:300_um
+      (shape (circle F.Cu 600.0))
+      (shape (circle B.Cu 600.0))
+      (attach off)
+    )
+  )
+  (network
+    (net +3V3
+      (pins U1-1 U1-9 U1-24 U1-36 U1-48 U2-2 U2-2 J2-1 J2-18 J3-20 J4-1 JP1-3 JP2-3 D1-1 R2-1 R5-1 R6-1 C1-1 C2-1 C3-1 C4-1 C5-1 C7-1)
+    )
+    (net PC13
+      (pins U1-2 J2-2 D2-2)
+    )
+    (net OSC32_IN
+      (pins U1-3 J2-3 Y2-1 C11-1)
+    )
+    (net OSC32_OUT
+      (pins U1-4 J2-4 Y2-2 C12-1)
+    )
+    (net OSC_IN
+      (pins U1-5 Y1-1 C9-1)
+    )
+    (net OSC_OUT
+      (pins U1-6 Y1-2 C10-1)
+    )
+    (net NRST
+      (pins U1-7 J2-17 SW1-1 SW1-1 R6-2 C6-1)
+    )
+    (net GND
+      (pins U1-8 U1-23 U1-35 U1-47 U2-1 J1-5 J1-SH J1-SH J1-SH J1-SH J1-SH J1-SH J1-SH SW1-2 SW1-2 R1-2 R7-2 R8-2 C1-2 C2-2 C3-2 C4-2 C5-2 C6-2 C7-2 C8-2 C9-2 C10-2 C11-2 C12-2 C13-2)
+    )
+    (net PA0
+      (pins U1-10 J2-5)
+    )
+    (net PA1
+      (pins U1-11 J2-6)
+    )
+    (net PA2
+      (pins U1-12 J2-7)
+    )
+    (net PA3
+      (pins U1-13 J2-8)
+    )
+    (net PA4
+      (pins U1-14 J2-9)
+    )
+    (net PA5
+      (pins U1-15 J2-10)
+    )
+    (net PA6
+      (pins U1-16 J2-11)
+    )
+    (net PA7
+      (pins U1-17 J2-12)
+    )
+    (net PB0
+      (pins U1-18 J2-13)
+    )
+    (net PB1
+      (pins U1-19 J2-14)
+    )
+    (net BOOT1
+      (pins U1-20 JP2-2 R8-1)
+    )
+    (net PB10
+      (pins U1-21 J2-15)
+    )
+    (net PB11
+      (pins U1-22 J2-16)
+    )
+    (net PB12
+      (pins U1-25 J3-1)
+    )
+    (net PB13
+      (pins U1-26 J3-2)
+    )
+    (net PB14
+      (pins U1-27 J3-3)
+    )
+    (net PB15
+      (pins U1-28 J3-4)
+    )
+    (net PA8
+      (pins U1-29 J3-5)
+    )
+    (net PA9
+      (pins U1-30 J3-6)
+    )
+    (net PA10
+      (pins U1-31 J3-7)
+    )
+    (net USB_DM_R
+      (pins U1-32 J3-9 R3-2)
+    )
+    (net USB_DP_R
+      (pins U1-33 J3-8 R4-2 R5-2)
+    )
+    (net SWDIO
+      (pins U1-34 J4-3)
+    )
+    (net SWCLK
+      (pins U1-37 J4-2)
+    )
+    (net PA15
+      (pins U1-38 J3-10)
+    )
+    (net PB3
+      (pins U1-39 J3-11)
+    )
+    (net PB4
+      (pins U1-40 J3-12)
+    )
+    (net PB5
+      (pins U1-41 J3-13)
+    )
+    (net PB6
+      (pins U1-42 J3-14)
+    )
+    (net PB7
+      (pins U1-43 J3-15)
+    )
+    (net BOOT0
+      (pins U1-44 JP1-2 R7-1)
+    )
+    (net PB8
+      (pins U1-45 J3-16)
+    )
+    (net PB9
+      (pins U1-46 J3-17)
+    )
+    (net +5V
+      (pins U2-3 J1-1 J3-18 C8-1 C13-1)
+    )
+    (net USB_DM
+      (pins J1-2 R3-1)
+    )
+    (net USB_DP
+      (pins J1-3 R4-1)
+    )
+    (net LED_PWR
+      (pins D1-2 R1-1)
+    )
+    (net LED_USR
+      (pins D2-1 R2-2)
+    )
+    (class kicad_default
+      LED_PWR LED_USR
+      (circuit
+        (use_via Via[0-1]_600:300_um)
+      )
+      (rule
+        (width 200)
+        (clearance 210)
+      )
+    )
+    (class fine
+      +3V3 PC13 OSC32_IN OSC32_OUT OSC_IN OSC_OUT NRST GND PA0 PA1 PA2 PA3 PA4 PA5 PA6 PA7 PB0 PB1 BOOT1 PB10 PB11 PB12 PB13 PB14 PB15 PA8 PA9 PA10 USB_DM_R USB_DP_R SWDIO SWCLK PA15 PB3 PB4 PB5 PB6 PB7 BOOT0 PB8 PB9 +5V USB_DM USB_DP
+      (circuit
+        (use_via Via[0-1]_600:300_um)
+      )
+      (rule
+        (width 200)
+        (clearance 210)
+      )
+    )
+  )
+  (wiring
+  )
+)

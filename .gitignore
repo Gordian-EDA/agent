@@ -29,12 +29,10 @@ docs/validation/*.png
 
 # Python bytecode cache for the tools/ scripts
 tools/__pycache__/
-tools/vendor/freerouting.jar
 
 # Freerouting writes its run log here (CWD/logs/)
 logs/
 freerouting.json
-tools/vendor/freerouting-2.2.4.jar
 /target-slow
 /target-rel
 

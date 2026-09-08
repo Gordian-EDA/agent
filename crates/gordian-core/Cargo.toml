@@ -4,39 +4,34 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "The Gordian KiCAD agent: the turn loop, schematic/PCB tools, prompts, review, and render over a provider-agnostic LLM client."
+description = "The Gordian schematic+PCB agent: system prompt, the seven design tools, the agent loop, the visual critic, the composition pass and the PCB stage."
+
+[features]
+# The real engines, each switched on as its crate lands. Without them the loop
+# compiles against local stand-ins with the same signatures that refuse at
+# runtime, so the prompt, the critic, the CLI and the budget can be tested first.
+default = ["real-sch", "real-pcb"]
+real-sch = ["dep:sch-engine"]
+real-pcb = ["dep:pcb-auto"]
 
 [dependencies]
-sch-check = { path = "../sch-check" }
-sch-doc = { path = "../sch-doc" }
-sch-floorplan = { path = "../sch-floorplan" }
-kicad = { path = "../kicad" }
 gordian-llm = { path = "../gordian-llm" }
+gordian-skills = { path = "../gordian-skills" }
 gordian-runtime = { path = "../gordian-runtime" }
-gordian-tools-sch = { path = "../gordian-tools-sch" }
-pcb-workflow = { path = "../pcb-workflow" }
+kicad = { path = "../kicad" }
+sch-engine = { path = "../sch-engine", optional = true }
+pcb-auto = { path = "../pcb-auto", optional = true }
 
 anyhow.workspace = true
-async-trait.workspace = true
 genai = "=0.7.0-beta.6"
-serde.workspace = true
+serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
-indexmap.workspace = true
-tempfile.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 futures.workspace = true
-directories.workspace = true
-base64 = { workspace = true }
+base64.workspace = true
+resvg.workspace = true
 
 [dev-dependencies]
-tokio.workspace = true
-async-trait.workspace = true
-anyhow.workspace = true
-serde_json.workspace = true
-toml.workspace = true
-directories.workspace = true
-geom = { path = "../geom" }
-kicad-board = { path = "../kicad-board" }
-pcb-engine = { path = "../pcb-engine" }
-pcb-model = { path = "../pcb-model" }
+tempfile.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

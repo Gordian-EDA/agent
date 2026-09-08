@@ -15,12 +15,11 @@ use serde::{Deserialize, Serialize};
 /// Version of the config schema described by this module.
 pub const CONFIG_SCHEMA_VERSION: u32 = 1;
 
-/// Default number of symbol and footprint hits when a tool input does not
-/// provide its own limit.
-pub const DEFAULT_SEARCH_LIMIT: usize = 5;
+/// Default wall clock for one run, schematic and board together.
+pub const DEFAULT_BUDGET_SECONDS: u64 = 180;
 
-/// Default long-edge cap for rendered schematic and board PNGs.
-pub const DEFAULT_RENDER_MAX_PX: u32 = 1600;
+/// Default ceiling on `build` calls in one run.
+pub const DEFAULT_MAX_BUILDS: usize = 6;
 
 /// Default schematic filename used when a frontend creates a fresh project.
 pub const DEFAULT_SCHEMATIC_FILENAME: &str = "design.kicad_sch";
@@ -44,17 +43,17 @@ pub struct GordianConfig {
     pub project: ProjectConfig,
     /// Agent loop policy.
     pub agent: AgentConfig,
-    /// Compatibility sink for the retrieval settings shipped in schema v1
-    /// before retrieval support was removed.  The values no longer affect
-    /// behavior and are omitted when serializing new configs, but accepting
-    /// them keeps existing schema-v1 files loadable.
+    /// Sections the schema-v1 agent read and this one does not. See
+    /// [`RetiredSection`].
     #[serde(default, rename = "retrieval", skip_serializing)]
     #[doc(hidden)]
-    pub legacy_retrieval: Option<LegacyRetrievalConfig>,
-    /// Independent post-generation review behavior.
-    pub review: ReviewConfig,
-    /// Tool-level defaults shared across schematic and PCB tools.
-    pub tools: ToolConfig,
+    pub legacy_retrieval: Option<RetiredSection>,
+    #[serde(default, rename = "review", skip_serializing)]
+    #[doc(hidden)]
+    pub legacy_review: Option<RetiredSection>,
+    #[serde(default, rename = "tools", skip_serializing)]
+    #[doc(hidden)]
+    pub legacy_tools: Option<RetiredSection>,
 }
 
 impl Default for GordianConfig {
@@ -66,31 +65,16 @@ impl Default for GordianConfig {
             project: ProjectConfig::default(),
             agent: AgentConfig::default(),
             legacy_retrieval: None,
-            review: ReviewConfig::default(),
-            tools: ToolConfig::default(),
+            legacy_review: None,
+            legacy_tools: None,
         }
     }
 }
 
-/// Retired schema-v1 retrieval settings retained only for deserialization.
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
-#[serde(default, rename_all = "camelCase", deny_unknown_fields)]
-#[doc(hidden)]
-pub struct LegacyRetrievalConfig {
-    pub enabled: bool,
-    pub corpus_dir: Option<PathBuf>,
-    pub references_per_query: usize,
-}
-
-impl Default for LegacyRetrievalConfig {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            corpus_dir: None,
-            references_per_query: 3,
-        }
-    }
-}
+/// A config section the schema-v1 agent read and this one does not. It is
+/// accepted so an existing `config.toml` still loads, ignored while running, and
+/// never written back out.
+pub type RetiredSection = serde_json::Value;
 
 impl GordianConfig {
     /// Validate invariants that cannot be represented in the Rust type system.
@@ -110,7 +94,6 @@ impl GordianConfig {
         self.kicad.validate("kicad")?;
         self.project.validate("project")?;
         self.agent.validate("agent")?;
-        self.tools.validate("tools")?;
         Ok(())
     }
 }
@@ -175,84 +158,38 @@ impl ProjectConfig {
     }
 }
 
-/// Agent loop policy.
+/// How far one run may go. Retired schema-v1 keys in this section are ignored
+/// rather than rejected, so an older `config.toml` still loads.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default, rename_all = "camelCase", deny_unknown_fields)]
+#[serde(default, rename_all = "camelCase")]
 pub struct AgentConfig {
-    /// Run the independent post-commit review and bounded fix pass.
-    pub post_commit_review: bool,
-    /// Maximum number of review-driven follow-up fix turns after a commit.
-    pub review_fix_rounds: u8,
-    /// Optional user-set ceiling on model requests per turn. `None` (the
-    /// default) lets a turn run until the model stops calling tools; the agent
-    /// loop imposes no time or request limit of its own.
-    pub max_requests: Option<usize>,
+    /// Wall clock for one run, schematic and board together. `--budget` overrides it.
+    pub budget_seconds: u64,
+    /// Ceiling on `build` calls. `--max-builds` overrides it.
+    pub max_builds: usize,
 }
 
 impl Default for AgentConfig {
     fn default() -> Self {
         Self {
-            post_commit_review: true,
-            review_fix_rounds: 1,
-            max_requests: None,
+            budget_seconds: DEFAULT_BUDGET_SECONDS,
+            max_builds: DEFAULT_MAX_BUILDS,
         }
     }
 }
 
 impl AgentConfig {
     fn validate(&self, path: &'static str) -> Result<(), ConfigError> {
-        if self.max_requests == Some(0) {
+        if self.budget_seconds == 0 {
             return Err(ConfigError::new(
-                format!("{path}.maxRequests"),
-                "must be at least 1, or absent for no cap",
+                format!("{path}.budgetSeconds"),
+                "the wall clock must be at least one second",
             ));
         }
-        Ok(())
-    }
-}
-
-/// Independent review behavior.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default, rename_all = "camelCase", deny_unknown_fields)]
-pub struct ReviewConfig {
-    /// Retry a malformed review JSON response once.
-    pub retry_json: bool,
-    /// Use the broader diverse-lens netlist review ensemble instead of the
-    /// single quick lens.
-    pub ensemble: bool,
-}
-
-/// Tool-level defaults shared across schematic and PCB tools.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default, rename_all = "camelCase", deny_unknown_fields)]
-pub struct ToolConfig {
-    /// Default max hits for symbol and footprint search tools.
-    pub default_search_limit: usize,
-    /// Long-edge cap for rendered schematic and board PNGs.
-    pub render_max_px: u32,
-}
-
-impl Default for ToolConfig {
-    fn default() -> Self {
-        Self {
-            default_search_limit: DEFAULT_SEARCH_LIMIT,
-            render_max_px: DEFAULT_RENDER_MAX_PX,
-        }
-    }
-}
-
-impl ToolConfig {
-    fn validate(&self, path: &'static str) -> Result<(), ConfigError> {
-        if self.default_search_limit == 0 {
+        if self.max_builds == 0 {
             return Err(ConfigError::new(
-                format!("{path}.defaultSearchLimit"),
-                "search limit must be greater than zero",
-            ));
-        }
-        if self.render_max_px == 0 {
-            return Err(ConfigError::new(
-                format!("{path}.renderMaxPx"),
-                "render size must be greater than zero",
+                format!("{path}.maxBuilds"),
+                "a run needs at least one build",
             ));
         }
         Ok(())
@@ -305,26 +242,25 @@ fn validate_optional_path(
 mod tests {
     use super::*;
 
-    /// The request cap is opt-in and must be a usable number when present.
+    /// The run's bounds have defaults, are settable, and refuse a zero.
     #[test]
-    fn agent_max_requests_is_absent_by_default_and_validated_when_set() {
+    fn the_agent_budget_and_build_ceiling_are_validated() {
         let mut config = GordianConfig::default();
-        assert_eq!(config.agent.max_requests, None);
+        assert_eq!(config.agent.budget_seconds, DEFAULT_BUDGET_SECONDS);
+        assert_eq!(config.agent.max_builds, DEFAULT_MAX_BUILDS);
         config.validate().unwrap();
 
-        config.agent.max_requests = Some(0);
-        assert_eq!(
-            config.validate().unwrap_err().path,
-            "agent.maxRequests",
-            "a zero cap is rejected"
-        );
+        config.agent.budget_seconds = 0;
+        assert_eq!(config.validate().unwrap_err().path, "agent.budgetSeconds");
 
-        config.agent.max_requests = Some(200);
-        config.validate().unwrap();
+        config.agent.budget_seconds = 90;
+        config.agent.max_builds = 0;
+        assert_eq!(config.validate().unwrap_err().path, "agent.maxBuilds");
 
-        let parsed: GordianConfig =
-            toml::from_str("[agent]\nmaxRequests = 120\n").expect("camelCase key");
-        assert_eq!(parsed.agent.max_requests, Some(120));
+        let parsed: GordianConfig = toml::from_str("[agent]\nbudgetSeconds = 120\nmaxBuilds = 3\n")
+            .expect("camelCase keys");
+        assert_eq!(parsed.agent.budget_seconds, 120);
+        assert_eq!(parsed.agent.max_builds, 3);
     }
 
     #[test]
@@ -365,7 +301,6 @@ mod tests {
         assert_eq!(cfg.llm.model.as_deref(), Some("gpt-4o"));
         assert_eq!(cfg.llm.api_key.as_deref(), Some("test-key"));
         assert_eq!(cfg.llm.max_tokens, DEFAULT_MAX_TOKENS);
-        assert_eq!(cfg.tools.default_search_limit, DEFAULT_SEARCH_LIMIT);
         cfg.validate().unwrap();
     }
 
@@ -384,34 +319,41 @@ mod tests {
         assert!(nested.to_string().contains("apiKEy"));
     }
 
+    /// The sections the previous agent read are accepted and dropped, so a
+    /// config written for it still loads and is never written back out.
     #[test]
-    fn retired_schema_v1_retrieval_section_remains_loadable() {
+    fn retired_schema_v1_sections_remain_loadable() {
         let cfg: GordianConfig = toml::from_str(
             r#"
             schemaVersion = 1
 
             [retrieval]
             enabled = true
-            corpusDir = "/tmp/reference-corpus"
             referencesPerQuery = 3
+
+            [review]
+            retryJson = false
+
+            [tools]
+            defaultSearchLimit = 8
+
+            [agent]
+            postCommitReview = false
+            reviewFixRounds = 1
             "#,
         )
         .unwrap();
 
-        let legacy = cfg
-            .legacy_retrieval
-            .as_ref()
-            .expect("legacy retrieval section is accepted");
-        assert!(legacy.enabled);
-        assert_eq!(
-            legacy.corpus_dir.as_deref(),
-            Some(std::path::Path::new("/tmp/reference-corpus"))
-        );
-        assert_eq!(legacy.references_per_query, 3);
+        assert!(cfg.legacy_retrieval.is_some());
+        assert!(cfg.legacy_review.is_some());
+        assert!(cfg.legacy_tools.is_some());
+        assert_eq!(cfg.agent.budget_seconds, DEFAULT_BUDGET_SECONDS);
         cfg.validate().unwrap();
 
         let serialized = toml::to_string(&cfg).unwrap();
-        assert!(!serialized.contains("retrieval"), "{serialized}");
+        for retired in ["retrieval", "review", "postCommitReview"] {
+            assert!(!serialized.contains(retired), "{serialized}");
+        }
     }
 
     #[test]
@@ -507,16 +449,6 @@ mod tests {
                 .contains("reasoning effort budget must be greater than zero"),
             "{err}"
         );
-    }
-
-
-    #[test]
-    fn validation_reports_field_path() {
-        let mut cfg = GordianConfig::default();
-        cfg.tools.default_search_limit = 0;
-
-        let err = cfg.validate().unwrap_err();
-        assert_eq!(err.path, "tools.defaultSearchLimit");
     }
 
     #[test]

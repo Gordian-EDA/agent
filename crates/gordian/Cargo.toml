@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "CLI and TUI for the Gordian LLM agent that designs KiCAD schematics and PCBs."
+description = "CLI for the Gordian LLM agent that designs KiCAD schematics and PCBs."
 
 [dependencies]
 gordian-core = { path = "../gordian-core" }
@@ -14,18 +14,7 @@ kicad = { path = "../kicad" }
 anyhow.workspace = true
 tokio.workspace = true
 tracing.workspace = true
-serde.workspace = true
 serde_json.workspace = true
 toml.workspace = true
-directories.workspace = true
 tempfile.workspace = true
 libc.workspace = true
-ratatui.workspace = true
-crossterm.workspace = true
-open = "5.4.2"
-futures.workspace = true
-async-trait.workspace = true
-pulldown-cmark.workspace = true
-
-[dev-dependencies]
-async-trait.workspace = true

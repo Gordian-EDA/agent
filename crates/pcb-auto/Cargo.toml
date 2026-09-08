@@ -1,0 +1,20 @@
+[package]
+name = "pcb-auto"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Deterministic PCB auto-layout: placement, Freerouting, pours and KiCad DRC."
+
+[dependencies]
+kicad = { path = "../kicad" }
+anyhow.workspace = true
+uuid.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+tracing.workspace = true
+kicad-footprint = { path = "../kicad-footprint" }
+resvg.workspace = true
+libc.workspace = true
+fastrand.workspace = true

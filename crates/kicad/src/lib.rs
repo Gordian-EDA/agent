@@ -9,6 +9,8 @@ mod netlist;
 mod reports;
 
 pub use installation::KicadInstallation;
+/// The name the PCB and schematic pipelines spell it.
+pub use installation::KicadInstallation as Installation;
 pub use netlist::{Net, NetComp, Netlist};
 pub use reports::{DrcReport, ErcReport, Violation, ViolationItem};
 
