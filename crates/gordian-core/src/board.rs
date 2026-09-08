@@ -10,7 +10,7 @@ use anyhow::Result;
 use kicad::KicadInstallation;
 use serde_json::{Value, json};
 
-use crate::agent::event;
+use crate::events::event;
 use crate::engines::pcb;
 
 /// What the board stage produced.

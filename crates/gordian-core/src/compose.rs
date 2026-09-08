@@ -13,7 +13,8 @@ use anyhow::Result;
 use gordian_llm::{Binary, ChatMessage, ContentPart, MessageContent, Provider, completed_text};
 use serde_json::Value;
 
-use crate::agent::{event, part_summary};
+use crate::agent::part_summary;
+use crate::events::event;
 use crate::critic::{self, Review};
 use crate::engines::sch;
 use crate::render;

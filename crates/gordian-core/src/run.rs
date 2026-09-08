@@ -10,8 +10,9 @@ use gordian_llm::Provider;
 use kicad::KicadInstallation;
 use serde_json::{Value, json};
 
-use crate::agent::{Agent, Budget, event};
+use crate::agent::{Agent, Budget};
 use crate::board::{self, BoardOutcome};
+use crate::events::{AgentEvent, emit, event};
 use crate::critic;
 use crate::engines::pcb;
 use crate::{compose, inputs, render, skills};
@@ -201,6 +202,7 @@ pub async fn run(
     std::fs::write(&report_path, serde_json::to_string_pretty(&value)? + "\n")
         .with_context(|| format!("writing {}", report_path.display()))?;
     event(format!("report: {}", report_path.display()));
+    emit(AgentEvent::Done);
 
     Ok(Report {
         value,
@@ -221,7 +223,13 @@ fn final_renders(
     let clean = project_dir.join("schematic.png");
     let grid = project_dir.join("schematic-grid.png");
     match render::sheet(kicad.cli_path(), sch, &clean, &grid) {
-        Ok(_) => json!({"clean": clean.display().to_string(), "grid": grid.display().to_string()}),
+        Ok(_) => {
+            emit(AgentEvent::Render {
+                label: "schematic".to_string(),
+                path: clean.clone(),
+            });
+            json!({"clean": clean.display().to_string(), "grid": grid.display().to_string()})
+        }
         Err(error) => json!({"error": format!("{error:#}")}),
     }
 }
@@ -269,6 +277,10 @@ fn publish_board(outcome: &mut BoardOutcome, stem: &Path, project_dir: &Path) {
     if let Some(png) = outcome.front_png.take() {
         let delivered = project_dir.join("board-front.png");
         if std::fs::copy(&png, &delivered).is_ok() {
+            emit(AgentEvent::Render {
+                label: "board".to_string(),
+                path: delivered.clone(),
+            });
             outcome.front_png = Some(delivered);
         }
     }

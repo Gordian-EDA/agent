@@ -12,6 +12,7 @@ pub mod board;
 pub mod compose;
 pub mod critic;
 mod engines;
+pub mod events;
 pub mod inputs;
 pub mod prompt;
 pub mod render;
@@ -20,6 +21,7 @@ pub mod skills;
 pub mod tools;
 
 pub use agent::{Agent, Budget, Outcome, Usage};
+pub use events::{AgentEvent, emit, event, subscribe, unsubscribe};
 pub use gordian_llm::{GenaiProvider, Provider};
 pub use gordian_runtime::GordianConfig;
 pub use gordian_runtime::platform;

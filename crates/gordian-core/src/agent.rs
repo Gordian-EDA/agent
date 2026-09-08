@@ -14,10 +14,10 @@ use gordian_llm::{
     Binary, ChatMessage, ContentPart, MessageContent, Provider, StreamEnd, ToolCall, ToolResponse,
     completed_text, token_usage,
 };
-use gordian_runtime::logging::EVENTS_TARGET;
 use serde_json::{Value, json};
 
 use crate::critic::{self, Review};
+use crate::events::{AgentEvent, emit, event};
 use crate::engines::sch;
 use crate::prompt::system_prompt;
 use crate::render;
@@ -67,14 +67,14 @@ pub struct Usage {
 }
 
 impl Usage {
-    fn add(&mut self, end: &StreamEnd) -> (u64, u64, u64) {
+    fn add(&mut self, end: &StreamEnd) -> (u64, u64, u64, u64) {
         let (input, output, cache_write, cache_read) = token_usage(end);
         self.requests += 1;
         self.input += input;
         self.output += output;
         self.cache_write += cache_write;
         self.cache_read += cache_read;
-        (input, output, cache_read)
+        (input, output, cache_write, cache_read)
     }
 }
 
@@ -355,15 +355,18 @@ impl<'a> Agent<'a> {
         loop {
             let request_started = Instant::now();
             let end = self.client.complete(&system, &messages, &defs).await?;
-            let (input, output, cached) = self.usage.add(&end);
-            event(format!(
-                "usage: request #{} in={input} out={output} cached={cached} latency={:.1}s",
-                self.usage.requests,
-                request_started.elapsed().as_secs_f64()
-            ));
+            let (input, output, cache_write, cached) = self.usage.add(&end);
+            emit(AgentEvent::Usage {
+                request: self.usage.requests,
+                input,
+                output,
+                cache_write,
+                cached,
+                seconds: request_started.elapsed().as_secs_f64(),
+            });
             let text = completed_text(&end);
             if !text.trim().is_empty() {
-                event(format!("assistant: {}", one_line(&text, 2000)));
+                emit(AgentEvent::Assistant(one_line(&text, 2000)));
             }
             let calls = end.captured_into_tool_calls().unwrap_or_default();
             if calls.is_empty() {
@@ -384,14 +387,16 @@ impl<'a> Agent<'a> {
             let mut finished = None;
             for call in &calls {
                 let started = Instant::now();
-                event(format!("tool -> {} {}", call.fn_name, call_args(call)));
+                emit(AgentEvent::ToolCall {
+                    name: call.fn_name.clone(),
+                    args: call_args(call),
+                });
                 let (out, image) = self.dispatch(call, &mut finished).await;
-                event(format!(
-                    "tool <- {} (elapsed {:.1}s): {}",
-                    call.fn_name,
-                    started.elapsed().as_secs_f64(),
-                    one_line(&out, 400)
-                ));
+                emit(AgentEvent::ToolResult {
+                    name: call.fn_name.clone(),
+                    seconds: started.elapsed().as_secs_f64(),
+                    summary: one_line(&out, 400),
+                });
                 self.record(&call.fn_name, &out);
                 messages.push(ChatMessage::from(ToolResponse::from_tool_call(
                     call,
@@ -735,6 +740,10 @@ impl<'a> Agent<'a> {
             ));
             match render::sheet(&self.kicad_cli, &build, &clean, &grid) {
                 Ok(sheet) => {
+                    emit(AgentEvent::Render {
+                        label: format!("build {}", self.builds),
+                        path: sheet.grid_path.clone(),
+                    });
                     self.sheet = Some(sheet);
                     self.rendered_of = Some(build);
                 }
@@ -764,7 +773,12 @@ impl<'a> Agent<'a> {
         let parts = part_summary(&self.last_raw);
         match critic::review(self.client, &clean, &parts, engine_clean).await {
             Ok(Some(review)) => {
-                event(review.event());
+                emit(AgentEvent::Review {
+                    score: review.score,
+                    mean: review.mean,
+                    samples: review.samples.clone(),
+                    defects: review.defects().len(),
+                });
                 let text = review.text();
                 self.reviewed_of = self.last_build.clone();
                 if self.last_build == self.last_ok_build
@@ -1171,11 +1185,6 @@ fn one_line(text: &str, limit: usize) -> String {
     } else {
         flat.chars().take(limit).collect::<String>() + "..."
     }
-}
-
-/// A bare line on the agent's stderr transcript.
-pub fn event(line: impl AsRef<str>) {
-    tracing::info!(target: EVENTS_TARGET, "{}", line.as_ref());
 }
 
 #[cfg(test)]

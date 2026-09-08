@@ -4,8 +4,13 @@
 //! layout, builds the board and leaves `report.json` in the project directory.
 //! When the project already holds the schematic, the run is an edit: the model
 //! returns a patch against it instead of a whole design.
+//!
+//! `gordian tui --project <dir>` is the same run, driven interactively: the
+//! prompt is typed into a composer, the run streams into a live transcript and
+//! its renders appear inline.
 
 mod config;
+mod tui;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -24,6 +29,7 @@ const USAGE: &str = "usage:
   gordian agent [--project <dir>] [\"<prompt>\"]
                 [--budget <seconds>] [--max-builds <n>] [--no-review] [--no-pcb]
                                        design a schematic (and its board) into <dir>
+  gordian tui [--project <dir>]        design interactively in the terminal
 
 options:
   --project, -p <dir>                  project directory (default: gordian-project)
@@ -49,6 +55,18 @@ fn main() -> ExitCode {
             println!("{USAGE}");
             ExitCode::SUCCESS
         }
+        Some("tui") if matches!(&args[1..], [one] if one == "--help" || one == "-h") => {
+            println!("{USAGE}");
+            ExitCode::SUCCESS
+        }
+        Some("tui") => match run_tui(&args[1..]) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                logging::init_stderr_only();
+                tracing::error!("error: {error:#}");
+                ExitCode::FAILURE
+            }
+        },
         Some("agent") => match run_agent(&args[1..]) {
             Ok(code) => code,
             Err(error) => {
@@ -133,10 +151,46 @@ fn parse(args: &[String]) -> Result<Invocation> {
     })
 }
 
+/// The project directory `tui` works in: `--project <dir>`, a bare path, or the
+/// current directory.
+fn parse_tui(args: &[String]) -> Result<PathBuf> {
+    let mut dir: Option<PathBuf> = None;
+    let mut options = true;
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--" if options => options = false,
+            "--project" | "-p" if options => {
+                dir = Some(PathBuf::from(
+                    args.get(index + 1).context("--project requires a value")?,
+                ));
+                index += 1;
+            }
+            other if options && other.starts_with('-') => bail!("unknown tui option `{other}`"),
+            other if dir.is_none() => dir = Some(PathBuf::from(other)),
+            other => bail!("unexpected argument `{other}`"),
+        }
+        index += 1;
+    }
+    dir.map_or_else(|| std::env::current_dir().context("resolving the working directory"), Ok)
+}
+
+/// Launch the cockpit. It runs on its own multi-threaded runtime so a design
+/// run's blocking KiCad calls never stall the redraw loop.
+fn run_tui(args: &[String]) -> Result<()> {
+    let project_dir = parse_tui(args)?;
+    let loaded = config::load_or_create()?;
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .context("starting the Tokio runtime")?;
+    runtime.block_on(tui::run(project_dir, loaded))
+}
+
 /// A request that asks only for the schematic ("render the schematic") skips the board;
 /// any mention of the board, layout, routing or fabrication — or no mention of the
 /// schematic at all — gets both.
-fn wants_board(prompt: &str) -> bool {
+pub(crate) fn wants_board(prompt: &str) -> bool {
     let lower = prompt.to_ascii_lowercase();
     let board_words = ["pcb", "board", "layout", "rout", "fabricat", "gerber"];
     if board_words.iter().any(|w| lower.contains(w)) {
@@ -286,6 +340,17 @@ mod tests {
             parse(&["design a board".to_string()]).unwrap().project_dir,
             PathBuf::from(DEFAULT_PROJECT_DIR)
         );
+    }
+
+    #[test]
+    fn the_cockpit_takes_its_project_from_a_flag_or_a_bare_path() {
+        assert_eq!(
+            parse_tui(&["--project".into(), "/tmp/p".into()]).unwrap(),
+            PathBuf::from("/tmp/p")
+        );
+        assert_eq!(parse_tui(&["/tmp/p".into()]).unwrap(), PathBuf::from("/tmp/p"));
+        assert!(parse_tui(&["/a".into(), "/b".into()]).is_err());
+        assert!(parse_tui(&["--wat".into()]).is_err());
     }
 
     #[test]
