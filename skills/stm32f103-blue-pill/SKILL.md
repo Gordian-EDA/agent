@@ -563,34 +563,29 @@ request:
    "title": "POWER",
    "note": "USB VBUS fused to +5V, AMS1117 3.3 V rail, power LED",
    "tree": {
-    "col": [
+    "row": [
      {
-      "row": [
-       {
-        "part": "J3"
-       },
-       {
-        "col": [
-         {
-          "part": "F1"
-         },
-         {
-          "part": "C3"
-         }
-        ],
-        "gap": 4
-       },
-       {
-        "part": "U2"
-       },
-       {
-        "part": "C4"
-       }
-      ],
-      "gap": 5
+      "part": "J3"
      },
      {
-      "row": [
+      "col": [
+       {
+        "part": "F1"
+       },
+       {
+        "part": "C3"
+       }
+      ],
+      "gap": 4
+     },
+     {
+      "part": "U2"
+     },
+     {
+      "part": "C4"
+     },
+     {
+      "col": [
        {
         "part": "R5"
        },
@@ -601,7 +596,7 @@ request:
       "gap": 4
      }
     ],
-    "gap": 6
+    "gap": 5
    }
   },
   {
@@ -615,16 +610,31 @@ request:
      {
       "col": [
        {
-        "part": "R7"
+        "row": [
+         {
+          "part": "R7"
+         }
+        ],
+        "gap": 4
        },
        {
-        "part": "R8"
+        "row": [
+         {
+          "part": "R8"
+         },
+         {
+          "col": [
+           {
+            "part": "R6"
+           }
+          ],
+          "gap": 4
+         }
+        ],
+        "gap": 4
        }
       ],
-      "gap": 5
-     },
-     {
-      "part": "R6"
+      "gap": 6
      }
     ],
     "gap": 5
@@ -634,44 +644,44 @@ request:
    "title": "MCU CORE",
    "note": "One 100nF per VDD pin plus VDDA and VBAT; PC13 sinks the user LED",
    "tree": {
-    "row": [
+    "col": [
      {
-      "part": "U1"
+      "row": [
+       {
+        "part": "C5"
+       },
+       {
+        "part": "C6"
+       },
+       {
+        "part": "C7"
+       },
+       {
+        "part": "C8"
+       },
+       {
+        "part": "C12"
+       }
+      ],
+      "gap": 4
      },
      {
-      "col": [
+      "row": [
        {
-        "row": [
-         {
-          "part": "C5"
-         },
-         {
-          "part": "C6"
-         },
-         {
-          "part": "C7"
-         }
-        ],
-        "gap": 4
+        "part": "U1"
        },
        {
-        "row": [
+        "col": [
          {
-          "part": "C8"
-         },
-         {
-          "part": "C12"
-         }
-        ],
-        "gap": 4
-       },
-       {
-        "row": [
-         {
-          "part": "R4"
-         },
-         {
-          "part": "D1"
+          "row": [
+           {
+            "part": "R4"
+           },
+           {
+            "part": "D1"
+           }
+          ],
+          "gap": 4
          }
         ],
         "gap": 4
@@ -680,7 +690,7 @@ request:
       "gap": 5
      }
     ],
-    "gap": 6
+    "gap": 5
    }
   },
   {
@@ -700,7 +710,7 @@ request:
         "part": "C2"
        }
       ],
-      "gap": 4
+      "gap": 3
      },
      {
       "row": [
@@ -714,10 +724,10 @@ request:
         "part": "C11"
        }
       ],
-      "gap": 4
+      "gap": 3
      }
     ],
-    "gap": 6
+    "gap": 5
    }
   },
   {
@@ -784,7 +794,7 @@ request:
         "part": "J2"
        }
       ],
-      "gap": 8
+      "gap": 12
      },
      {
       "part": "J4"

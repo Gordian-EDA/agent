@@ -554,26 +554,26 @@ the request:
          }
         ],
         "gap": 2
+       },
+       {
+        "row": [
+         {
+          "part": "C8"
+         },
+         {
+          "part": "C9"
+         }
+        ],
+        "gap": 3
        }
       ],
       "gap": 3
      },
      {
       "part": "U1"
-     },
-     {
-      "row": [
-       {
-        "part": "C8"
-       },
-       {
-        "part": "C9"
-       }
-      ],
-      "gap": 2
      }
     ],
-    "gap": 6
+    "gap": 5
    }
   },
   {
@@ -588,18 +588,18 @@ the request:
        },
        {
         "part": "SW1"
-       },
-       {
-        "part": "C7"
        }
       ],
       "gap": 3
      },
      {
+      "part": "C7"
+     },
+     {
       "part": "J5"
      }
     ],
-    "gap": 6
+    "gap": 5
    }
   },
   {

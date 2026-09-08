@@ -42,7 +42,7 @@ Builds with 0 issues and 0 ERC violations:
  "rev": "1.0",
  "date": "2026-09-08",
  "company": "Gordian EDA",
- "paper": "A4",
+ "paper": "A5",
  "comments": [
   "NPN low-side switch, 5V status LED",
   "1k base series, 10k base pulldown, 330R LED series"
@@ -140,7 +140,7 @@ Builds with 0 issues and 0 ERC violations:
  ],
  "layout": [
   {
-   "title": "POWER AND INPUT",
+   "title": "POWER AND CTRL INPUT",
    "note": "Supply decoupling and the CTRL input with its pulldown",
    "tree": {
     "col": [
@@ -167,19 +167,16 @@ Builds with 0 issues and 0 ERC violations:
       "gap": 6
      }
     ],
-    "gap": 10
+    "gap": 6
    }
   },
   {
-   "title": "DRIVER",
-   "note": "Base series resistor into the NPN low-side switch, LED with its series resistor on the collector",
+   "title": "LED DRIVER",
+   "note": "R1 drives the NPN base; R2 sets the LED current, Q1 sinks the cathode",
    "tree": {
     "row": [
      {
       "part": "R1"
-     },
-     {
-      "part": "Q1"
      },
      {
       "col": [
@@ -188,12 +185,16 @@ Builds with 0 issues and 0 ERC violations:
        },
        {
         "part": "D1"
+       },
+       {
+        "part": "Q1"
        }
       ],
-      "gap": 5
+      "gap": 4
      }
     ],
-    "gap": 8
+    "gap": 8,
+    "align": "end"
    }
   }
  ]

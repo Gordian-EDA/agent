@@ -144,7 +144,7 @@ Builds with 0 issues and 0 ERC violations:
  ],
  "layout": [
   {
-   "title": "SUPPLY AND BUS",
+   "title": "SUPPLY AND I2C BUS",
    "note": "Connector, local decoupling and the SDA/SCL pull-ups",
    "tree": {
     "row": [
@@ -178,21 +178,31 @@ Builds with 0 issues and 0 ERC violations:
    }
   },
   {
-   "title": "SENSOR",
-   "note": "TMP102 with an ALERT pull-up and the ADD0 address strap",
+   "title": "TMP102 SENSOR",
+   "note": "ADD0 strap sets the bus address; R3 pulls the open-drain ALERT up",
    "tree": {
     "row": [
+     {
+      "col": [
+       {
+        "part": "JP1"
+       }
+      ],
+      "gap": 4
+     },
      {
       "part": "U1"
      },
      {
-      "part": "R3"
-     },
-     {
-      "part": "JP1"
+      "col": [
+       {
+        "part": "R3"
+       }
+      ],
+      "gap": 4
      }
     ],
-    "gap": 10
+    "gap": 6
    }
   }
  ]

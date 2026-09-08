@@ -67,28 +67,229 @@ it to `build` as-is, adapting values and jack footprints to the request:
   "Second-order low-pass followed by gain of 10"
  ],
  "parts": [
-  {"id": "BT1", "lib": "Device:Battery", "value": "9V", "footprint": "Battery:BatteryHolder_MPD_BA9VPC_1xPP3", "pins": {"1": "+9V", "2": "GND"}},
-  {"id": "R1", "lib": "Device:R", "value": "100k", "footprint": "Resistor_SMD:R_0603_1608Metric", "pins": {"1": "+9V", "2": "VREF"}},
-  {"id": "R2", "lib": "Device:R", "value": "100k", "footprint": "Resistor_SMD:R_0603_1608Metric", "pins": {"1": "VREF", "2": "GND"}},
-  {"id": "C1", "lib": "Device:C_Polarized", "value": "47uF", "footprint": "Capacitor_SMD:C_0805_2012Metric", "pins": {"1": "VREF", "2": "GND"}},
-  {"id": "C2", "lib": "Device:C", "value": "100nF", "footprint": "Capacitor_SMD:C_0603_1608Metric", "pins": {"1": "+9V", "2": "GND"}},
-  {"id": "J1", "lib": "Connector_Audio:AudioJack2", "value": "INPUT 3.5mm", "footprint": "Connector_Audio:Jack_3.5mm_CUI_SJ1-3523N_Horizontal", "pins": {"T": "IN_AC", "S": "GND"}},
-  {"id": "C3", "lib": "Device:C", "value": "1uF", "footprint": "Capacitor_SMD:C_0603_1608Metric", "pins": {"1": "IN_AC", "2": "FILTER_IN"}},
-  {"id": "R3", "lib": "Device:R", "value": "1M", "footprint": "Resistor_SMD:R_0603_1608Metric", "pins": {"1": "FILTER_IN", "2": "VREF"}},
-  {"id": "R4", "lib": "Device:R", "value": "15.8k", "footprint": "Resistor_SMD:R_0603_1608Metric", "pins": {"1": "FILTER_IN", "2": "FILTER_X"}},
-  {"id": "R5", "lib": "Device:R", "value": "15.8k", "footprint": "Resistor_SMD:R_0603_1608Metric", "pins": {"1": "FILTER_X", "2": "FILTER_Y"}},
-  {"id": "C4", "lib": "Device:C", "value": "10nF", "footprint": "Capacitor_SMD:C_0603_1608Metric", "pins": {"1": "FILTER_Y", "2": "VREF"}},
-  {"id": "C5", "lib": "Device:C", "value": "10nF", "footprint": "Capacitor_SMD:C_0603_1608Metric", "pins": {"1": "FILTER_X", "2": "FILTER_OUT"}},
-  {"id": "U1", "lib": "Amplifier_Operational:LM358", "unit": 1, "value": "LM358", "footprint": "Package_DIP:DIP-8_W7.62mm", "pins": {"3": "FILTER_Y", "2": "FILTER_FB", "1": "FILTER_OUT"}},
-  {"id": "R6", "lib": "Device:R", "value": "10k", "footprint": "Resistor_SMD:R_0603_1608Metric", "pins": {"1": "FILTER_FB", "2": "VREF"}},
-  {"id": "R7", "lib": "Device:R", "value": "5.90k", "footprint": "Resistor_SMD:R_0603_1608Metric", "pins": {"1": "FILTER_OUT", "2": "FILTER_FB"}},
-  {"id": "U1", "lib": "Amplifier_Operational:LM358", "unit": 2, "value": "LM358", "pins": {"5": "FILTER_OUT", "6": "GAIN_FB", "7": "GAIN_OUT"}},
-  {"id": "R8", "lib": "Device:R", "value": "10k", "footprint": "Resistor_SMD:R_0603_1608Metric", "pins": {"1": "GAIN_FB", "2": "VREF"}},
-  {"id": "R9", "lib": "Device:R", "value": "90k", "footprint": "Resistor_SMD:R_0603_1608Metric", "pins": {"1": "GAIN_OUT", "2": "GAIN_FB"}},
-  {"id": "C6", "lib": "Device:C", "value": "10uF", "footprint": "Capacitor_SMD:C_0603_1608Metric", "pins": {"1": "GAIN_OUT", "2": "OUT_AC"}},
-  {"id": "R10", "lib": "Device:R", "value": "100k", "footprint": "Resistor_SMD:R_0603_1608Metric", "pins": {"1": "OUT_AC", "2": "GND"}},
-  {"id": "J2", "lib": "Connector_Audio:AudioJack2", "value": "OUTPUT 3.5mm", "footprint": "Connector_Audio:Jack_3.5mm_CUI_SJ1-3523N_Horizontal", "pins": {"T": "OUT_AC", "S": "GND"}},
-  {"id": "U1", "lib": "Amplifier_Operational:LM358", "unit": 3, "value": "LM358", "pins": {"8": "+9V", "4": "GND"}}
+  {
+   "id": "BT1",
+   "lib": "Device:Battery",
+   "value": "9V",
+   "footprint": "Battery:BatteryHolder_MPD_BA9VPC_1xPP3",
+   "pins": {
+    "1": "+9V",
+    "2": "GND"
+   }
+  },
+  {
+   "id": "R1",
+   "lib": "Device:R",
+   "value": "100k",
+   "footprint": "Resistor_SMD:R_0603_1608Metric",
+   "pins": {
+    "1": "+9V",
+    "2": "VREF"
+   }
+  },
+  {
+   "id": "R2",
+   "lib": "Device:R",
+   "value": "100k",
+   "footprint": "Resistor_SMD:R_0603_1608Metric",
+   "pins": {
+    "1": "VREF",
+    "2": "GND"
+   }
+  },
+  {
+   "id": "C1",
+   "lib": "Device:C_Polarized",
+   "value": "47uF",
+   "footprint": "Capacitor_SMD:C_0805_2012Metric",
+   "pins": {
+    "1": "VREF",
+    "2": "GND"
+   }
+  },
+  {
+   "id": "C2",
+   "lib": "Device:C",
+   "value": "100nF",
+   "footprint": "Capacitor_SMD:C_0603_1608Metric",
+   "pins": {
+    "1": "+9V",
+    "2": "GND"
+   }
+  },
+  {
+   "id": "J1",
+   "lib": "Connector_Audio:AudioJack2",
+   "value": "INPUT 3.5mm",
+   "footprint": "Connector_Audio:Jack_3.5mm_CUI_SJ1-3523N_Horizontal",
+   "pins": {
+    "T": "IN_AC",
+    "S": "GND"
+   }
+  },
+  {
+   "id": "C3",
+   "lib": "Device:C",
+   "value": "1uF",
+   "footprint": "Capacitor_SMD:C_0603_1608Metric",
+   "pins": {
+    "1": "IN_AC",
+    "2": "FILTER_IN"
+   }
+  },
+  {
+   "id": "R3",
+   "lib": "Device:R",
+   "value": "1M",
+   "footprint": "Resistor_SMD:R_0603_1608Metric",
+   "pins": {
+    "1": "FILTER_IN",
+    "2": "VREF"
+   }
+  },
+  {
+   "id": "R4",
+   "lib": "Device:R",
+   "value": "15.8k",
+   "footprint": "Resistor_SMD:R_0603_1608Metric",
+   "pins": {
+    "1": "FILTER_IN",
+    "2": "FILTER_X"
+   }
+  },
+  {
+   "id": "R5",
+   "lib": "Device:R",
+   "value": "15.8k",
+   "footprint": "Resistor_SMD:R_0603_1608Metric",
+   "pins": {
+    "1": "FILTER_X",
+    "2": "FILTER_Y"
+   }
+  },
+  {
+   "id": "C4",
+   "lib": "Device:C",
+   "value": "10nF",
+   "footprint": "Capacitor_SMD:C_0603_1608Metric",
+   "pins": {
+    "1": "FILTER_Y",
+    "2": "VREF"
+   }
+  },
+  {
+   "id": "C5",
+   "lib": "Device:C",
+   "value": "10nF",
+   "footprint": "Capacitor_SMD:C_0603_1608Metric",
+   "pins": {
+    "1": "FILTER_X",
+    "2": "FILTER_OUT"
+   }
+  },
+  {
+   "id": "U1",
+   "lib": "Amplifier_Operational:LM358",
+   "unit": 1,
+   "value": "LM358",
+   "footprint": "Package_DIP:DIP-8_W7.62mm",
+   "pins": {
+    "3": "FILTER_Y",
+    "2": "FILTER_FB",
+    "1": "FILTER_OUT"
+   }
+  },
+  {
+   "id": "R6",
+   "lib": "Device:R",
+   "value": "10k",
+   "footprint": "Resistor_SMD:R_0603_1608Metric",
+   "pins": {
+    "1": "FILTER_FB",
+    "2": "VREF"
+   }
+  },
+  {
+   "id": "R7",
+   "lib": "Device:R",
+   "value": "5.90k",
+   "footprint": "Resistor_SMD:R_0603_1608Metric",
+   "pins": {
+    "1": "FILTER_OUT",
+    "2": "FILTER_FB"
+   }
+  },
+  {
+   "id": "U1",
+   "lib": "Amplifier_Operational:LM358",
+   "unit": 2,
+   "value": "LM358",
+   "pins": {
+    "5": "FILTER_OUT",
+    "6": "GAIN_FB",
+    "7": "GAIN_OUT"
+   }
+  },
+  {
+   "id": "R8",
+   "lib": "Device:R",
+   "value": "10k",
+   "footprint": "Resistor_SMD:R_0603_1608Metric",
+   "pins": {
+    "1": "GAIN_FB",
+    "2": "VREF"
+   }
+  },
+  {
+   "id": "R9",
+   "lib": "Device:R",
+   "value": "90k",
+   "footprint": "Resistor_SMD:R_0603_1608Metric",
+   "pins": {
+    "1": "GAIN_OUT",
+    "2": "GAIN_FB"
+   }
+  },
+  {
+   "id": "C6",
+   "lib": "Device:C",
+   "value": "10uF",
+   "footprint": "Capacitor_SMD:C_0603_1608Metric",
+   "pins": {
+    "1": "GAIN_OUT",
+    "2": "OUT_AC"
+   }
+  },
+  {
+   "id": "R10",
+   "lib": "Device:R",
+   "value": "100k",
+   "footprint": "Resistor_SMD:R_0603_1608Metric",
+   "pins": {
+    "1": "OUT_AC",
+    "2": "GND"
+   }
+  },
+  {
+   "id": "J2",
+   "lib": "Connector_Audio:AudioJack2",
+   "value": "OUTPUT 3.5mm",
+   "footprint": "Connector_Audio:Jack_3.5mm_CUI_SJ1-3523N_Horizontal",
+   "pins": {
+    "T": "OUT_AC",
+    "S": "GND"
+   }
+  },
+  {
+   "id": "U1",
+   "lib": "Amplifier_Operational:LM358",
+   "unit": 3,
+   "value": "LM358",
+   "pins": {
+    "8": "+9V",
+    "4": "GND"
+   }
+  }
  ],
  "layout": [
   {
@@ -96,12 +297,32 @@ it to `build` as-is, adapting values and jack footprints to the request:
    "note": "100k divider and 47uF bypass create the 4.5 V signal reference",
    "tree": {
     "row": [
-     {"part": "BT1"},
-     {"row": [{"part": "C2"}, {"part": "U1", "unit": 3}], "gap": 6},
-     {"part": "R1"},
-     {"col": [{"part": "R2"}, {"part": "C1"}], "gap": 5}
+     {
+      "part": "BT1"
+     },
+     {
+      "part": "C2"
+     },
+     {
+      "part": "U1",
+      "unit": 3
+     },
+     {
+      "col": [
+       {
+        "part": "R1"
+       },
+       {
+        "part": "R2"
+       }
+      ],
+      "gap": 6
+     },
+     {
+      "part": "C1"
+     }
     ],
-    "gap": 6
+    "gap": 7
    }
   },
   {
@@ -109,14 +330,59 @@ it to `build` as-is, adapting values and jack footprints to the request:
    "note": "Equal 15.8k / 10nF Sallen-Key values set fc near 1 kHz; gain 1.59 sets Butterworth Q",
    "tree": {
     "row": [
-     {"part": "J1"},
-     {"col": [{"part": "C3"}, {"part": "R3"}], "gap": 5},
-     {"col": [{"part": "R4"}, {"part": "C5"}], "gap": 5},
-     {"col": [{"part": "R5"}, {"part": "C4"}], "gap": 5},
-     {"part": "U1", "unit": 1},
-     {"col": [{"part": "R7"}, {"part": "R6"}], "gap": 5}
+     {
+      "part": "J1"
+     },
+     {
+      "col": [
+       {
+        "part": "C3"
+       },
+       {
+        "part": "R3"
+       }
+      ],
+      "gap": 4
+     },
+     {
+      "col": [
+       {
+        "part": "R4"
+       },
+       {
+        "part": "C5"
+       }
+      ],
+      "gap": 4
+     },
+     {
+      "col": [
+       {
+        "part": "R5"
+       },
+       {
+        "part": "C4"
+       }
+      ],
+      "gap": 4
+     },
+     {
+      "col": [
+       {
+        "part": "R7"
+       },
+       {
+        "part": "R6"
+       }
+      ],
+      "gap": 4
+     },
+     {
+      "part": "U1",
+      "unit": 1
+     }
     ],
-    "gap": 6
+    "gap": 5
    }
   },
   {
@@ -124,16 +390,44 @@ it to `build` as-is, adapting values and jack footprints to the request:
    "note": "Non-inverting stage gain is 1 + 90k/10k = 10; C6 removes the VREF DC bias",
    "tree": {
     "row": [
-     {"col": [{"part": "R9"}, {"part": "R8"}], "gap": 5},
-     {"part": "U1", "unit": 2},
-     {"part": "C6"},
-     {"col": [{"part": "J2"}, {"part": "R10"}], "gap": 5}
+     {
+      "col": [
+       {
+        "part": "R9"
+       },
+       {
+        "part": "R8"
+       }
+      ],
+      "gap": 5
+     },
+     {
+      "part": "U1",
+      "unit": 2
+     },
+     {
+      "part": "C6"
+     },
+     {
+      "col": [
+       {
+        "part": "J2"
+       },
+       {
+        "part": "R10"
+       }
+      ],
+      "gap": 5
+     }
     ],
     "gap": 7
    }
   }
  ],
- "flags": ["+9V", "GND"],
+ "flags": [
+  "+9V",
+  "GND"
+ ],
  "notes": [
   "Signal path is referenced to VREF; input and output jacks remain ground referenced.",
   "Filter passband gain is 1.59, followed by an independent gain-of-10 amplifier.",

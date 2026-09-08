@@ -199,45 +199,50 @@ as-is; when embedding this block in a larger sheet, keep J1's block self-contain
  ],
  "layout": [
   {
-   "title": "USB-C POWER",
-   "note": "Fused/TVS-clamped VBUS, CC pull-downs, VBUS-sense divider, ESD-clamped data header",
+   "title": "USB-C SINK AND DATA",
+   "note": "R1/R2 are the independent 5.1k CC pull-downs; U1 clamps D+/D- on the way to J2",
    "tree": {
     "row": [
      {
-      "col": [
+      "part": "J1"
+     },
+     {
+      "row": [
        {
-        "part": "J1"
+        "part": "R1"
        },
        {
-        "row": [
-         {
-          "part": "R1"
-         },
-         {
-          "part": "R2"
-         }
-        ],
-        "gap": 3
+        "part": "R2"
        }
       ],
-      "gap": 3
+      "gap": 6
      },
+     {
+      "part": "U1"
+     },
+     {
+      "part": "J2"
+     }
+    ],
+    "gap": 5
+   }
+  },
+  {
+   "title": "VBUS POWER ENTRY",
+   "note": "Fused, TVS-clamped VBUS with bulk + bypass caps and the VBUS-present sense divider",
+   "tree": {
+    "row": [
      {
       "part": "F1"
      },
      {
-      "col": [
-       {
-        "part": "D1"
-       },
-       {
-        "part": "C1"
-       },
-       {
-        "part": "C2"
-       }
-      ],
-      "gap": 3
+      "part": "D1"
+     },
+     {
+      "part": "C1"
+     },
+     {
+      "part": "C2"
      },
      {
       "col": [
@@ -248,16 +253,10 @@ as-is; when embedding this block in a larger sheet, keep J1's block self-contain
         "part": "R4"
        }
       ],
-      "gap": 3
-     },
-     {
-      "part": "U1"
-     },
-     {
-      "part": "J2"
+      "gap": 4
      }
     ],
-    "gap": 3
+    "gap": 4
    }
   }
  ]

@@ -235,17 +235,18 @@ as-is, adapting values (input voltage, current, output voltage) to the request:
  "layout": [
   {
    "title": "INPUT POWER",
-   "note": "Fused and TVS-clamped 12V input with bulk + bypass caps",
+   "note": "Fused, TVS-clamped 12 V input; C1/C2 are the bulk + bypass pair",
    "tree": {
     "row": [
      {
       "part": "J1"
      },
      {
-      "part": "F1"
+      "part": "F1",
+      "rot": 90
      },
      {
-      "col": [
+      "row": [
        {
         "part": "D1"
        },
@@ -256,69 +257,79 @@ as-is, adapting values (input voltage, current, output voltage) to the request:
         "part": "C2"
        }
       ],
-      "gap": 5
+      "gap": 4
      }
     ],
-    "gap": 10
+    "gap": 12
    }
   },
   {
-   "title": "REGULATOR AND OUTPUT",
-   "note": "LM2596S-ADJ buck stage; catch diode at the switch node; FB divider taps the output rail",
+   "title": "BUCK REGULATOR AND OUTPUT",
+   "note": "LM2596S-ADJ step-down; D2 catches the switch node, R1/R2 divide 5 V down to the 1.23 V reference",
    "tree": {
-    "row": [
+    "col": [
      {
-      "col": [
+      "row": [
        {
-        "part": "R3"
-       }
-      ],
-      "gap": 4
-     },
-     {
-      "part": "U1"
-     },
-     {
-      "col": [
-       {
-        "part": "D2"
-       }
-      ],
-      "gap": 4
-     },
-     {
-      "part": "L1"
-     },
-     {
-      "col": [
-       {
-        "row": [
+        "col": [
          {
-          "part": "R1"
-         },
-         {
-          "part": "C5"
+          "part": "R3"
          }
         ],
         "gap": 4
        },
        {
-        "part": "R2"
+        "part": "U1"
+       },
+       {
+        "col": [
+         {
+          "part": "D2"
+         }
+        ],
+        "gap": 4
+       },
+       {
+        "part": "L1"
+       },
+       {
+        "part": "C3"
+       },
+       {
+        "part": "C4"
        }
       ],
-      "gap": 4
+      "gap": 6
      },
      {
-      "part": "C3"
-     },
-     {
-      "part": "C4"
-     },
-     {
-      "part": "J2"
+      "row": [
+       {
+        "col": [
+         {
+          "row": [
+           {
+            "part": "R1"
+           },
+           {
+            "part": "C5"
+           }
+          ],
+          "gap": 4
+         },
+         {
+          "part": "R2"
+         }
+        ],
+        "gap": 4
+       },
+       {
+        "part": "J2"
+       }
+      ],
+      "gap": 8
      }
     ],
-    "gap": 7
+    "gap": 8
    }
   }
  ]

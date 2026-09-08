@@ -328,6 +328,7 @@ as-is, adapting values (voltage rail, MOSFET/diode part numbers) to the request:
  "layout": [
   {
    "title": "POWER",
+   "note": "12 V motor supply with bulk bypass",
    "tree": {
     "row": [
      {
@@ -342,6 +343,7 @@ as-is, adapting values (voltage rail, MOSFET/diode part numbers) to the request:
   },
   {
    "title": "LOGIC DRIVE",
+   "note": "NPN level shifters pull the P-MOSFET gates low",
    "tree": {
     "row": [
      {
@@ -350,166 +352,138 @@ as-is, adapting values (voltage rail, MOSFET/diode part numbers) to the request:
      {
       "col": [
        {
-        "part": "R1",
-        "rot": 90
+        "part": "R1"
        },
        {
-        "part": "Q5"
+        "part": "R2"
        }
       ],
-      "gap": 4
+      "gap": 8
      },
      {
       "col": [
        {
-        "part": "R2",
-        "rot": 90
+        "part": "Q5"
        },
        {
         "part": "Q6"
        }
       ],
-      "gap": 4
+      "gap": 8
      }
     ],
-    "gap": 7
+    "gap": 10
    }
   },
   {
    "title": "H-BRIDGE",
+   "note": "Q1/Q3 left half, Q2/Q4 right half, motor between the two output nodes",
    "tree": {
     "row": [
      {
-      "row": [
+      "col": [
        {
-        "col": [
+        "row": [
          {
-          "row": [
-           {
-            "part": "Q1"
-           },
-           {
-            "part": "R3",
-            "rot": 90
-           }
-          ],
-          "gap": 3
-         },
-         {
-          "row": [
-           {
-            "part": "Q3"
-           },
-           {
-            "part": "R5",
-            "rot": 90
-           }
-          ],
-          "gap": 3
-         }
-        ],
-        "gap": 3,
-        "align": "start"
-       },
-       {
-        "col": [
-         {
-          "row": [
+          "col": [
            {
             "part": "R7"
+           },
+           {
+            "part": "R3"
+           }
+          ],
+          "gap": 4
+         },
+         {
+          "part": "Q1"
+         },
+         {
+          "part": "D1"
+         }
+        ],
+        "gap": 5
+       },
+       {
+        "row": [
+         {
+          "col": [
+           {
+            "part": "R5"
            },
            {
             "part": "R9"
            }
           ],
-          "gap": 3
+          "gap": 4
          },
          {
-          "row": [
-           {
-            "part": "D1"
-           },
-           {
-            "part": "D2"
-           }
-          ],
-          "gap": 3
+          "part": "Q3"
+         },
+         {
+          "part": "D2"
          }
         ],
-        "gap": 3,
-        "align": "start"
+        "gap": 5
        }
       ],
-      "gap": 4
+      "gap": 6
      },
      {
       "part": "J3"
      },
      {
-      "row": [
+      "col": [
        {
-        "col": [
+        "row": [
          {
-          "row": [
-           {
-            "part": "Q2"
-           },
-           {
-            "part": "R4",
-            "rot": 90
-           }
-          ],
-          "gap": 3
+          "part": "D3"
          },
          {
-          "row": [
-           {
-            "part": "Q4"
-           },
-           {
-            "part": "R6",
-            "rot": 90
-           }
-          ],
-          "gap": 3
-         }
-        ],
-        "gap": 3,
-        "align": "start"
-       },
-       {
-        "col": [
+          "part": "Q2"
+         },
          {
-          "row": [
+          "col": [
            {
             "part": "R8"
+           },
+           {
+            "part": "R4"
+           }
+          ],
+          "gap": 4
+         }
+        ],
+        "gap": 5
+       },
+       {
+        "row": [
+         {
+          "part": "D4"
+         },
+         {
+          "part": "Q4"
+         },
+         {
+          "col": [
+           {
+            "part": "R6"
            },
            {
             "part": "R10"
            }
           ],
-          "gap": 3
-         },
-         {
-          "row": [
-           {
-            "part": "D3"
-           },
-           {
-            "part": "D4"
-           }
-          ],
-          "gap": 3
+          "gap": 4
          }
         ],
-        "gap": 3,
-        "align": "start"
+        "gap": 5
        }
       ],
-      "gap": 4
+      "gap": 6
      }
     ],
-    "gap": 10
+    "gap": 12,
+    "wrap": 400
    }
   }
  ]
@@ -546,8 +520,8 @@ as-is, adapting values (voltage rail, MOSFET/diode part numbers) to the request:
   ties to GND (low-side) - reversing S/D on a MOSFET symbol silently swaps which pin is the
   rail connection in the netlist even though the device is symmetric in the schematic body.
 - Gate resistors go in series with the driver, never in series with the rail pull - R3/R4
-  are the drive-side series resistors (col with the MOSFET), R7/R8/R9/R10 are the passive
-  pull networks (their own row, not touching the transistor's row).
+  are the drive-side series resistors, R7/R8/R9/R10 the passive pull networks; each gate
+  network is a col (pull + series resistor) on the gate side of that MOSFET's row.
 - Motor connector J3 carries OUT_A/OUT_B only - never tie a motor terminal to GND or
   VMOT_12V directly, the bridge alone must switch it.
 

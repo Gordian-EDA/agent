@@ -52,10 +52,8 @@ VIN: J1.1, C3.1, C4.1, U2.IN
 
 ## Layout
 
-The complete design JSON below builds with 0 issues and 0 ERC violations (one benign warning: a
-wire runs through the `+5V` power-flag text by 0.2 mm, inherent to the engine's power-symbol
-placement above a rail's first stacked pin, not a connectivity problem). Hand it to `build` as-is,
-adapting values to the request:
+The complete design JSON below builds with 0 issues, 0 ERC violations and 0 warnings. Hand it to
+`build` as-is, adapting values to the request:
 
 ```json
 {
@@ -240,48 +238,48 @@ adapting values to the request:
    "title": "POWER",
    "note": "12V barrel jack, bulk + bypass caps, L7805 5V regulator, power LED",
    "tree": {
-    "row": [
+    "col": [
      {
-      "part": "J1"
-     },
-     {
-      "col": [
+      "row": [
+       {
+        "part": "J1"
+       },
        {
         "part": "C3"
        },
        {
         "part": "C4"
-       }
-      ],
-      "gap": 6
-     },
-     {
-      "part": "U2"
-     },
-     {
-      "col": [
-       {
-        "part": "C6"
        },
        {
-        "part": "C5"
+        "part": "U2"
        }
       ],
-      "gap": 6
+      "gap": 7
      },
      {
       "row": [
        {
-        "part": "R4"
+        "part": "C5"
        },
        {
-        "part": "D2"
+        "part": "C6"
+       },
+       {
+        "col": [
+         {
+          "part": "R4"
+         },
+         {
+          "part": "D2"
+         }
+        ],
+        "gap": 5
        }
       ],
-      "gap": 5
+      "gap": 7
      }
     ],
-    "gap": 10
+    "gap": 12
    }
   },
   {
@@ -304,29 +302,29 @@ adapting values to the request:
       "gap": 6
      },
      {
-      "part": "U1"
+      "col": [
+       {
+        "part": "U1"
+       },
+       {
+        "part": "C2"
+       }
+      ],
+      "gap": 6
      },
      {
       "col": [
        {
-        "part": "C2"
+        "part": "R3"
        },
        {
-        "row": [
-         {
-          "part": "R3"
-         },
-         {
-          "part": "D1"
-         }
-        ],
-        "gap": 6
+        "part": "D1"
        }
       ],
-      "gap": 10
+      "gap": 5
      }
     ],
-    "gap": 12
+    "gap": 8
    }
   }
  ]

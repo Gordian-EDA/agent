@@ -181,71 +181,73 @@ it to `build` as-is, adapting values and the header pinout to the request:
  ],
  "layout": [
   {
-   "title": "POWER",
-   "tree": {
-    "row": [
-     {
-      "part": "J1"
-     },
-     {
-      "part": "C4"
-     }
-    ],
-    "gap": 5
-   }
-  },
-  {
    "title": "AUDIO AMPLIFIER",
-   "note": "Signal flows left to right; bias and degeneration branches hang below the path.",
+   "note": "9 V header and bypass on top; signal flows left to right, R1/R2 bias the base and R4/C2 set the degenerated gain.",
    "tree": {
-    "row": [
+    "col": [
      {
-      "part": "J2"
-     },
-     {
-      "part": "C1"
-     },
-     {
-      "col": [
+      "row": [
        {
-        "part": "R1",
-        "rot": 0
+        "part": "J1"
        },
        {
-        "part": "R2",
-        "rot": 0
+        "col": [
+         {
+          "part": "C4"
+         }
+        ],
+        "gap": 4
        }
       ],
-      "gap": 4
+      "gap": 8
      },
      {
-      "part": "Q1"
-     },
-     {
-      "part": "R3",
-      "rot": 0
-     },
-     {
-      "col": [
+      "row": [
        {
-        "part": "R4",
-        "rot": 0
+        "part": "J2"
        },
        {
-        "part": "C2",
-        "rot": 0
+        "part": "C1"
+       },
+       {
+        "col": [
+         {
+          "part": "R1"
+         },
+         {
+          "part": "R2"
+         }
+        ],
+        "gap": 6
+       },
+       {
+        "col": [
+         {
+          "part": "R3"
+         },
+         {
+          "part": "Q1"
+         },
+         {
+          "part": "R4"
+         },
+         {
+          "part": "C2"
+         }
+        ],
+        "gap": 6
+       },
+       {
+        "part": "C3"
+       },
+       {
+        "part": "J3"
        }
       ],
-      "gap": 4
-     },
-     {
-      "part": "C3"
-     },
-     {
-      "part": "J3"
+      "gap": 6
      }
     ],
-    "gap": 4
+    "gap": 10
    }
   }
  ],

@@ -195,27 +195,28 @@ Builds with 0 issues and 0 ERC violations:
      {
       "col": [
        {
-        "part": "C1"
+        "row": [
+         {
+          "part": "C1"
+         },
+         {
+          "part": "C2"
+         }
+        ],
+        "gap": 5
        },
-       {
-        "part": "C2"
-       }
-      ],
-      "gap": 5
-     },
-     {
-      "part": "U1"
-     },
-     {
-      "col": [
        {
         "part": "R1"
        }
       ],
-      "gap": 5
+      "gap": 8,
+      "align": "end"
+     },
+     {
+      "part": "U1"
      }
     ],
-    "gap": 8
+    "gap": 6
    }
   },
   {
@@ -253,7 +254,7 @@ Builds with 0 issues and 0 ERC violations:
       "gap": 5
      }
     ],
-    "gap": 8
+    "gap": 6
    }
   }
  ]
