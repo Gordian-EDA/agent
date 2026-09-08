@@ -95,7 +95,7 @@ def main():
     ap.add_argument("--anchor-same-circuit", action="store_true",
                     help="the anchor draws the same circuit as the sheet under review")
     ap.add_argument("--circuit", help="one-line description of the intended circuit")
-    ap.add_argument("--model", default=os.environ.get("CRITIC_MODEL", "anthropic/claude-opus-4-8"))
+    ap.add_argument("--model", default=os.environ.get("CRITIC_MODEL", "gpt-5.6-luna"))
     ap.add_argument("--json-only", action="store_true", help="print only the JSON verdict")
     ap.add_argument("--show-reasoning", action="store_true", help="also print the model's reasoning trace")
     ap.add_argument("--engine-clean", action="store_true",

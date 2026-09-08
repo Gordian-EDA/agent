@@ -128,7 +128,11 @@ impl SymbolNames {
                 .0
                 .cmp(&left.0)
                 .then_with(|| right.1.cmp(&left.1))
-                .then_with(|| self.entries[left.2].lib_id.cmp(&self.entries[right.2].lib_id))
+                .then_with(|| {
+                    self.entries[left.2]
+                        .lib_id
+                        .cmp(&self.entries[right.2].lib_id)
+                })
         });
         hits.into_iter()
             .take(n)
@@ -254,7 +258,6 @@ fn discover_libraries(symbol_dir: &Path) -> io::Result<Vec<SymbolLibrary>> {
     libs.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.path.cmp(&b.path)));
     Ok(libs)
 }
-
 
 /// Share of a multi-word query's words a candidate must match to qualify.
 const MIN_TOKEN_COVERAGE: f64 = 0.5;
@@ -560,7 +563,10 @@ mod tests {
         );
         assert_eq!(
             index.best_lib_id("Regulator_Switching:TPS62160", 2),
-            ["Regulator_Switching:TPS62160DGK", "Regulator_Switching:TPS62160DSG"]
+            [
+                "Regulator_Switching:TPS62160DGK",
+                "Regulator_Switching:TPS62160DSG"
+            ]
         );
     }
 

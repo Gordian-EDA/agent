@@ -6,12 +6,18 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
-use sch_engine::engine::{connector_text_slot, covers, is_power_net, rot_body, strip_power_parts, two_pin_axis};
+use sch_engine::engine::{
+    connector_text_slot, covers, is_power_net, rot_body, strip_power_parts, two_pin_axis,
+};
 use sch_engine::symlib::index;
 
 fn fixture() -> Value {
-    let p = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/engine_helpers/helpers.json");
-    serde_json::from_str(&std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("{}: {e}", p.display()))).unwrap()
+    let p = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/engine_helpers/helpers.json");
+    serde_json::from_str(
+        &std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("{}: {e}", p.display())),
+    )
+    .unwrap()
 }
 
 /// The stock symbol dir the Python reference indexes (skips the test when it is not installed).
@@ -44,10 +50,19 @@ fn symbol_geometry_matches_python() {
         if c.get("missing").is_some() {
             continue;
         }
-        let info = index().get(lib).unwrap_or_else(|| panic!("{lib} not in the index"));
-        let (unit, rot, mirror) =
-            (c["unit"].as_i64().unwrap() as i32, c["rot"].as_i64().unwrap() as i32, c["mirror"].as_str().unwrap());
-        assert_eq!(info.pins_for_unit(unit).len(), c["npins"].as_u64().unwrap() as usize, "{lib}: pin count");
+        let info = index()
+            .get(lib)
+            .unwrap_or_else(|| panic!("{lib} not in the index"));
+        let (unit, rot, mirror) = (
+            c["unit"].as_i64().unwrap() as i32,
+            c["rot"].as_i64().unwrap() as i32,
+            c["mirror"].as_str().unwrap(),
+        );
+        assert_eq!(
+            info.pins_for_unit(unit).len(),
+            c["npins"].as_u64().unwrap() as usize,
+            "{lib}: pin count"
+        );
         let (hx, hy) = rot_body(&info, unit, rot, mirror);
         let want = c["rot_body"].as_array().unwrap();
         assert!(
@@ -55,7 +70,11 @@ fn symbol_geometry_matches_python() {
             "{lib} rot={rot} mirror={mirror:?}: rot_body {:?} != {want:?}",
             (hx, hy)
         );
-        assert_eq!(two_pin_axis(&info, unit, rot, mirror), c["two_pin_axis"].as_str().unwrap(), "{lib} two_pin_axis");
+        assert_eq!(
+            two_pin_axis(&info, unit, rot, mirror),
+            c["two_pin_axis"].as_str().unwrap(),
+            "{lib} two_pin_axis"
+        );
         assert_eq!(
             connector_text_slot(&info, unit, rot, mirror),
             c["connector_text_slot"].as_str().unwrap(),
@@ -74,8 +93,16 @@ fn is_power_net_matches_python() {
     let extra: HashSet<String> = ["VMOT".to_string()].into_iter().collect();
     for (net, want) in fx["is_power_net"].as_object().unwrap() {
         let w = want.as_array().unwrap();
-        assert_eq!(is_power_net(net, &HashSet::new()), w[0].as_bool().unwrap(), "{net} (no extras)");
-        assert_eq!(is_power_net(net, &extra), w[1].as_bool().unwrap(), "{net} (extra VMOT)");
+        assert_eq!(
+            is_power_net(net, &HashSet::new()),
+            w[0].as_bool().unwrap(),
+            "{net} (no extras)"
+        );
+        assert_eq!(
+            is_power_net(net, &extra),
+            w[1].as_bool().unwrap(),
+            "{net} (extra VMOT)"
+        );
     }
 }
 
@@ -115,8 +142,12 @@ fn strip_power_parts_matches_python() {
     });
     let notes = strip_power_parts(&mut d);
     let want = &fx["strip_power_parts"];
-    let want_notes: Vec<String> =
-        want["notes"].as_array().unwrap().iter().map(|n| n.as_str().unwrap().to_string()).collect();
+    let want_notes: Vec<String> = want["notes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|n| n.as_str().unwrap().to_string())
+        .collect();
     assert_eq!(notes, want_notes);
     assert_eq!(d["parts"], want["design"]["parts"]);
     assert_eq!(d["flags"], want["design"]["flags"]);
@@ -139,13 +170,16 @@ fn group_layout_blocks_match_python() {
         return;
     }
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/engine_blocks");
-    let idx: Value = serde_json::from_str(&std::fs::read_to_string(root.join("index.json")).unwrap()).unwrap();
+    let idx: Value =
+        serde_json::from_str(&std::fs::read_to_string(root.join("index.json")).unwrap()).unwrap();
     let mut checked = 0usize;
     let mut failures: Vec<String> = Vec::new();
     for entry in idx.as_array().unwrap() {
         let name = entry["name"].as_str().unwrap();
-        let fx: Value = serde_json::from_str(&std::fs::read_to_string(root.join(format!("{name}.json"))).unwrap())
-            .unwrap();
+        let fx: Value = serde_json::from_str(
+            &std::fs::read_to_string(root.join(format!("{name}.json"))).unwrap(),
+        )
+        .unwrap();
         for (bi, blk) in fx["blocks"].as_array().unwrap().iter().enumerate() {
             let mut parts: Vec<PartInst> = Vec::new();
             for pj in blk["parts"].as_array().unwrap() {
@@ -156,10 +190,18 @@ fn group_layout_blocks_match_python() {
                 p.mirror = pj["mirror"].as_str().unwrap().to_string();
                 parts.push(p);
             }
-            let power: HashSet<String> =
-                blk["power"].as_array().unwrap().iter().map(|v| v.as_str().unwrap().to_string()).collect();
-            let flags: Vec<String> =
-                blk["flags"].as_array().unwrap().iter().map(|v| v.as_str().unwrap().to_string()).collect();
+            let power: HashSet<String> = blk["power"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_str().unwrap().to_string())
+                .collect();
+            let flags: Vec<String> = blk["flags"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_str().unwrap().to_string())
+                .collect();
             let all_nets: HashMap<String, usize> = blk["all_nets"]
                 .as_object()
                 .unwrap()
@@ -172,7 +214,10 @@ fn group_layout_blocks_match_python() {
                 .iter()
                 .map(|v| {
                     let a = v.as_array().unwrap();
-                    (a[0].as_str().unwrap().to_string(), a[1].as_str().unwrap().to_string())
+                    (
+                        a[0].as_str().unwrap().to_string(),
+                        a[1].as_str().unwrap().to_string(),
+                    )
                 })
                 .collect();
             let mut gl = GroupLayout::new(parts, power, flags, all_nets, label_pins);
@@ -180,26 +225,47 @@ fn group_layout_blocks_match_python() {
             // the extents and component boxes the router works from (also flexlayout's _leaf_box)
             for (pi, pj) in blk["parts"].as_array().unwrap().iter().enumerate() {
                 let p = &gl.parts[pi];
-                assert_eq!(p.power_only, pj["power_only"].as_bool().unwrap(), "{name} block {bi} {}: power_only", p.id);
-                let attach: Value = Value::Object(
-                    p.attach.iter().map(|(k, v)| (k.clone(), serde_json::json!(v))).collect(),
+                assert_eq!(
+                    p.power_only,
+                    pj["power_only"].as_bool().unwrap(),
+                    "{name} block {bi} {}: power_only",
+                    p.id
                 );
-                assert_eq!(norm(&attach), norm(&pj["attach"]), "{name} block {bi} {}: attach", p.id);
+                let attach: Value = Value::Object(
+                    p.attach
+                        .iter()
+                        .map(|(k, v)| (k.clone(), serde_json::json!(v)))
+                        .collect(),
+                );
+                assert_eq!(
+                    norm(&attach),
+                    norm(&pj["attach"]),
+                    "{name} block {bi} {}: attach",
+                    p.id
+                );
                 for (what, got) in [
                     ("extent", serde_json::to_value(p.extent()).unwrap()),
-                    ("extent_no_attach", serde_json::to_value(p.extent_no_attach()).unwrap()),
+                    (
+                        "extent_no_attach",
+                        serde_json::to_value(p.extent_no_attach()).unwrap(),
+                    ),
                     ("boxes", serde_json::to_value(p.boxes(true)).unwrap()),
                 ] {
                     // extents feed a grid router, so the last-ULP float noise between the two
                     // implementations is compared with a tolerance
                     if !approx(&got, &pj[what], 1e-6) {
-                        failures.push(format!("{name} block {bi} {}: {what} differ\n  got  {got}\n  want {}", p.id, pj[what]));
+                        failures.push(format!(
+                            "{name} block {bi} {}: {what} differ\n  got  {got}\n  want {}",
+                            p.id, pj[what]
+                        ));
                     }
                 }
             }
             gl.route();
             let got_wires = norm(&serde_json::to_value(&gl.wires).unwrap());
-            let g = gl.emit().unwrap_or_else(|e| panic!("{name} block {bi}: emit: {e}"));
+            let g = gl
+                .emit()
+                .unwrap_or_else(|e| panic!("{name} block {bi}: emit: {e}"));
             checked += 1;
             let want_wires = norm(&blk["wires_routed"]);
             if got_wires != want_wires {
@@ -219,19 +285,29 @@ fn group_layout_blocks_match_python() {
         }
     }
     assert!(checked > 0, "no blocks checked");
-    assert!(failures.is_empty(), "{}/{} blocks differ:\n{}", failures.len(), checked, failures.join("\n"));
+    assert!(
+        failures.is_empty(),
+        "{}/{} blocks differ:\n{}",
+        failures.len(),
+        checked,
+        failures.join("\n")
+    );
     eprintln!("{checked} blocks match");
 }
 
 /// Structural equality with a tolerance on numbers.
 fn approx(a: &Value, b: &Value, eps: f64) -> bool {
     match (a, b) {
-        (Value::Number(x), Value::Number(y)) => (x.as_f64().unwrap() - y.as_f64().unwrap()).abs() <= eps,
+        (Value::Number(x), Value::Number(y)) => {
+            (x.as_f64().unwrap() - y.as_f64().unwrap()).abs() <= eps
+        }
         (Value::Array(x), Value::Array(y)) => {
             x.len() == y.len() && x.iter().zip(y).all(|(p, q)| approx(p, q, eps))
         }
         (Value::Object(x), Value::Object(y)) => {
-            x.len() == y.len() && x.iter().all(|(k, p)| y.get(k).is_some_and(|q| approx(p, q, eps)))
+            x.len() == y.len()
+                && x.iter()
+                    .all(|(k, p)| y.get(k).is_some_and(|q| approx(p, q, eps)))
         }
         _ => a == b,
     }
@@ -258,15 +334,24 @@ fn add_circuit_to_raw_matches_python() {
         return;
     }
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
-    let cases: Value =
-        serde_json::from_str(&std::fs::read_to_string(root.join("engine_add_circuit/cases.json")).unwrap()).unwrap();
+    let cases: Value = serde_json::from_str(
+        &std::fs::read_to_string(root.join("engine_add_circuit/cases.json")).unwrap(),
+    )
+    .unwrap();
     for case in cases.as_array().unwrap() {
         let base = case["base"].as_str().unwrap();
-        let raw: Value =
-            serde_json::from_str(&std::fs::read_to_string(root.join(base).join("raw.json")).unwrap()).unwrap();
-        let (out, errs) = add_circuit_to_raw(&raw, &case["circuit"], case["paper"].as_str().unwrap());
-        let want_errs: Vec<String> =
-            case["errors"].as_array().unwrap().iter().map(|e| e.as_str().unwrap().to_string()).collect();
+        let raw: Value = serde_json::from_str(
+            &std::fs::read_to_string(root.join(base).join("raw.json")).unwrap(),
+        )
+        .unwrap();
+        let (out, errs) =
+            add_circuit_to_raw(&raw, &case["circuit"], case["paper"].as_str().unwrap());
+        let want_errs: Vec<String> = case["errors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e.as_str().unwrap().to_string())
+            .collect();
         assert_eq!(errs, want_errs, "{base}: errors");
         assert_eq!(norm(&out), norm(&case["out"]), "{base}: raw design");
     }

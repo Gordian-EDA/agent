@@ -18,10 +18,10 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
-use crate::engine::{is_power_net, strip_power_parts, GroupLayout, PartInst};
-use crate::geo::{self, is_gnd, pack_blocks, snap_even, Geo};
+use crate::engine::{GroupLayout, PartInst, is_power_net, strip_power_parts};
+use crate::geo::{self, Geo, is_gnd, pack_blocks, snap_even};
 
 pub const DEFAULT_GAP: f64 = 8.0;
 
@@ -116,7 +116,9 @@ fn default_orient(p: &PartInst, gl: &GroupLayout, axis: &str) -> (i32, String) {
         for (rot, mirror) in [(0, ""), (0, "y"), (180, ""), (180, "y")] {
             let mut sc = 0.0f64;
             for pin in &p.pins {
-                let Some(net) = p.pinmap.get(&pin.number) else { continue };
+                let Some(net) = p.pinmap.get(&pin.number) else {
+                    continue;
+                };
                 if is_rail(gl, net) {
                     let d = p.pin_dir_at(pin, rot, mirror);
                     let want = if is_gnd(net) { (0, 1) } else { (0, -1) };
@@ -151,7 +153,9 @@ fn default_orient(p: &PartInst, gl: &GroupLayout, axis: &str) -> (i32, String) {
         let vrots = rots_with_axis(p, "v");
         for rot in &vrots {
             for pin in &p.pins {
-                let Some(net) = p.pinmap.get(&pin.number) else { continue };
+                let Some(net) = p.pinmap.get(&pin.number) else {
+                    continue;
+                };
                 let d = p.pin_dir_at(pin, *rot, "");
                 if is_rail(gl, net)
                     && ((is_gnd(net) && d == (0, 1)) || (!is_gnd(net) && d == (0, -1)))
@@ -324,9 +328,9 @@ fn measure(
         }
     }
     let mut gap = gap0;
-    let big = kids.iter().any(|k| {
-        k.kind == "leaf" && k.part.is_some_and(|pi| gl.parts[pi].pins.len() > 8)
-    });
+    let big = kids
+        .iter()
+        .any(|k| k.kind == "leaf" && k.part.is_some_and(|pi| gl.parts[pi].pins.len() > 8));
     if big {
         gap = gap.max(10.0);
     }
@@ -395,7 +399,10 @@ fn measure_leaf(
     let p = &gl.parts[pi];
     let has_rot = node.get("rot").is_some();
     let (mut rot, mut mirror) = if has_rot {
-        (inum(node.get("rot"), 0), sstr(node, "mirror", "").to_string())
+        (
+            inum(node.get("rot"), 0),
+            sstr(node, "mirror", "").to_string(),
+        )
     } else {
         default_orient(p, gl, axis)
     };
@@ -403,13 +410,17 @@ fn measure_leaf(
         rot = explicit_two_pin_rot(p, rot);
         // an explicit orientation never points a ground pin up or a supply pin down
         for pin in &p.pins {
-            let Some(net) = p.pinmap.get(&pin.number) else { continue };
+            let Some(net) = p.pinmap.get(&pin.number) else {
+                continue;
+            };
             if is_rail(gl, net) {
                 let dd = p.pin_dir_at(pin, rot, &mirror);
                 if (is_gnd(net) && dd == (0, -1)) || (!is_gnd(net) && dd == (0, 1)) {
                     rot = (rot + 180).rem_euclid(360);
                     let dir = if is_gnd(net) { "down" } else { "up" };
-                    errors.push(format!("note: {pid} was flipped so its {net} pin points {dir}"));
+                    errors.push(format!(
+                        "note: {pid} was flipped so its {net} pin points {dir}"
+                    ));
                     break;
                 }
             }
@@ -469,7 +480,11 @@ fn wrap_row(
             k.children.iter().any(|c| is_ic(c, gl))
         }
     }
-    let kind = if node.get("row").is_some() { "row" } else { "col" };
+    let kind = if node.get("row").is_some() {
+        "row"
+    } else {
+        "col"
+    };
     let empty = Vec::new();
     let raws = node[kind].as_array().unwrap_or(&empty);
     let align = sstr(node, "align", "center").to_string();
@@ -514,8 +529,10 @@ fn wrap_row(
             "note: {path} row was wider than {maxw:.0} units and was wrapped into {} rows",
             rows.len()
         ));
-        return Some(json!({"col": rows.iter().map(|r| row_json(r)).collect::<Vec<_>>(),
-                           "gap": 10, "align": "start"}));
+        return Some(
+            json!({"col": rows.iter().map(|r| row_json(r)).collect::<Vec<_>>(),
+                           "gap": 10, "align": "start"}),
+        );
     }
     None
 }
@@ -549,10 +566,10 @@ fn align_col_to_pins(col: &mut MNode, ic: &MNode, side: i32, gl: &GroupLayout) -
     let line = ic.ay - ic.aay; // ic alignment line, relative to its anchor
     let mut pin_t: HashMap<String, f64> = HashMap::new();
     for pin in &p.pins {
-        let Some(net) = p.pinmap.get(&pin.number) else { continue };
-        if gl.signal_nets.contains_key(net)
-            && p.pin_dir_at(pin, ic.rot, &ic.mirror) == want
-        {
+        let Some(net) = p.pinmap.get(&pin.number) else {
+            continue;
+        };
+        if gl.signal_nets.contains_key(net) && p.pin_dir_at(pin, ic.rot, &ic.mirror) == want {
             let y = p.pin_pos_at(pin, [0.0, 0.0], ic.rot, &ic.mirror)[1] - line;
             pin_t.entry(net.clone()).or_insert(y);
         }
@@ -560,14 +577,15 @@ fn align_col_to_pins(col: &mut MNode, ic: &MNode, side: i32, gl: &GroupLayout) -
     // pins on the ic's top/bottom edge: a child hanging off them sits just above/below that edge, beside the ic,
     // so its wire is a short hook instead of a loop over the whole symbol
     for pin in &p.pins {
-        let Some(net) = p.pinmap.get(&pin.number) else { continue };
+        let Some(net) = p.pinmap.get(&pin.number) else {
+            continue;
+        };
         let dd = p.pin_dir_at(pin, ic.rot, &ic.mirror);
         if gl.signal_nets.contains_key(net)
             && !pin_t.contains_key(net)
             && (dd == (0, -1) || dd == (0, 1))
         {
-            let y = p.pin_pos_at(pin, [0.0, 0.0], ic.rot, &ic.mirror)[1] - line
-                + dd.1 as f64 * 4.0;
+            let y = p.pin_pos_at(pin, [0.0, 0.0], ic.rot, &ic.mirror)[1] - line + dd.1 as f64 * 4.0;
             pin_t.insert(net.clone(), y);
         }
     }
@@ -786,17 +804,26 @@ fn lint_layout(
                     is_power_net(v.map_or("nc", |s: &String| s.as_str()), power)
                         || matches!(v.map(|s| s.as_str()), Some("nc") | Some("float") | None)
                 }) && q.pins.iter().any(|pin| {
-                    is_power_net(q.pinmap.get(&pin.number).map_or("", |s: &String| s.as_str()), power)
+                    is_power_net(
+                        q.pinmap
+                            .get(&pin.number)
+                            .map_or("", |s: &String| s.as_str()),
+                        power,
+                    )
                 })
             })
             .collect();
-        let Some(pw0) = pw.first().map(|s| (*s).clone()) else { continue };
+        let Some(pw0) = pw.first().map(|s| (*s).clone()) else {
+            continue;
+        };
         let mut leaf: Option<Value> = None;
         for blk in layout.iter_mut() {
             if tree_of(blk).get("part").and_then(|v| v.as_str()) == Some(key.as_str()) {
                 continue;
             }
-            let Some(t) = blk.get_mut("tree") else { continue };
+            let Some(t) = blk.get_mut("tree") else {
+                continue;
+            };
             if let Some(got) = take_leaf(t, key) {
                 prune(t);
                 leaf = Some(got);
@@ -831,6 +858,9 @@ fn lint_layout(
     let mut changed = true;
     while changed && layout.len() > 1 {
         changed = false;
+        // `i` indexes both the candidate block and, once a fold target `bj` is found, `layout` is
+        // mutated at `bj` while `i` is later removed — genuinely two live indices, not a plain scan.
+        #[allow(clippy::needless_range_loop)]
         for i in 0..layout.len() {
             let ids = id_set(&layout[i]);
             if ids.is_empty() || ids.len() >= 3 || big_part(&ids) {
@@ -843,9 +873,7 @@ fn lint_layout(
                 if j == i || oids.len() < 3 || oids.len() >= 12 {
                     continue;
                 }
-                let w = nets_of_tree(&layout[j]["tree"])
-                    .intersection(&mine)
-                    .count();
+                let w = nets_of_tree(&layout[j]["tree"]).intersection(&mine).count();
                 if w > best_w {
                     best = Some(j);
                     best_w = w;
@@ -915,7 +943,9 @@ fn lint_layout(
     // 2. very tall top-level columns: split their children into two side-by-side columns
     for blk in layout.iter_mut() {
         let t = tree_of(blk).clone();
-        let Some(kids) = t.get("col").and_then(|v| v.as_array()) else { continue };
+        let Some(kids) = t.get("col").and_then(|v| v.as_array()) else {
+            continue;
+        };
         if kids.len() < 4 {
             continue;
         }
@@ -1012,9 +1042,7 @@ fn face_neighbours(kids: &mut [MNode], kind: &str, raw_nodes: &[Value], gl: &Gro
             let want_dir = if kind == "row" { (-1, 0) } else { (0, -1) };
             for (nets_, dd) in [(&pn, want_dir), (&nn, (-want_dir.0, -want_dir.1))] {
                 let hit = p.pins.iter().find(|pin| {
-                    p.pinmap
-                        .get(&pin.number)
-                        .is_some_and(|n| nets_.contains(n))
+                    p.pinmap.get(&pin.number).is_some_and(|n| nets_.contains(n))
                         && p.pin_dir_at(pin, kids[i].rot, &kids[i].mirror) == dd
                 });
                 if let Some(pin) = hit {
@@ -1111,7 +1139,9 @@ fn face_neighbours(kids: &mut [MNode], kind: &str, raw_nodes: &[Value], gl: &Gro
             // never end up with a ground pin up or a supply pin down
             let nr = (kids[i].rot + 180).rem_euclid(360);
             for pin in &p.pins {
-                let Some(net) = p.pinmap.get(&pin.number) else { continue };
+                let Some(net) = p.pinmap.get(&pin.number) else {
+                    continue;
+                };
                 if rails.contains(net) {
                     let dd = p.pin_dir_at(pin, nr, &kids[i].mirror);
                     if (is_gnd(net) && dd == (0, -1)) || (!is_gnd(net) && dd == (0, 1)) {
@@ -1144,7 +1174,11 @@ fn place(node: &MNode, x: f64, y: f64, gl: &GroupLayout, out: &mut HashMap<Strin
             let ay_ = ly - (node.ay - node.aay);
             out.insert(
                 gl.parts[pi].key.clone(),
-                ([py_round(ax_), py_round(ay_)], node.rot, node.mirror.clone()),
+                (
+                    [py_round(ax_), py_round(ay_)],
+                    node.rot,
+                    node.mirror.clone(),
+                ),
             );
         }
         return;
@@ -1189,7 +1223,12 @@ pub fn build_flex_design(d: &Value) -> (Value, Vec<String>) {
     }
     let want_paper = sstr(&d, "paper", "A4").to_string();
     let mut tries = vec![want_paper.clone()];
-    tries.extend(["A4", "A3", "A2"].iter().filter(|p| **p != want_paper).map(|p| p.to_string()));
+    tries.extend(
+        ["A4", "A3", "A2"]
+            .iter()
+            .filter(|p| **p != want_paper)
+            .map(|p| p.to_string()),
+    );
     if want_paper == "A4" {
         // a small design fills an A5 sheet instead of floating in the upper half of an A4
         let area: f64 = geos
@@ -1207,8 +1246,19 @@ pub fn build_flex_design(d: &Value) -> (Value, Vec<String>) {
     }
     let mut raw: Option<Value> = None;
     for pt in &tries {
-        let Some([xmax, ymax, tbx, tby]) = geo::paper(pt) else { continue };
-        let sheet = pack_blocks(&geos, 14.0, 14.0, xmax, ymax, (tbx, tby), &[], *pt == want_paper);
+        let Some([xmax, ymax, tbx, tby]) = geo::paper(pt) else {
+            continue;
+        };
+        let sheet = pack_blocks(
+            &geos,
+            14.0,
+            14.0,
+            xmax,
+            ymax,
+            (tbx, tby),
+            &[],
+            *pt == want_paper,
+        );
         if let Some(sheet) = sheet {
             let mut r = sheet.to_json();
             r["paper"] = json!(pt);
@@ -1224,7 +1274,10 @@ pub fn build_flex_design(d: &Value) -> (Value, Vec<String>) {
         }
     }
     let Some(mut raw) = raw else {
-        return (json!({}), vec!["design does not fit even on A2".to_string()]);
+        return (
+            json!({}),
+            vec!["design does not fit even on A2".to_string()],
+        );
     };
     for k in ["title", "rev", "date", "company", "comments"] {
         if let Some(v) = d.get(k) {
@@ -1262,7 +1315,10 @@ fn collect(node: &mut Value, acc: &mut Vec<String>) {
         acc.push(key);
     }
     for k in ["row", "col"] {
-        let n = node.get(k).and_then(|v| v.as_array()).map_or(0, |a| a.len());
+        let n = node
+            .get(k)
+            .and_then(|v| v.as_array())
+            .map_or(0, |a| a.len());
         for i in 0..n {
             collect(&mut node[k][i], acc);
         }
@@ -1325,10 +1381,7 @@ fn circuit_geos_mut(d: &mut Value) -> (Vec<(String, Geo)>, Vec<String>) {
         let mut members = Vec::new();
         for i in &ids {
             if !by_id.contains_key(i) {
-                errors.push(format!(
-                    "layout block '{title}': unknown part {}",
-                    repr(i)
-                ));
+                errors.push(format!("layout block '{title}': unknown part {}", repr(i)));
             } else if used.contains(i) {
                 errors.push(format!(
                     "layout block '{title}': part {} appears twice",
@@ -1341,7 +1394,12 @@ fn circuit_geos_mut(d: &mut Value) -> (Vec<(String, Geo)>, Vec<String>) {
         }
         if !members.is_empty() {
             let has_tree = blk.get("tree").is_some();
-            blocks.push(Block { title, members, blk: blk.clone(), has_tree });
+            blocks.push(Block {
+                title,
+                members,
+                blk: blk.clone(),
+                has_tree,
+            });
         }
     }
     let (new_layout, lint_notes) = lint_layout(&layout, &parts, &by_id, &power);
@@ -1448,8 +1506,8 @@ fn circuit_geos_mut(d: &mut Value) -> (Vec<(String, Geo)>, Vec<String>) {
         }
     }
     let mut geos: Vec<(String, Geo)> = Vec::new();
-    for bi in 0..blocks.len() {
-        let (title, has_tree) = (blocks[bi].title.clone(), blocks[bi].has_tree);
+    for (bi, block) in blocks.iter_mut().enumerate() {
+        let (title, has_tree) = (block.title.clone(), block.has_tree);
         // Python passes an unordered set of flagged nets; sorting keeps the Rust engine deterministic.
         let mut here: Vec<String> = flag_group
             .iter()
@@ -1457,7 +1515,7 @@ fn circuit_geos_mut(d: &mut Value) -> (Vec<(String, Geo)>, Vec<String>) {
             .map(|(n, _)| n.clone())
             .collect();
         here.sort();
-        let members: Vec<PartInst> = blocks[bi].members.iter().map(|&mi| parts[mi].clone()).collect();
+        let members: Vec<PartInst> = block.members.iter().map(|&mi| parts[mi].clone()).collect();
         let mut label_pins: HashSet<(String, String)> = HashSet::new();
         let mut done: Option<GroupLayout> = None;
         for _ in 0..2 {
@@ -1477,7 +1535,7 @@ fn circuit_geos_mut(d: &mut Value) -> (Vec<(String, Geo)>, Vec<String>) {
                 .collect();
             let path = format!("block '{title}'");
             let node = measure(
-                &mut blocks[bi].blk["tree"],
+                &mut block.blk["tree"],
                 &gl,
                 &by_key,
                 &mut errors,
@@ -1528,8 +1586,8 @@ fn circuit_geos_mut(d: &mut Value) -> (Vec<(String, Geo)>, Vec<String>) {
         if !title.is_empty() {
             g.add_text(&title, [bb[0], bb[1] - 3.0], 2.5, true);
         }
-        if truthy(blocks[bi].blk.get("note")) {
-            let note = value_str(&blocks[bi].blk["note"]);
+        if truthy(block.blk.get("note")) {
+            let note = value_str(&block.blk["note"]);
             let bb2 = g.bbox();
             g.add_text(&note, [bb[0], bb2[3] + 4.0], 1.27, false);
         }
@@ -1570,13 +1628,18 @@ mod tests {
     #[test]
     fn tree_ids_walks_rows_and_cols_in_order() {
         assert_eq!(
-            t(json!({"row": [{"part": "J1"}, {"col": [{"part": "C1"}, {"part": "C2"}]}, {"part": "U2"}]})),
+            t(
+                json!({"row": [{"part": "J1"}, {"col": [{"part": "C1"}, {"part": "C2"}]}, {"part": "U2"}]})
+            ),
             ["J1", "C1", "C2", "U2"]
         );
         assert_eq!(t(json!({"part": 5})), ["5"]);
         assert_eq!(t(json!({})), Vec::<String>::new());
         // a container that also carries a part yields the part first
-        assert_eq!(t(json!({"part": "R1", "row": [{"part": "R2"}]})), ["R1", "R2"]);
+        assert_eq!(
+            t(json!({"part": "R1", "row": [{"part": "R2"}]})),
+            ["R1", "R2"]
+        );
     }
 
     #[test]
@@ -1592,7 +1655,11 @@ mod tests {
     #[test]
     fn replace_leaf_swaps_in_place() {
         let mut tree = json!({"col": [{"row": [{"part": "A"}, {"part": "B"}]}]});
-        assert!(replace_leaf(&mut tree, "B", &json!({"row": [{"part": "B"}, {"part": "X"}]})));
+        assert!(replace_leaf(
+            &mut tree,
+            "B",
+            &json!({"row": [{"part": "B"}, {"part": "X"}]})
+        ));
         assert_eq!(
             tree,
             json!({"col": [{"row": [{"part": "A"}, {"row": [{"part": "B"}, {"part": "X"}]}]}]})
@@ -1602,7 +1669,8 @@ mod tests {
 
     #[test]
     fn collect_canonicalises_unit_keys() {
-        let mut tree = json!({"row": [{"part": "U1", "unit": 2}, {"part": "U1"}, {"part": "U2", "unit": 1}]});
+        let mut tree =
+            json!({"row": [{"part": "U1", "unit": 2}, {"part": "U1"}, {"part": "U2", "unit": 1}]});
         let mut ids = Vec::new();
         collect(&mut tree, &mut ids);
         assert_eq!(ids, ["U1#2", "U1", "U2"]);

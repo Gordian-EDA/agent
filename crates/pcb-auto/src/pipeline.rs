@@ -34,7 +34,13 @@ const ROUTER_PASSES: u32 = 20;
 /// Seconds held back from the router for the DRC run and the renders that follow it. A router
 /// that overruns is killed and its whole session is lost, so the budget it is given must be one
 /// it can actually finish inside.
-const ROUTE_RESERVE_S: f64 = 28.0;
+const ROUTE_RESERVE_S: f64 = 26.0;
+/// A repair only has to finish the handful of nets the whole-board route left; it gets a short
+/// ladder so it fits in what is left of the budget instead of being killed mid-session.
+const REPAIR_PASSES: u32 = 8;
+/// A stitching pass changes the fill it just measured, so it is worth repeating — but a board
+/// that still fragments after this many rounds has a placement problem, not a stitching one.
+const STITCH_ROUNDS: usize = 4;
 
 /// What outline the board should end up with.
 #[derive(Debug, Clone)]
@@ -201,6 +207,7 @@ fn suggest_outline_for_edges(
         place::is_connector(f) && !f.locked && !seated.contains_key(f.ref_.as_str())
     };
     let mut per_side: BTreeMap<&str, f64> = BTreeMap::new();
+    let mut need_any = 0.0f64;
     let mut big_free = 0.0f64;
     let mut courtyard_area = 0.0f64;
     for f in &fps {
@@ -212,13 +219,11 @@ fn suggest_outline_for_edges(
             Some(&edge) if ["left", "right", "top", "bottom"].contains(&edge) => {
                 *per_side.entry(edge).or_default() += side_extent(f) + margin;
             }
-            // an "any"-edge or auto-detected connector could land on any side: it constrains
-            // every side equally, so charge the longest of them to both dimensions
+            // A connector nobody assigned an edge to will be seated on whichever side has room.
+            // It pins ONE dimension, not both: charging it to width and height alike is what
+            // turns a board with two long headers into a square instead of a strip.
             _ if auto_seated(f) || seated.get(f.ref_.as_str()) == Some(&"any") => {
-                for e in ["left", "right", "top", "bottom"] {
-                    let v = per_side.entry(e).or_default();
-                    *v = v.max(side_extent(f) + margin);
-                }
+                need_any = need_any.max(side_extent(f) + 2.0 * margin);
             }
             _ => big_free = big_free.max(b.w().max(b.h())),
         }
@@ -240,6 +245,10 @@ fn suggest_outline_for_edges(
     let floor_h = need_h.max(big_free);
     let mut w = w0.max(floor_w);
     let mut h = h0.max(floor_h);
+    // an unassigned connector needs a side long enough for it, on the long dimension
+    if need_any > w.max(h) {
+        if h >= w { h = need_any } else { w = need_any }
+    }
     // give the area back on whichever dimension a connector did not pin
     if h > h0 && w > floor_w {
         w = floor_w.max(inner / h).min(w);
@@ -503,23 +512,11 @@ pub fn auto_layout(
     // ---- tie the pour back together --------------------------------------------
     // Tracks cut the plane into islands; every pair of them is a missing connection until a via
     // bridges them, and on a two-layer board that is most of what a clean route leaves open.
-    if opts.gnd_zone {
-        if let Some(gnd) = ground_net(&board) {
-            match crate::stitch::stitch_pours(kicad, &mut board, pcb, &gnd.name, rules.clearance) {
-                Ok(0) => {}
-                Ok(n) => {
-                    board.strip_zone_fills();
-                    board.save(Some(pcb))?;
-                    run.note(format!("{n} ground stitching via(s)"));
-                }
-                Err(e) => run.note(format!("pour stitching failed: {}", first_line(&e.to_string()))),
-            }
-        }
-    }
+    stitch(&mut run, &mut board, pcb, rules.clearance)?;
 
     // ---- retry whatever is left, while there is budget for it ---------------------
     let mut report = checks::check(kicad, pcb)?;
-    if report.unconnected > 0 && run.left_s() > 15.0 {
+    if report.unconnected > 0 && run.left_s() > 20.0 {
         let left: Vec<String> = report.unrouted_nets.clone();
         run.note(format!(
             "{} connection(s) left on {:?}; retrying those nets",
@@ -528,12 +525,12 @@ pub fn auto_layout(
         ));
         let before = std::fs::read(pcb)?;
         let mut retry = Board::load(pcb)?;
-        let budget = (run.left_s() - 8.0).max(5.0) as u64;
+        let budget = (run.left_s() - 6.0).max(5.0) as u64;
         // A wide rail that cannot fit is retried at plain signal width.
         let r = freerouting::route(
             &mut retry,
             &RouteOptions {
-                passes: ROUTER_PASSES,
+                passes: REPAIR_PASSES,
                 timeout_s: budget,
                 rules: route_rules,
                 net_widths: BTreeMap::new(),
@@ -550,6 +547,7 @@ pub fn auto_layout(
                     "reroute: {} tracks, {} vias in {:.0}s",
                     r.tracks_added, r.vias_added, r.seconds
                 ));
+                stitch(&mut run, &mut retry, pcb, rules.clearance)?;
                 let after = checks::check(kicad, pcb)?;
                 if after.unconnected <= report.unconnected {
                     report = after;
@@ -566,6 +564,39 @@ pub fn auto_layout(
     }
 
     Ok(finish(run, report))
+}
+
+/// Tie the ground pour back into one piece, repeating while each pass still finds islands: a
+/// stitching via changes the fill, which can strand a fragment the previous pass could not see.
+fn stitch(run: &mut Run, board: &mut Board, pcb: &Path, clearance: f64) -> anyhow::Result<()> {
+    if !run.opts.gnd_zone {
+        return Ok(());
+    }
+    let Some(gnd) = ground_net(board) else {
+        return Ok(());
+    };
+    let mut total = 0usize;
+    for _ in 0..STITCH_ROUNDS {
+        if run.left_s() < 8.0 {
+            break;
+        }
+        match crate::stitch::stitch_pours(run.kicad, board, pcb, &gnd.name, clearance) {
+            Ok(0) => break,
+            Ok(n) => {
+                total += n;
+                board.strip_zone_fills();
+                board.save(Some(pcb))?;
+            }
+            Err(e) => {
+                run.note(format!("pour stitching failed: {}", first_line(&e.to_string())));
+                break;
+            }
+        }
+    }
+    if total > 0 {
+        run.note(format!("{total} ground stitching via(s)"));
+    }
+    Ok(())
 }
 
 /// A note is a line for a human, not a router transcript.

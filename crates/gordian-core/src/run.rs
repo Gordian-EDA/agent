@@ -58,20 +58,21 @@ pub async fn run(
         event("skills: a matching starter design was attached to the prompt");
     }
 
-    // The board is deterministic and needs only the netlist, so it starts on the
-    // first clean build and routes while the model is still running ERC, the
-    // review and the polish pass on the same circuit.
+    // The board is deterministic and needs only the netlist, so it starts on each
+    // clean build and routes while the model is still running ERC, the review and
+    // the polish pass on the same circuit.
     let early = EarlyBoard {
         enabled: options.board,
         kicad: kicad.clone(),
         work_dir: agent.work_dir().to_path_buf(),
         deadline,
         started: Mutex::new(None),
+        attempts: Mutex::new(0),
     };
     let hook = |sheet: &Path| early.start(sheet);
 
     let loop_started = Instant::now();
-    agent.on_first_clean_build(&hook);
+    agent.on_clean_build(&hook);
     let outcome = agent.run(&options.prompt, &skill_block).await?;
     let loop_seconds = loop_started.elapsed().as_secs_f64();
     event(format!(
@@ -247,25 +248,47 @@ struct EarlyBoard {
     work_dir: PathBuf,
     deadline: Instant,
     started: Mutex<Option<(PathBuf, tokio::task::JoinHandle<BoardOutcome>)>>,
+    attempts: Mutex<usize>,
 }
 
 impl EarlyBoard {
-    /// Start routing `sheet`. Called once, from the design loop.
+    /// Start routing `sheet`. Called for every clean build: a later build usually
+    /// re-draws the same netlist, but when it does not, the board has to start
+    /// over — and starting over here, while the model is still reviewing, is what
+    /// keeps the router off the last seconds of the run.
     fn start(&self, sheet: &Path) {
         if !self.enabled {
             return;
         }
-        if let Some(task) = self.attempt(sheet, "board-early") {
-            *self.started.lock().expect("board task lock") = Some((sheet.to_path_buf(), task));
+        let mut slot = self.started.lock().expect("board task lock");
+        let mut attempts = self.attempts.lock().expect("board attempt lock");
+        *attempts += 1;
+        let name = format!("board-{attempts}");
+        if let Some(task) = self.attempt(sheet, &name) {
+            if let Some((_, previous)) = slot.take() {
+                event("board: a newer clean build arrived, restarting the router on it");
+                previous.abort();
+            }
+            *slot = Some((sheet.to_path_buf(), task));
         }
     }
 
-    /// The task to await: the running one when `delivered` is the build it was
-    /// started from, otherwise a fresh one over the delivered netlist.
+    /// The task to await: the running one when it is routing the netlist that was
+    /// delivered, otherwise a fresh one over the delivered sheet.
+    ///
+    /// The delivered sheet is often a LATER build than the one being routed — the
+    /// model re-balanced a block, or the polish pass re-composed it — and a change
+    /// of drawing is not a change of board. So the two sheets are compared by
+    /// [`board::identity`], not by path: a routed board is thrown away only when
+    /// the nets or the footprints actually moved.
     fn claim(&self, delivered: Option<&Path>) -> Option<tokio::task::JoinHandle<BoardOutcome>> {
         let running = self.started.lock().expect("board task lock").take();
         match (running, delivered) {
-            (Some((source, task)), Some(delivered)) if source == delivered => Some(task),
+            (Some((source, task)), Some(delivered))
+                if source == delivered || self.same_board(&source, delivered) =>
+            {
+                Some(task)
+            }
             (running, delivered) => {
                 if let Some((_, task)) = running {
                     // `spawn_blocking` cannot be interrupted, so the abandoned
@@ -279,8 +302,26 @@ impl EarlyBoard {
         }
     }
 
+    /// Whether two sheets route to the same board.
+    fn same_board(&self, source: &Path, delivered: &Path) -> bool {
+        let same = match (
+            board::identity(&self.kicad, source),
+            board::identity(&self.kicad, delivered),
+        ) {
+            (Some(source), Some(delivered)) => source == delivered,
+            _ => false,
+        };
+        if same {
+            event("board: the delivered sheet re-draws the same netlist, keeping the routed board");
+        }
+        same
+    }
+
     /// Route one snapshot of `sheet` inside its own directory under the work dir.
     fn attempt(&self, sheet: &Path, name: &str) -> Option<tokio::task::JoinHandle<BoardOutcome>> {
+        if !self.enabled {
+            return None;
+        }
         let dir = self.work_dir.join(name);
         let snapshot = dir.join("design.kicad_sch");
         if let Err(error) = std::fs::create_dir_all(&dir).and_then(|()| {

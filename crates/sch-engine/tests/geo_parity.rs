@@ -28,7 +28,8 @@ fn canon(v: &Value) -> Value {
 
 #[test]
 fn raw_boxes_match_python() {
-    let dir = PathBuf::from(std::env::var("KICAD_SYMBOL_DIR").unwrap_or_else(|_| SYMBOL_DIR.to_string()));
+    let dir =
+        PathBuf::from(std::env::var("KICAD_SYMBOL_DIR").unwrap_or_else(|_| SYMBOL_DIR.to_string()));
     if !dir.is_dir() {
         return;
     }
@@ -42,18 +43,26 @@ fn raw_boxes_match_python() {
             continue;
         }
         let name = entry.file_name().to_string_lossy().to_string();
-        let raw: Value = serde_json::from_str(&std::fs::read_to_string(&raw_path).unwrap()).unwrap();
-        let want: Vec<[f64; 4]> = serde_json::from_str(&std::fs::read_to_string(&want_path).unwrap()).unwrap();
+        let raw: Value =
+            serde_json::from_str(&std::fs::read_to_string(&raw_path).unwrap()).unwrap();
+        let want: Vec<[f64; 4]> =
+            serde_json::from_str(&std::fs::read_to_string(&want_path).unwrap()).unwrap();
         let got = raw_boxes(&raw);
         assert_eq!(got.len(), want.len(), "{name}: box count");
         for (i, (g, w)) in got.iter().zip(&want).enumerate() {
             for k in 0..4 {
-                assert!((g[k] - w[k]).abs() < 1e-6, "{name}: box {i}[{k}] {g:?} vs {w:?}");
+                assert!(
+                    (g[k] - w[k]).abs() < 1e-6,
+                    "{name}: box {i}[{k}] {g:?} vs {w:?}"
+                );
             }
         }
         checked += 1;
     }
-    assert!(checked >= 15, "only {checked} fixtures had raw_boxes goldens");
+    assert!(
+        checked >= 15,
+        "only {checked} fixtures had raw_boxes goldens"
+    );
 }
 
 /// `pack_blocks` on synthetic blocks (boxes only): same packed geometry as Python.
@@ -88,14 +97,24 @@ fn pack_blocks_matches_python() {
         match (&got, c["result"].as_array()) {
             (None, None) => {}
             (Some(g), Some(want)) => {
-                let want: Vec<[f64; 4]> = want.iter().map(|b| serde_json::from_value(b.clone()).unwrap()).collect();
+                let want: Vec<[f64; 4]> = want
+                    .iter()
+                    .map(|b| serde_json::from_value(b.clone()).unwrap())
+                    .collect();
                 if g.boxes.len() != want.len()
-                    || g.boxes.iter().zip(&want).any(|(a, b)| (0..4).any(|k| (a[k] - b[k]).abs() > 1e-6))
+                    || g.boxes
+                        .iter()
+                        .zip(&want)
+                        .any(|(a, b)| (0..4).any(|k| (a[k] - b[k]).abs() > 1e-6))
                 {
                     failures.push(format!("case {i}: got {:?} want {want:?}", g.boxes));
                 }
             }
-            _ => failures.push(format!("case {i}: fits={} but Python fits={}", got.is_some(), c["result"].is_array())),
+            _ => failures.push(format!(
+                "case {i}: fits={} but Python fits={}",
+                got.is_some(),
+                c["result"].is_array()
+            )),
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
@@ -105,13 +124,16 @@ fn pack_blocks_matches_python() {
 /// `connect_pins` over 140 randomised (symbol, unit, rotation, mirror, pinmap, PWR_FLAG) cases.
 #[test]
 fn connect_pins_matches_python() {
-    let dir = PathBuf::from(std::env::var("KICAD_SYMBOL_DIR").unwrap_or_else(|_| SYMBOL_DIR.to_string()));
+    let dir =
+        PathBuf::from(std::env::var("KICAD_SYMBOL_DIR").unwrap_or_else(|_| SYMBOL_DIR.to_string()));
     if !dir.is_dir() {
         return;
     }
     Library::load(&dir).expect("index");
-    let cases: Vec<Value> =
-        serde_json::from_str(&std::fs::read_to_string(fixtures().join("connect_pins.json")).unwrap()).unwrap();
+    let cases: Vec<Value> = serde_json::from_str(
+        &std::fs::read_to_string(fixtures().join("connect_pins.json")).unwrap(),
+    )
+    .unwrap();
     let mut failures = Vec::new();
     for (i, c) in cases.iter().enumerate() {
         let sym = sch_engine::geo::info(c["lib"].as_str().unwrap()).unwrap();
@@ -120,8 +142,12 @@ fn connect_pins_matches_python() {
             sch_engine::geo::flag_at_symbol_set(net, v.as_bool().unwrap());
         }
         let at = [c["at"][0].as_f64().unwrap(), c["at"][1].as_f64().unwrap()];
-        let skip: std::collections::BTreeSet<String> =
-            c["skip"].as_array().unwrap().iter().map(|s| s.as_str().unwrap().to_string()).collect();
+        let skip: std::collections::BTreeSet<String> = c["skip"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s.as_str().unwrap().to_string())
+            .collect();
         let mut g = sch_engine::Geo::new();
         let r = sch_engine::geo::connect_pins(
             &mut g,
@@ -139,13 +165,20 @@ fn connect_pins_matches_python() {
             continue;
         }
         if canon(&g.to_json()) != canon(&c["geo"]) {
-            failures.push(format!("case {i} ({}): geometry differs\n got  {}\n want {}",
-                c["lib"], g.to_json(), c["geo"]));
+            failures.push(format!(
+                "case {i} ({}): geometry differs\n got  {}\n want {}",
+                c["lib"],
+                g.to_json(),
+                c["geo"]
+            ));
             continue;
         }
         let want_boxes: Vec<[f64; 4]> = serde_json::from_value(c["boxes"].clone()).unwrap();
         if g.boxes.len() != want_boxes.len()
-            || g.boxes.iter().zip(&want_boxes).any(|(a, b)| (0..4).any(|k| (a[k] - b[k]).abs() > 1e-6))
+            || g.boxes
+                .iter()
+                .zip(&want_boxes)
+                .any(|(a, b)| (0..4).any(|k| (a[k] - b[k]).abs() > 1e-6))
         {
             failures.push(format!("case {i} ({}): boxes differ", c["lib"]));
             continue;
@@ -156,7 +189,17 @@ fn connect_pins_matches_python() {
             }
         }
     }
-    assert!(failures.is_empty(), "{} of {} cases differ:\n{}", failures.len(), cases.len(),
-            failures.iter().take(3).cloned().collect::<Vec<_>>().join("\n"));
+    assert!(
+        failures.is_empty(),
+        "{} of {} cases differ:\n{}",
+        failures.len(),
+        cases.len(),
+        failures
+            .iter()
+            .take(3)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
     assert_eq!(cases.len(), 140);
 }

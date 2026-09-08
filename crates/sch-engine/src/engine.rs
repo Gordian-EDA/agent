@@ -35,20 +35,25 @@ pub type PinKey = (String, String);
 
 type Res<T> = Result<T, LayoutError>;
 
+/// `(x, y, rot, justify)` of a library property, in lib coordinates.
+type LibPropXform = (f64, f64, i32, String);
+
+/// A grid cell key: its coordinate paired with the direction wires leave it in.
+type CellDir = ((i64, i64), Dir);
+
+/// A net queued for routing: its name, pin-index pairs to connect, and whether it is a supply net.
+type RoutableNet = (String, Vec<(usize, usize)>, bool);
+
 // ---------------------------------------------------------------------------- small utilities
 
 /// Python's `round`: half to even.
 fn py_round(v: f64) -> f64 {
     let f = v.floor();
     let diff = v - f;
-    if diff > 0.5 {
+    if diff > 0.5 || (diff == 0.5 && (f as i64).rem_euclid(2) != 0) {
         f + 1.0
-    } else if diff < 0.5 {
-        f
-    } else if (f as i64).rem_euclid(2) == 0 {
-        f
     } else {
-        f + 1.0
+        f
     }
 }
 
@@ -77,7 +82,11 @@ pub struct OrderMap<V> {
 
 impl<V> Default for OrderMap<V> {
     fn default() -> Self {
-        OrderMap { keys: Vec::new(), vals: Vec::new(), idx: HashMap::new() }
+        OrderMap {
+            keys: Vec::new(),
+            vals: Vec::new(),
+            idx: HashMap::new(),
+        }
     }
 }
 
@@ -181,7 +190,11 @@ fn close_matches(word: &str, candidates: &[String], n: usize, cutoff: f64) -> Ve
         for &ca in &a {
             let mut cur = vec![0usize; b.len() + 1];
             for (j, &cb) in b.iter().enumerate() {
-                cur[j + 1] = if ca == cb { prev[j] + 1 } else { cur[j].max(prev[j + 1]) };
+                cur[j + 1] = if ca == cb {
+                    prev[j] + 1
+                } else {
+                    cur[j].max(prev[j + 1])
+                };
             }
             prev = cur;
         }
@@ -190,8 +203,11 @@ fn close_matches(word: &str, candidates: &[String], n: usize, cutoff: f64) -> Ve
         }
         2.0 * prev[b.len()] as f64 / (a.len() + b.len()) as f64
     }
-    let mut scored: Vec<(f64, &String)> =
-        candidates.iter().map(|c| (ratio(word, c), c)).filter(|(r, _)| *r >= cutoff).collect();
+    let mut scored: Vec<(f64, &String)> = candidates
+        .iter()
+        .map(|c| (ratio(word, c), c))
+        .filter(|(r, _)| *r >= cutoff)
+        .collect();
     scored.sort_by(|a, b| cmpf(b.0, a.0));
     scored.into_iter().take(n).map(|(_, c)| c.clone()).collect()
 }
@@ -200,12 +216,12 @@ fn close_matches(word: &str, candidates: &[String], n: usize, cutoff: f64) -> Ve
 
 thread_local! {
     /// lib_id -> property name -> (x, y, rot, justify), in library coordinates.
-    static LIB_PROPS: RefCell<HashMap<String, HashMap<String, (f64, f64, i32, String)>>> =
+    static LIB_PROPS: RefCell<HashMap<String, HashMap<String, LibPropXform>>> =
         RefCell::new(HashMap::new());
 }
 
 /// `(x, y, rot, justify)` of a library property, in lib coordinates (read lazily, cached).
-fn lib_prop(info: &SymbolInfo, name: &str) -> Option<(f64, f64, i32, String)> {
+fn lib_prop(info: &SymbolInfo, name: &str) -> Option<LibPropXform> {
     LIB_PROPS.with(|c| {
         let mut c = c.borrow_mut();
         let cache = c.entry(info.lib_id.clone()).or_insert_with(|| {
@@ -216,12 +232,20 @@ fn lib_prop(info: &SymbolInfo, name: &str) -> Option<(f64, f64, i32, String)> {
                     if items.is_empty() || ch.tag() != "property" || items.len() < 2 {
                         continue;
                     }
-                    let Some(at) = ch.child("at").and_then(|a| a.as_list()) else { continue };
+                    let Some(at) = ch.child("at").and_then(|a| a.as_list()) else {
+                        continue;
+                    };
                     let justify = ch
                         .child("effects")
                         .and_then(|e| e.child("justify"))
                         .and_then(|j| j.as_list())
-                        .map(|l| l[1..].iter().map(|a| a.text()).collect::<Vec<_>>().join(" "))
+                        .map(|l| {
+                            l[1..]
+                                .iter()
+                                .map(|a| a.text())
+                                .collect::<Vec<_>>()
+                                .join(" ")
+                        })
                         .unwrap_or_default();
                     out.insert(
                         items[1].text(),
@@ -289,7 +313,12 @@ pub fn connector_text_slot(info: &SymbolInfo, unit: i32, rot: i32, mirror: &str)
             _ => "above",
         };
     }
-    for (slot, side) in [("above", "top"), ("below", "bottom"), ("right", "right"), ("left", "left")] {
+    for (slot, side) in [
+        ("above", "top"),
+        ("below", "bottom"),
+        ("right", "right"),
+        ("left", "left"),
+    ] {
         if !sides.contains(&side) {
             return slot;
         }
@@ -345,7 +374,11 @@ pub fn is_power_net(net: &str, extra: &HashSet<String>) -> bool {
     if index().get(&format!("power:{net}")).is_some() {
         return true;
     }
-    is_voltage_name(net) || matches!(net, "VCC" | "VDD" | "VBUS" | "VBAT" | "VEE" | "VSS" | "VIN" | "VOUT")
+    is_voltage_name(net)
+        || matches!(
+            net,
+            "VCC" | "VDD" | "VBUS" | "VBAT" | "VEE" | "VSS" | "VIN" | "VOUT"
+        )
 }
 
 // ---------------------------------------------------------------------------- PartInst
@@ -382,8 +415,14 @@ pub struct PartInst {
 
 impl PartInst {
     pub fn new(pj: &Value) -> Res<PartInst> {
-        let id = pj.get("id").map(json_str).ok_or_else(|| LayoutError("part is missing field 'id'".into()))?;
-        let lib_id = pj.get("lib").map(json_str).ok_or_else(|| LayoutError("part is missing field 'lib'".into()))?;
+        let id = pj
+            .get("id")
+            .map(json_str)
+            .ok_or_else(|| LayoutError("part is missing field 'id'".into()))?;
+        let lib_id = pj
+            .get("lib")
+            .map(json_str)
+            .ok_or_else(|| LayoutError("part is missing field 'lib'".into()))?;
         let info = geo::info(&lib_id)?;
         if info.power || lib_id.starts_with("power:") {
             return Err(LayoutError(format!(
@@ -392,15 +431,27 @@ impl PartInst {
             )));
         }
         let unit = pj.get("unit").and_then(|v| v.as_i64()).unwrap_or(1) as i32;
-        let pins: Vec<Pin> = info.pins_for_unit(unit).into_iter().filter(|p| !p.hidden).cloned().collect();
+        let pins: Vec<Pin> = info
+            .pins_for_unit(unit)
+            .into_iter()
+            .filter(|p| !p.hidden)
+            .cloned()
+            .collect();
         let mut pinmap: OrderMap<String> = OrderMap::new();
-        let default = pj.get("pins_default").map(json_str).unwrap_or_else(|| "nc".to_string());
+        let default = pj
+            .get("pins_default")
+            .map(json_str)
+            .unwrap_or_else(|| "nc".to_string());
         for p in &pins {
             let v = if default != "label" {
                 default.clone()
             } else {
                 let head = p.name.split('/').next().unwrap_or("").to_string();
-                if head.is_empty() { p.number.clone() } else { head }
+                if head.is_empty() {
+                    p.number.clone()
+                } else {
+                    head
+                }
             };
             pinmap.insert(p.number.clone(), v);
         }
@@ -408,7 +459,11 @@ impl PartInst {
             for (k, v) in map {
                 let matched: Vec<&Pin> = {
                     let by_num: Vec<&Pin> = pins.iter().filter(|p| &p.number == k).collect();
-                    if by_num.is_empty() { pins.iter().filter(|p| &p.name == k).collect() } else { by_num }
+                    if by_num.is_empty() {
+                        pins.iter().filter(|p| &p.name == k).collect()
+                    } else {
+                        by_num
+                    }
                 };
                 if matched.is_empty() {
                     let mut names: Vec<String> = pins.iter().map(|p| p.name.clone()).collect();
@@ -419,15 +474,27 @@ impl PartInst {
                     } else {
                         format!(
                             " (did you mean {}?)",
-                            near.iter().map(|x| format!("'{x}'")).collect::<Vec<_>>().join(", ")
+                            near.iter()
+                                .map(|x| format!("'{x}'"))
+                                .collect::<Vec<_>>()
+                                .join(", ")
                         )
                     };
-                    let mut listed: String =
-                        pins.iter().map(|p| format!("{}={}", p.number, p.name)).collect::<Vec<_>>().join(", ");
+                    let mut listed: String = pins
+                        .iter()
+                        .map(|p| format!("{}={}", p.number, p.name))
+                        .collect::<Vec<_>>()
+                        .join(", ");
                     listed.truncate(500);
-                    return Err(LayoutError(format!("{id} ({lib_id}): no pin '{k}'{hint}; pins: {listed}")));
+                    return Err(LayoutError(format!(
+                        "{id} ({lib_id}): no pin '{k}'{hint}; pins: {listed}"
+                    )));
                 }
-                let val = if v.is_null() { "nc".to_string() } else { json_str(v) };
+                let val = if v.is_null() {
+                    "nc".to_string()
+                } else {
+                    json_str(v)
+                };
                 for p in matched {
                     pinmap.insert(p.number.clone(), val.clone());
                 }
@@ -442,7 +509,10 @@ impl PartInst {
             || name.starts_with("Q_")
             || name.starts_with("D_")
             || name.starts_with("LED")
-            || matches!(info.ref_prefix.as_str(), "Q" | "D" | "SW" | "L" | "FB" | "TP");
+            || matches!(
+                info.ref_prefix.as_str(),
+                "Q" | "D" | "SW" | "L" | "FB" | "TP"
+            );
         Ok(PartInst {
             key: id.clone(),
             id,
@@ -515,9 +585,16 @@ impl PartInst {
             }};
         }
         let libname = self.lib.rsplit(':').next().unwrap_or("").to_string();
-        let val_text = if self.value.is_empty() { libname } else { self.value.clone() };
+        let val_text = if self.value.is_empty() {
+            libname
+        } else {
+            self.value.clone()
+        };
         let tw = 0.95 * self.id.chars().count().max(val_text.chars().count()) as f64 + 0.6;
-        if self.two_pin && !self.is_connector && two_pin_axis(&self.info, self.unit, rot, mirror) == "v" {
+        if self.two_pin
+            && !self.is_connector
+            && two_pin_axis(&self.info, self.unit, rot, mirror) == "v"
+        {
             let right = at[0] + rot_body(&self.info, self.unit, rot, mirror).0 / GRID + 0.7;
             grow!([right, at[1] - 2.2, right + tw, at[1] + 2.2]);
         } else if self.is_connector || (!self.two_pin && (rot == 90 || rot == 270)) {
@@ -554,8 +631,14 @@ impl PartInst {
         // exact reference/value text boxes, from the library's property positions
         if !(self.two_pin || self.is_connector || rot == 90 || rot == 270) {
             for which in ["Reference", "Value"] {
-                let text = if which == "Reference" { self.id.clone() } else { val_text.clone() };
-                let Some((lx, ly, lrot, justify)) = lib_prop(&self.info, which) else { continue };
+                let text = if which == "Reference" {
+                    self.id.clone()
+                } else {
+                    val_text.clone()
+                };
+                let Some((lx, ly, lrot, justify)) = lib_prop(&self.info, which) else {
+                    continue;
+                };
                 if text.is_empty() {
                     continue;
                 }
@@ -605,7 +688,12 @@ impl PartInst {
                     // label on a vertical pin: placed as a short L-stub with horizontal text, so
                     // reserve 3 units along the pin and the text length sideways
                     let fy = pos[1] + d.1 as f64 * 3.0;
-                    grow!([pos[0] - (reach - 1.0), fy - 1.6, pos[0] + (reach - 1.0), fy + 1.6]);
+                    grow!([
+                        pos[0] - (reach - 1.0),
+                        fy - 1.6,
+                        pos[0] + (reach - 1.0),
+                        fy + 1.6
+                    ]);
                     continue;
                 }
                 let (fx, fy) = (pos[0] + d.0 as f64 * reach, pos[1] + d.1 as f64 * reach);
@@ -715,7 +803,9 @@ impl PartialOrd for QItem {
 }
 impl Ord for QItem {
     fn cmp(&self, o: &Self) -> Ordering {
-        cmpf(o.cost, self.cost).then(o.pos.cmp(&self.pos)).then(o.d.cmp(&self.d))
+        cmpf(o.cost, self.cost)
+            .then(o.pos.cmp(&self.pos))
+            .then(o.d.cmp(&self.d))
     }
 }
 
@@ -784,7 +874,11 @@ impl GroupLayout {
         for pi in 0..gl.parts.len() {
             for qi in 0..gl.parts[pi].pins.len() {
                 let p = &gl.parts[pi];
-                let net = p.pinmap.get(&p.pins[qi].number).cloned().unwrap_or_else(|| "nc".into());
+                let net = p
+                    .pinmap
+                    .get(&p.pins[qi].number)
+                    .cloned()
+                    .unwrap_or_else(|| "nc".into());
                 if net == "nc" || net == "float" || net.is_empty() {
                     continue;
                 }
@@ -814,7 +908,8 @@ impl GroupLayout {
                     nets_of.push(n.clone());
                 }
             }
-            p.power_only = !nets_of.is_empty() && nets_of.iter().all(|n| is_power_net(n, &power_names));
+            p.power_only =
+                !nets_of.is_empty() && nets_of.iter().all(|n| is_power_net(n, &power_names));
         }
         gl.pure_power_group = gl.parts.iter().all(|p| p.power_only);
         if gl.pure_power_group {
@@ -831,7 +926,11 @@ impl GroupLayout {
             for qi in 0..gl.parts[pi].pins.len() {
                 let p = &gl.parts[pi];
                 let number = p.pins[qi].number.clone();
-                let net = p.pinmap.get(&number).cloned().unwrap_or_else(|| "nc".into());
+                let net = p
+                    .pinmap
+                    .get(&number)
+                    .cloned()
+                    .unwrap_or_else(|| "nc".into());
                 if net == "nc" || net == "float" || net.is_empty() {
                     continue;
                 }
@@ -840,10 +939,18 @@ impl GroupLayout {
                     // pins of nets that continue outside this group (or are the only pin here).
                     // First pass: every pin of a cross-block net reserves label room; later passes
                     // know which pin actually carries the label and reserve only there.
-                    let cross = *gl.all_nets.get(&net).unwrap_or(&0) > here.len() || here.len() == 1;
+                    let cross =
+                        *gl.all_nets.get(&net).unwrap_or(&0) > here.len() || here.len() == 1;
                     let labelled = label_pins.contains(&(p.id.clone(), number.clone()))
                         || (cross && (no_label_pins || here.len() == 1));
-                    attach.insert(number, if labelled { 3.0 + 0.9 * net.chars().count() as f64 } else { 0.0 });
+                    attach.insert(
+                        number,
+                        if labelled {
+                            3.0 + 0.9 * net.chars().count() as f64
+                        } else {
+                            0.0
+                        },
+                    );
                 } else {
                     attach.insert(number, 6.0); // power symbol stub
                 }
@@ -854,18 +961,27 @@ impl GroupLayout {
     }
 
     fn key_of(&self, e: &End) -> PinKey {
-        (self.parts[e.p].id.clone(), self.parts[e.p].pins[e.pin].number.clone())
+        (
+            self.parts[e.p].id.clone(),
+            self.parts[e.p].pins[e.pin].number.clone(),
+        )
     }
 
     fn is_bus_pair(&self, a: usize, b: usize) -> bool {
         let (x, y) = (&self.parts[a].id, &self.parts[b].id);
-        let key = if x <= y { (x.clone(), y.clone()) } else { (y.clone(), x.clone()) };
+        let key = if x <= y {
+            (x.clone(), y.clone())
+        } else {
+            (y.clone(), x.clone())
+        };
         self.bus_pairs.contains(&key)
     }
 
     fn join_targets(&self, parent: &mut [usize], wire_owner: &[usize], j: usize) -> HashSet<usize> {
         let tgt = find(parent, j);
-        (0..wire_owner.len()).filter(|&wi| find(parent, wire_owner[wi]) == tgt).collect()
+        (0..wire_owner.len())
+            .filter(|&wi| find(parent, wire_owner[wi]) == tgt)
+            .collect()
     }
 
     // ------------------------------------------------------------ routing
@@ -877,15 +993,25 @@ impl GroupLayout {
         let mut reserved: Vec<(Box4, Option<String>)> = Vec::new();
         for p in &self.parts {
             for pin in &p.pins {
-                let Some(net) = p.pinmap.get(&pin.number) else { continue };
-                if net.is_empty() || !self.nets.contains_key(net) || self.signal_nets.contains_key(net) {
+                let Some(net) = p.pinmap.get(&pin.number) else {
+                    continue;
+                };
+                if net.is_empty()
+                    || !self.nets.contains_key(net)
+                    || self.signal_nets.contains_key(net)
+                {
                     continue;
                 }
                 let pos = p.pin_pos(pin);
                 let d = p.pin_dir(pin);
                 let (ex, ey) = (pos[0] + d.0 as f64 * 5.0, pos[1] + d.1 as f64 * 5.0);
                 reserved.push((
-                    [pos[0].min(ex) - 1.5, pos[1].min(ey) - 1.5, pos[0].max(ex) + 1.5, pos[1].max(ey) + 1.5],
+                    [
+                        pos[0].min(ex) - 1.5,
+                        pos[1].min(ey) - 1.5,
+                        pos[0].max(ex) + 1.5,
+                        pos[1].max(ey) + 1.5,
+                    ],
                     Some(net.clone()),
                 ));
             }
@@ -910,15 +1036,23 @@ impl GroupLayout {
                 }
             }
         }
-        self.bus_pairs = shared.into_iter().filter(|(_, v)| *v >= 4).map(|(k, _)| k).collect();
+        self.bus_pairs = shared
+            .into_iter()
+            .filter(|(_, v)| *v >= 4)
+            .map(|(k, _)| k)
+            .collect();
         self.power_symbol_pins.clear();
         self.symbol_on_wire.clear();
 
-        let mut routable: Vec<(String, Vec<(usize, usize)>, bool)> = self
+        let mut routable: Vec<RoutableNet> = self
             .signal_nets
             .iter()
             .map(|(n, v)| (n.clone(), v.clone(), false))
-            .chain(self.supply_nets.iter().map(|(n, v)| (n.clone(), v.clone(), true)))
+            .chain(
+                self.supply_nets
+                    .iter()
+                    .map(|(n, v)| (n.clone(), v.clone(), true)),
+            )
             .collect();
         // nets sorted: 2-pin nets first (short local connections), then bigger
         routable.sort_by(|a, b| a.1.len().cmp(&b.1.len()).then(a.0.cmp(&b.0)));
@@ -928,7 +1062,12 @@ impl GroupLayout {
                 .iter()
                 .map(|&(pi, qi)| {
                     let p = &self.parts[pi];
-                    End { p: pi, pin: qi, pos: p.pin_pos(&p.pins[qi]), d: p.pin_dir(&p.pins[qi]) }
+                    End {
+                        p: pi,
+                        pin: qi,
+                        pos: p.pin_pos(&p.pins[qi]),
+                        d: p.pin_dir(&p.pins[qi]),
+                    }
                 })
                 .collect();
             let n = ends.len();
@@ -976,8 +1115,8 @@ impl GroupLayout {
                         self.net_wires.entry_or(&net, Vec::new()).push(wi);
                         wire_owner.push(0);
                     }
-                    for k in 0..n {
-                        let key = self.key_of(&ends[k]);
+                    for (k, end) in ends.iter().enumerate() {
+                        let key = self.key_of(end);
                         self.wired_pins.insert(key);
                         let (a, b) = (find(&mut parent, k), find(&mut parent, 0));
                         parent[a] = b;
@@ -993,7 +1132,9 @@ impl GroupLayout {
                 // convoluted ones
                 if limit < dist && dist <= 1.8 * limit && !is_supply && self.long_simple {
                     let allowed = self.join_targets(&mut parent, &wire_owner, j);
-                    if let Some((path, joined)) = self.route_pair(&ends[i], &ends[j], &allowed, &net, true) {
+                    if let Some((path, joined)) =
+                        self.route_pair(&ends[i], &ends[j], &allowed, &net, true)
+                    {
                         let wi = self.wires.len();
                         self.wires.push(path);
                         self.net_wires.entry_or(&net, Vec::new()).push(wi);
@@ -1008,7 +1149,8 @@ impl GroupLayout {
                                 parent[a] = b;
                             }
                             Some(w) => {
-                                let (a, b) = (find(&mut parent, i), find(&mut parent, wire_owner[w]));
+                                let (a, b) =
+                                    (find(&mut parent, i), find(&mut parent, wire_owner[w]));
                                 parent[a] = b;
                             }
                         }
@@ -1030,7 +1172,8 @@ impl GroupLayout {
                 let (pi, pj) = (ends[i], ends[j]);
                 if pi.p == pj.p
                     && pi.d == pj.d
-                    && ((pi.pos[0] - pj.pos[0]).abs() < 1e-6 || (pi.pos[1] - pj.pos[1]).abs() < 1e-6)
+                    && ((pi.pos[0] - pj.pos[0]).abs() < 1e-6
+                        || (pi.pos[1] - pj.pos[1]).abs() < 1e-6)
                 {
                     // two pins of the same part on the same side: bridge the tips directly (unless a
                     // pin lies between)
@@ -1073,7 +1216,9 @@ impl GroupLayout {
                 // only wires of the target's component are join targets (joining our own wire
                 // connects nothing)
                 let allowed = self.join_targets(&mut parent, &wire_owner, j);
-                let Some((path, joined)) = self.route_pair(&ends[i], &ends[j], &allowed, &net, false) else {
+                let Some((path, joined)) =
+                    self.route_pair(&ends[i], &ends[j], &allowed, &net, false)
+                else {
                     continue;
                 };
                 let wi = self.wires.len();
@@ -1108,11 +1253,14 @@ impl GroupLayout {
                 // every fully wired component needs one power symbol: on its longest horizontal wire
                 // if possible
                 for (_, comp) in &comps {
-                    let unwired = comp.iter().any(|&i| !self.wired_pins.contains(&self.key_of(&ends[i])));
+                    let unwired = comp
+                        .iter()
+                        .any(|&i| !self.wired_pins.contains(&self.key_of(&ends[i])));
                     if comp.len() == 1 || unwired {
                         continue; // unwired pins get their own symbols in emit()
                     }
-                    let comp_pins: HashSet<PinKey> = comp.iter().map(|&k| self.key_of(&ends[k])).collect();
+                    let comp_pins: HashSet<PinKey> =
+                        comp.iter().map(|&k| self.key_of(&ends[k])).collect();
                     let mut segs: Vec<(f64, Pt, Pt)> = Vec::new();
                     let widx: Vec<usize> = self.net_wires.get(&net).cloned().unwrap_or_default();
                     for (wi, &w) in widx.iter().enumerate() {
@@ -1136,8 +1284,10 @@ impl GroupLayout {
                         let mx = snap_even((c[0] + d[0]) / 2.0);
                         self.symbol_on_wire.push((net.clone(), [mx, c[1]]));
                     } else {
-                        let i =
-                            *comp.iter().min_by_key(|&&k| (if ends[k].d == (0, -1) { 0 } else { 1 }, k)).unwrap();
+                        let i = *comp
+                            .iter()
+                            .min_by_key(|&&k| (if ends[k].d == (0, -1) { 0 } else { 1 }, k))
+                            .unwrap();
                         let key = self.key_of(&ends[i]);
                         self.power_symbol_pins.insert(key);
                     }
@@ -1153,7 +1303,10 @@ impl GroupLayout {
                     let keys: Vec<(bool, i64)> = comp
                         .iter()
                         .map(|&k| {
-                            (self.wired_pins.contains(&self.key_of(&ends[k])), self.label_crowding(&ends[k], &net))
+                            (
+                                self.wired_pins.contains(&self.key_of(&ends[k])),
+                                self.label_crowding(&ends[k], &net),
+                            )
                         })
                         .collect();
                     let mut order: Vec<usize> = (0..comp.len()).collect();
@@ -1298,12 +1451,16 @@ impl GroupLayout {
         const DIRS: [Dir; 4] = [(1, 0), (-1, 0), (0, 1), (0, -1)];
         let goal_dir = (-db.0, -db.1); // we must arrive at b moving opposite to b's outward direction
         let mut heap: BinaryHeap<QItem> = BinaryHeap::new();
-        heap.push(QItem { cost: 0.0, pos: a, d: da });
-        let mut best: HashMap<((i64, i64), Dir), f64> = HashMap::new();
-        let mut prev: HashMap<((i64, i64), Dir), ((i64, i64), Dir)> = HashMap::new();
+        heap.push(QItem {
+            cost: 0.0,
+            pos: a,
+            d: da,
+        });
+        let mut best: HashMap<CellDir, f64> = HashMap::new();
+        let mut prev: HashMap<CellDir, CellDir> = HashMap::new();
         let manhattan = (a.0 - b.0).abs() + (a.1 - b.1).abs();
         let limit = 60f64.max(2.5 * manhattan as f64 + 60.0);
-        let mut end_key: Option<((i64, i64), Dir)> = None;
+        let mut end_key: Option<CellDir> = None;
         while let Some(QItem { cost, pos, d }) = heap.pop() {
             let key = (pos, d);
             if best.contains_key(&key) {
@@ -1370,11 +1527,19 @@ impl GroupLayout {
                     continue;
                 }
                 prev.insert(nk, key);
-                heap.push(QItem { cost: cost + step, pos: nxt, d: nd });
+                heap.push(QItem {
+                    cost: cost + step,
+                    pos: nxt,
+                    d: nd,
+                });
             }
         }
         let end_key = end_key?;
-        let joined = if end_key.0 != b { join_owner.get(&end_key.0).copied() } else { None };
+        let joined = if end_key.0 != b {
+            join_owner.get(&end_key.0).copied()
+        } else {
+            None
+        };
         if simple_only && end_key.0 != b {
             return None; // no joins for long wires
         }
@@ -1407,7 +1572,9 @@ impl GroupLayout {
         }
         out.push(pts[pts.len() - 1]);
         // accept by shape, not by raw search cost: detour + bends + crossings (hugging is fine)
-        let length: f64 = seg_pairs(&out).map(|(u, v)| (u[0] - v[0]).abs() + (u[1] - v[1]).abs()).sum();
+        let length: f64 = seg_pairs(&out)
+            .map(|(u, v)| (u[0] - v[0]).abs() + (u[1] - v[1]).abs())
+            .sum();
         let bends = out.len().saturating_sub(2) as f64;
         let mut crossings = 0.0;
         for (u, v) in seg_pairs(&out) {
@@ -1450,7 +1617,11 @@ impl GroupLayout {
             .enumerate()
             .flat_map(|(qi, q)| q.boxes(false).into_iter().map(move |b| (qi, b)))
             .collect();
-        let others: Vec<(Pt, Pt)> = self.wires.iter().flat_map(|w| seg_pairs(w).collect::<Vec<_>>()).collect();
+        let others: Vec<(Pt, Pt)> = self
+            .wires
+            .iter()
+            .flat_map(|w| seg_pairs(w).collect::<Vec<_>>())
+            .collect();
 
         // `None` = blocked, `Some(n)` = crosses n existing segments
         let clear = |u: Pt, v: Pt, own: Option<usize>| -> Option<f64> {
@@ -1463,19 +1634,30 @@ impl GroupLayout {
                     return None;
                 }
             }
-            Some(others.iter().filter(|(c, d)| segs_cross(u, v, *c, *d)).count() as f64)
+            Some(
+                others
+                    .iter()
+                    .filter(|(c, d)| segs_cross(u, v, *c, *d))
+                    .count() as f64,
+            )
         };
 
         for horizontal in [true, false] {
-            let mut coords: Vec<i64> =
-                ends.iter().map(|e| ri(if horizontal { e.pos[1] } else { e.pos[0] })).collect();
+            let mut coords: Vec<i64> = ends
+                .iter()
+                .map(|e| ri(if horizontal { e.pos[1] } else { e.pos[0] }))
+                .collect();
             coords.sort_unstable();
             coords.dedup();
             let mut cand_raw: Vec<i64> = coords;
             for e in ends {
                 let (pos, d) = (e.pos, e.d);
                 for k in [2.0, 4.0, 6.0, 8.0] {
-                    cand_raw.push(ri(if horizontal { pos[1] + d.1 as f64 * k } else { pos[0] + d.0 as f64 * k }));
+                    cand_raw.push(ri(if horizontal {
+                        pos[1] + d.1 as f64 * k
+                    } else {
+                        pos[0] + d.0 as f64 * k
+                    }));
                 }
                 // pins pointing along the trunk direction: lines beside them (a bus past a resistor)
                 if (horizontal && d.1 == 0) || (!horizontal && d.0 == 0) {
@@ -1520,7 +1702,8 @@ impl GroupLayout {
                             // go outward 2, then vertical to the trunk
                             let mx = px + d.0 as f64 * 2.0;
                             let (a0, a1, a2) = ([px, py], [mx, py], [mx, t]);
-                            let (Some(c1), Some(c2)) = (clear(a0, a1, own), clear(a1, a2, None)) else {
+                            let (Some(c1), Some(c2)) = (clear(a0, a1, own), clear(a1, a2, None))
+                            else {
                                 ok = false;
                                 break;
                             };
@@ -1566,8 +1749,14 @@ impl GroupLayout {
                 }
                 let (lo, hi) = (fmin(&ends_on_trunk), fmax(&ends_on_trunk));
                 if hi - lo > 0.0 {
-                    let (t0, t1) = if horizontal { ([lo, t], [hi, t]) } else { ([t, lo], [t, hi]) };
-                    let Some(c) = clear(t0, t1, None) else { continue };
+                    let (t0, t1) = if horizontal {
+                        ([lo, t], [hi, t])
+                    } else {
+                        ([t, lo], [t, hi])
+                    };
+                    let Some(c) = clear(t0, t1, None) else {
+                        continue;
+                    };
                     paths.push(vec![t0, t1]);
                     total += (hi - lo) + 20.0 * c;
                 }
@@ -1587,7 +1776,11 @@ impl GroupLayout {
         let segs: Vec<(Pt, Pt)> = self
             .net_wires
             .get(net)
-            .map(|v| v.iter().flat_map(|&w| seg_pairs(&self.wires[w]).collect::<Vec<_>>()).collect())
+            .map(|v| {
+                v.iter()
+                    .flat_map(|&w| seg_pairs(&self.wires[w]).collect::<Vec<_>>())
+                    .collect()
+            })
             .unwrap_or_default();
         fn on(pt: Pt, a: Pt, b: Pt) -> bool {
             ((b[0] - a[0]) * (pt[1] - a[1]) - (b[1] - a[1]) * (pt[0] - a[0])).abs() < 1e-6
@@ -1632,8 +1825,11 @@ impl GroupLayout {
     /// same component).
     fn label_pin(&mut self, e: &End, net: &str, force: bool) -> bool {
         let (pos, d) = (e.pos, e.d);
-        let mut perp: Vec<Dir> =
-            if d.0 == 0 { vec![(d.1, d.0), (-d.1, -d.0)] } else { vec![(0, 1), (0, -1)] };
+        let mut perp: Vec<Dir> = if d.0 == 0 {
+            vec![(d.1, d.0), (-d.1, -d.0)]
+        } else {
+            vec![(0, 1), (0, -1)]
+        };
         // bent stubs: try the side facing the rest of the net first (the label then points where
         // the signal goes)
         let others: Vec<Pt> = self
@@ -1727,7 +1923,11 @@ impl GroupLayout {
                 return false;
             }
         }
-        if overlap(bx, &self.parts[p_idx].extent(), if path.is_empty() { 0.8 } else { -0.5 }) {
+        if overlap(
+            bx,
+            &self.parts[p_idx].extent(),
+            if path.is_empty() { 0.8 } else { -0.5 },
+        ) {
             return false;
         }
         if self.geo.boxes.iter().any(|b| overlap(bx, b, -0.2)) {
@@ -1790,7 +1990,11 @@ impl GroupLayout {
                 let p = &self.parts[pi];
                 let pin = &p.pins[qi];
                 let number = pin.number.clone();
-                let net = p.pinmap.get(&number).cloned().unwrap_or_else(|| "nc".into());
+                let net = p
+                    .pinmap
+                    .get(&number)
+                    .cloned()
+                    .unwrap_or_else(|| "nc".into());
                 let key = (p.id.clone(), number.clone());
                 if self.power_symbol_pins.contains(&key) {
                     // wired supply pin that carries the net's power symbol: put the symbol on a
@@ -1798,8 +2002,10 @@ impl GroupLayout {
                     let pos = p.pin_pos(pin);
                     let d = p.pin_dir(pin);
                     let mid = [pos[0] + d.0 as f64 * 2.0, pos[1] + d.1 as f64 * 2.0];
-                    let covered =
-                        self.wires.iter().any(|w| seg_pairs(w).any(|(a, b)| covers(a, b, pos, mid)));
+                    let covered = self
+                        .wires
+                        .iter()
+                        .any(|w| seg_pairs(w).any(|(a, b)| covers(a, b, pos, mid)));
                     if !covered {
                         self.geo.add_wire(&[pos, mid]);
                     }
@@ -1810,7 +2016,8 @@ impl GroupLayout {
                     } else {
                         let far = [mid[0], mid[1] + d.1 as f64 * 2.0];
                         self.geo.add_wire(&[mid, far]);
-                        self.geo.add_power(&net, far, if d == (0, -1) { 0 } else { 180 });
+                        self.geo
+                            .add_power(&net, far, if d == (0, -1) { 0 } else { 180 });
                     }
                     skip.insert(number);
                     continue;
@@ -1849,15 +2056,23 @@ impl GroupLayout {
         }
         // PWR_FLAGs: on the longest horizontal wire of the net if it has one, else beside a pin's
         // power symbol
-        let all_pins: Vec<Pt> =
-            self.parts.iter().flat_map(|q| q.pins.iter().map(|pin| q.pin_pos(pin)).collect::<Vec<_>>()).collect();
+        let all_pins: Vec<Pt> = self
+            .parts
+            .iter()
+            .flat_map(|q| q.pins.iter().map(|pin| q.pin_pos(pin)).collect::<Vec<_>>())
+            .collect();
         for net in self.flags.clone() {
             let mut placed = flag_at_symbol_get(&net) == Some(true);
             if placed {
                 continue;
             }
             let mut segs: Vec<(f64, Pt, Pt)> = Vec::new();
-            for &w in self.net_wires.get(&net).map(|v| v.as_slice()).unwrap_or(&[]) {
+            for &w in self
+                .net_wires
+                .get(&net)
+                .map(|v| v.as_slice())
+                .unwrap_or(&[])
+            {
                 for (c, d) in seg_pairs(&self.wires[w]) {
                     if (c[1] - d[1]).abs() < 1e-6 && (c[0] - d[0]).abs() >= 4.0 {
                         segs.push(((c[0] - d[0]).abs(), c, d));
@@ -1865,8 +2080,11 @@ impl GroupLayout {
                 }
             }
             let used: Vec<Pt> = self.symbol_on_wire.iter().map(|(_, pt)| *pt).collect();
-            let bodies: Vec<Box4> =
-                self.parts.iter().map(|q| extent(&q.info, q.at, q.rot, &q.mirror, q.unit)).collect();
+            let bodies: Vec<Box4> = self
+                .parts
+                .iter()
+                .map(|q| extent(&q.info, q.at, q.rot, &q.mirror, q.unit))
+                .collect();
             let mut best_c: Option<(f64, f64, f64)> = None;
             for &(_, c, d) in &segs {
                 let (lo, hi) = (c[0].min(d[0]), c[0].max(d[0]));
@@ -1875,15 +2093,17 @@ impl GroupLayout {
                 while (x as f64) < hi {
                     let cand = x as f64;
                     x += 2;
-                    if !(lo < cand && cand < hi)
-                        || !used.iter().all(|u| (cand - u[0]).abs() >= 7.0 || (c[1] - u[1]).abs() > 0.5)
-                    {
+                    let clear = used
+                        .iter()
+                        .all(|u| (cand - u[0]).abs() >= 7.0 || (c[1] - u[1]).abs() > 0.5);
+                    if !(lo < cand && cand < hi && clear) {
                         continue;
                     }
                     let tbox: Box4 = [cand - 4.5, c[1] - 7.0, cand + 4.5, c[1] - 0.5];
                     if self.wires.iter().any(|w| {
                         seg_pairs(w).any(|(e, f)| {
-                            !((e == c && f == d) || (e == d && f == c)) && seg_hits_box(e, f, &tbox, 0.1)
+                            !((e == c && f == d) || (e == d && f == c))
+                                && seg_hits_box(e, f, &tbox, 0.1)
                         })
                     }) {
                         continue;
@@ -1896,7 +2116,12 @@ impl GroupLayout {
                     // prefer the spot farthest from any part body (clear, uncluttered)
                     let dist = bodies
                         .iter()
-                        .map(|bx| (bx[0] - cand).max(cand - bx[2]).max(bx[1] - c[1]).max(c[1] - bx[3]))
+                        .map(|bx| {
+                            (bx[0] - cand)
+                                .max(cand - bx[2])
+                                .max(bx[1] - c[1])
+                                .max(c[1] - bx[3])
+                        })
                         .fold(f64::INFINITY, f64::min);
                     let dist = if bodies.is_empty() { 99.0 } else { dist };
                     if best_c.is_none() || dist > best_c.unwrap().0 {
@@ -1916,7 +2141,14 @@ impl GroupLayout {
             // (connectors first)
             let mut members: Vec<(usize, usize)> = self.nets.get(&net).cloned().unwrap_or_default();
             members.sort_by_key(|&(qi, _)| {
-                (if self.parts[qi].info.ref_prefix == "J" { 0 } else { 1 }, self.parts[qi].pins.len())
+                (
+                    if self.parts[qi].info.ref_prefix == "J" {
+                        0
+                    } else {
+                        1
+                    },
+                    self.parts[qi].pins.len(),
+                )
             });
             for (qi, qp) in members {
                 let q = &self.parts[qi];
@@ -1924,7 +2156,11 @@ impl GroupLayout {
                 let pos = q.pin_pos(pin);
                 let d = q.pin_dir(pin);
                 let mid = [pos[0] + d.0 as f64 * 2.0, pos[1] + d.1 as f64 * 2.0];
-                let sides: [Dir; 2] = if d.0 == 0 { [(-1, 0), (1, 0)] } else { [(0, -1), (0, 1)] };
+                let sides: [Dir; 2] = if d.0 == 0 {
+                    [(-1, 0), (1, 0)]
+                } else {
+                    [(0, -1), (0, 1)]
+                };
                 for side in sides {
                     let far = [mid[0] + side.0 as f64 * 10.0, mid[1] + side.1 as f64 * 10.0];
                     let bx: Box4 = [
@@ -1933,21 +2169,29 @@ impl GroupLayout {
                         mid[0].max(far[0]) + 3.0,
                         mid[1].max(far[1]) + 3.0,
                     ];
-                    if all_pins
-                        .iter()
-                        .any(|pp| bx[0] <= pp[0] && pp[0] <= bx[2] && bx[1] <= pp[1] && pp[1] <= bx[3] && *pp != pos)
-                    {
+                    if all_pins.iter().any(|pp| {
+                        bx[0] <= pp[0]
+                            && pp[0] <= bx[2]
+                            && bx[1] <= pp[1]
+                            && pp[1] <= bx[3]
+                            && *pp != pos
+                    }) {
                         continue;
                     }
                     if self.wires.iter().any(|w| {
                         seg_pairs(w).any(|(c, d2)| {
-                            !(c == pos || d2 == pos || c == mid || d2 == mid) && seg_hits_box(c, d2, &bx, 0.1)
+                            !(c == pos || d2 == pos || c == mid || d2 == mid)
+                                && seg_hits_box(c, d2, &bx, 0.1)
                         })
                     }) {
                         continue;
                     }
                     let fbox: Box4 = [far[0] - 4.5, far[1] - 4.0, far[0] + 4.5, far[1] + 1.0];
-                    if self.parts.iter().enumerate().any(|(oi, qq)| oi != qi && overlap(&fbox, &qq.extent(), -0.5))
+                    if self
+                        .parts
+                        .iter()
+                        .enumerate()
+                        .any(|(oi, qq)| oi != qi && overlap(&fbox, &qq.extent(), -0.5))
                     {
                         continue;
                     }
@@ -1956,7 +2200,10 @@ impl GroupLayout {
                     }
                     if self.geo.boxes.iter().any(|b| {
                         !(b[0] <= pos[0] && pos[0] <= b[2] && b[1] <= pos[1] && pos[1] <= b[3])
-                            && !(b[0] <= mid[0] && mid[0] <= b[2] && b[1] <= mid[1] && mid[1] <= b[3])
+                            && !(b[0] <= mid[0]
+                                && mid[0] <= b[2]
+                                && b[1] <= mid[1]
+                                && mid[1] <= b[3])
                             && overlap(&fbox, b, -0.3)
                     }) {
                         continue;
@@ -1965,7 +2212,13 @@ impl GroupLayout {
                         .wires
                         .iter()
                         .flat_map(|w| seg_pairs(w).collect::<Vec<_>>())
-                        .chain(self.geo.wires.iter().filter(|w| w.len() >= 2).map(|w| (w[0], w[1])))
+                        .chain(
+                            self.geo
+                                .wires
+                                .iter()
+                                .filter(|w| w.len() >= 2)
+                                .map(|w| (w[0], w[1])),
+                        )
                         .collect();
                     if !drawn.iter().any(|&(c, d2)| covers(c, d2, pos, mid)) {
                         // the pin's wire may leave sideways at the tip: draw the stub
@@ -2005,7 +2258,11 @@ fn gt_lex(a: &[f64; 5], b: &[f64; 5]) -> bool {
 /// dropped (their nets are drawn as power symbols anyway). Mutates `d`; returns notes.
 pub fn strip_power_parts(d: &mut Value) -> Vec<String> {
     let mut notes: Vec<String> = Vec::new();
-    let parts: Vec<Value> = d.get("parts").and_then(|p| p.as_array()).cloned().unwrap_or_default();
+    let parts: Vec<Value> = d
+        .get("parts")
+        .and_then(|p| p.as_array())
+        .cloned()
+        .unwrap_or_default();
     let mut keep: Vec<Value> = Vec::new();
     for pj in parts {
         let lib = pj.get("lib").map(json_str).unwrap_or_default();
@@ -2041,7 +2298,10 @@ pub fn strip_power_parts(d: &mut Value) -> Vec<String> {
             }
             notes.push(format!(
                 "note: {id} (PWR_FLAG) is not a part - moved to flags: [{}]",
-                nets.iter().map(|n| format!("'{n}'")).collect::<Vec<_>>().join(", ")
+                nets.iter()
+                    .map(|n| format!("'{n}'"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
             ));
         } else {
             notes.push(format!(
@@ -2057,13 +2317,17 @@ pub fn strip_power_parts(d: &mut Value) -> Vec<String> {
             }
         }
     }
-    d.as_object_mut().unwrap().insert("parts".into(), Value::Array(keep));
+    d.as_object_mut()
+        .unwrap()
+        .insert("parts".into(), Value::Array(keep));
     notes
 }
 
 fn prune_tree(node: &mut Value, id: &str) {
     for k in ["row", "col"] {
-        let Some(children) = node.get_mut(k).and_then(|c| c.as_array_mut()) else { continue };
+        let Some(children) = node.get_mut(k).and_then(|c| c.as_array_mut()) else {
+            continue;
+        };
         children.retain(|c| c.get("part").map(json_str).unwrap_or_default() != id);
         for c in children.iter_mut() {
             prune_tree(c, id);
@@ -2077,9 +2341,14 @@ pub fn add_circuit_to_raw(raw: &Value, circuit: &Value, paper: &str) -> (Value, 
     let mut errors: Vec<String> = Vec::new();
     let mut d = circuit.clone();
     if d.get("paper").is_none() {
-        d.as_object_mut().unwrap().insert("paper".into(), json!(paper));
+        d.as_object_mut()
+            .unwrap()
+            .insert("paper".into(), json!(paper));
     }
-    if d.get("layout").and_then(|l| l.as_array()).is_none_or(|l| l.is_empty()) {
+    if d.get("layout")
+        .and_then(|l| l.as_array())
+        .is_none_or(|l| l.is_empty())
+    {
         return (
             raw.clone(),
             vec!["the added circuit needs a \"layout\" (blocks with row/col trees) like a new design".into()],
@@ -2101,8 +2370,19 @@ pub fn add_circuit_to_raw(raw: &Value, circuit: &Value, paper: &str) -> (Value, 
     let mut sheet: Option<Geo> = None;
     let mut paper_used = paper.to_string();
     for paper_try in tries {
-        let Some(p) = geo::paper(&paper_try) else { continue };
-        sheet = pack_blocks(&geos, 14.0, 14.0, p[0], p[1], (p[2], p[3]), &obstacles, true);
+        let Some(p) = geo::paper(&paper_try) else {
+            continue;
+        };
+        sheet = pack_blocks(
+            &geos,
+            14.0,
+            14.0,
+            p[0],
+            p[1],
+            (p[2], p[3]),
+            &obstacles,
+            true,
+        );
         if sheet.is_some() {
             paper_used = paper_try;
             break;
@@ -2128,8 +2408,17 @@ pub fn add_circuit_to_raw(raw: &Value, circuit: &Value, paper: &str) -> (Value, 
     obj.insert("paper".into(), json!(paper_used));
     let add = sheet.to_json();
     for k in ["parts", "power", "wires", "labels", "nc", "texts", "rects"] {
-        let mut v: Vec<Value> = obj.get(k).and_then(|x| x.as_array()).cloned().unwrap_or_default();
-        v.extend(add.get(k).and_then(|x| x.as_array()).cloned().unwrap_or_default());
+        let mut v: Vec<Value> = obj
+            .get(k)
+            .and_then(|x| x.as_array())
+            .cloned()
+            .unwrap_or_default();
+        v.extend(
+            add.get(k)
+                .and_then(|x| x.as_array())
+                .cloned()
+                .unwrap_or_default(),
+        );
         obj.insert(k.into(), Value::Array(v));
     }
     (out, errors)

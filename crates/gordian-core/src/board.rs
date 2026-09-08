@@ -2,7 +2,8 @@
 //! rendered. Deterministic — no model call happens here, so it runs concurrently
 //! with the schematic polish pass.
 
-use std::path::PathBuf;
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use anyhow::Result;
@@ -45,6 +46,40 @@ impl BoardOutcome {
             "error": self.error,
         })
     }
+}
+
+/// Everything about a sheet that the board depends on: every net with the pins
+/// on it, and each part's footprint. Two sheets with the same identity route to
+/// the same board, so a board built from one can be delivered for the other —
+/// which is what lets a re-arranged layout keep a board that is already routed.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Identity {
+    nets: BTreeSet<(String, Vec<(String, String)>)>,
+    footprints: BTreeMap<String, String>,
+}
+
+/// Read a sheet's board identity, or `None` when KiCad cannot export its netlist.
+pub fn identity(kicad: &KicadInstallation, sch: &Path) -> Option<Identity> {
+    let netlist = kicad.netlist(sch).ok()?;
+    Some(Identity {
+        nets: netlist
+            .nets
+            .into_iter()
+            .map(|net| {
+                let mut nodes = net.nodes;
+                nodes.sort();
+                (net.name, nodes)
+            })
+            .collect(),
+        footprints: netlist
+            .components
+            .into_iter()
+            .map(|c| {
+                let footprint = c.properties.get("Footprint").cloned().unwrap_or_default();
+                (c.reference, footprint)
+            })
+            .collect(),
+    })
 }
 
 /// What the board stage is pointed at. `sch` is a snapshot of the delivered

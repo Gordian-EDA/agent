@@ -15,7 +15,7 @@ use crate::geom::{dist, point_in_polygon, point_rect_dist, polygon_area, seg_poi
 use crate::model::Board;
 
 /// Step of the lattice a stitch point is searched on.
-const PROBE_STEP: f64 = 0.5;
+const PROBE_STEP: f64 = 0.25;
 /// How much of the via's ring has to sit inside the island, sampled around its rim.
 const RIM_SAMPLES: usize = 8;
 /// A board only needs so many stitches; past this the pour is not the problem.
@@ -23,6 +23,7 @@ const MAX_VIAS: usize = 60;
 
 /// One filled piece of a pour.
 struct Island {
+    index: usize,
     layer: String,
     poly: Vec<Point>,
     bbox: BBox,
@@ -71,6 +72,7 @@ fn filled_islands(
         for poly in z.filled {
             if poly.len() >= 3 {
                 out.push(Island {
+                    index: out.len(),
                     bbox: BBox::of_points(poly.iter().copied()),
                     layer: layer.clone(),
                     poly,
@@ -114,7 +116,9 @@ pub fn stitch_pours(
     }
     let (top, bottom) = (copper[0].as_str(), copper[copper.len() - 1].as_str());
 
-    // what is already tied: a through-hole pad or an existing via of the net bridges both layers
+    // What the copper already joins. A tie point -- a ground via or a plated through-hole ground
+    // pad -- bridges every island it lands in; a ground track joins the islands its two ends sit
+    // in. Union-find over those says which islands are one piece of copper and which are adrift.
     let mut ties: Vec<Point> = board
         .vias()
         .iter()
@@ -128,6 +132,39 @@ pub fn stitch_pours(
             }
         }
     }
+    let mut uf = crate::geom::UnionFind::new(islands.len());
+    let hits = |p: Point| -> Vec<usize> {
+        islands
+            .iter()
+            .enumerate()
+            .filter(|(_, i)| point_in_polygon(p, &i.poly))
+            .map(|(k, _)| k)
+            .collect()
+    };
+    for t in &ties {
+        let h = hits(*t);
+        for w in h.windows(2) {
+            uf.join(w[0], w[1]);
+        }
+    }
+    for t in board.tracks() {
+        if t.net_id != gnd.id {
+            continue;
+        }
+        let (a, b) = (hits(t.start), hits(t.end));
+        for i in a.iter().chain(b.iter()).skip(1) {
+            uf.join(a.first().copied().unwrap_or(*i), *i);
+        }
+    }
+    // the component holding the largest island is the plane; everything else has to reach it
+    let main = (0..islands.len())
+        .max_by(|a, b| {
+            polygon_area(&islands[*a].poly)
+                .abs()
+                .partial_cmp(&polygon_area(&islands[*b].poly).abs())
+                .unwrap()
+        })
+        .map(|k| uf.find(k));
 
     let mut obstacles: Vec<Obstacle> = Vec::new();
     for t in board.tracks() {
@@ -151,11 +188,15 @@ pub fn stitch_pours(
     fn clear(obstacles: &[Obstacle], p: Point, need: f64) -> bool {
         obstacles.iter().all(|o| o.clears(p, need))
     }
+    // The via only has to LAND on the island for the fill to take it -- the pour refills around
+    // the barrel either way -- so the rim test asks for the drill, not the whole clearance ring.
+    // Demanding the full ring is what left a sliver of pour stranded with nowhere to stitch it.
+    let rim = via_drill / 2.0;
     let well_inside = |p: Point, isl: &Island| {
         point_in_polygon(p, &isl.poly)
             && (0..RIM_SAMPLES).all(|k| {
                 let a = std::f64::consts::TAU * k as f64 / RIM_SAMPLES as f64;
-                point_in_polygon((p.0 + need * a.cos(), p.1 + need * a.sin()), &isl.poly)
+                point_in_polygon((p.0 + rim * a.cos(), p.1 + rim * a.sin()), &isl.poly)
             })
     };
 
@@ -170,8 +211,8 @@ pub fn stitch_pours(
             if added >= MAX_VIAS {
                 break;
             }
-            if ties.iter().any(|t| point_in_polygon(*t, &isl.poly)) {
-                continue; // already bridged to the other layer
+            if main == Some(uf.find(isl.index)) {
+                continue; // already part of the plane
             }
             // The largest island on the far side is the one worth reaching; try them all, biggest
             // first, so a stitch lands on the main plane rather than on another crumb.
@@ -206,7 +247,6 @@ pub fn stitch_pours(
             if let Some(p) = placed {
                 board.add_via(p, via_size, via_drill, gnd.id, (top, bottom));
                 obstacles.push(Obstacle::Disc(p, r));
-                ties.push(p);
                 added += 1;
             }
         }

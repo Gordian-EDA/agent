@@ -10,7 +10,11 @@ pub const GRID: f64 = 1.27;
 /// Python's `round()`: half-to-even, unlike Rust's half-away-from-zero.
 pub fn round_py(v: f64) -> f64 {
     let r = v.round();
-    if (v - v.trunc()).abs() == 0.5 && r % 2.0 != 0.0 { r - v.signum() } else { r }
+    if (v - v.trunc()).abs() == 0.5 && r % 2.0 != 0.0 {
+        r - v.signum()
+    } else {
+        r
+    }
 }
 
 /// Python's `round(v, dp)`: half-to-even on the value's exact decimal expansion.
@@ -26,7 +30,8 @@ pub fn round_py_dp(v: f64, dp: i32) -> f64 {
     let first = rest.as_bytes()[0];
     let up = first > b'5'
         || (first == b'5'
-            && (rest[1..].bytes().any(|c| c != b'0') || (digits[digits.len() - 1] - b'0') % 2 == 1));
+            && (rest[1..].bytes().any(|c| c != b'0')
+                || (digits[digits.len() - 1] - b'0') % 2 == 1));
     if up {
         let mut i = digits.len();
         loop {
@@ -45,7 +50,9 @@ pub fn round_py_dp(v: f64, dp: i32) -> f64 {
     }
     let text = String::from_utf8(digits).unwrap();
     let cut = text.len() - dp;
-    let out: f64 = format!("{}.{}0", &text[..cut], &text[cut..]).parse().unwrap();
+    let out: f64 = format!("{}.{}0", &text[..cut], &text[cut..])
+        .parse()
+        .unwrap();
     if v < 0.0 { -out } else { out }
 }
 
@@ -65,7 +72,11 @@ pub fn mm(u: f64) -> f64 {
 /// mm -> grid units (integral when on grid).
 pub fn gu(v: f64) -> f64 {
     let r = round_py_dp(v / GRID, 3);
-    if (r - round_py(r)).abs() < 1e-6 { r.trunc() } else { r }
+    if (r - round_py(r)).abs() < 1e-6 {
+        r.trunc()
+    } else {
+        r
+    }
 }
 
 /// JSON number that stays an integer when the value is integral (matching Python's `gu`).
@@ -79,7 +90,10 @@ pub fn num(v: f64) -> Value {
 
 pub fn pt_mm(p: &Value) -> [f64; 2] {
     let a = p.as_array().map(|a| a.as_slice()).unwrap_or(&[]);
-    [mm(a.first().and_then(|v| v.as_f64()).unwrap_or(0.0)), mm(a.get(1).and_then(|v| v.as_f64()).unwrap_or(0.0))]
+    [
+        mm(a.first().and_then(|v| v.as_f64()).unwrap_or(0.0)),
+        mm(a.get(1).and_then(|v| v.as_f64()).unwrap_or(0.0)),
+    ]
 }
 
 pub fn pt_gu(p: [f64; 2]) -> Value {
@@ -104,7 +118,10 @@ pub fn at_gu(a: &[Value]) -> Option<Value> {
     if a.is_empty() {
         return None;
     }
-    let mut out = vec![num(gu(a[0].as_f64().unwrap_or(0.0))), num(gu(a.get(1).and_then(|v| v.as_f64()).unwrap_or(0.0)))];
+    let mut out = vec![
+        num(gu(a[0].as_f64().unwrap_or(0.0))),
+        num(gu(a.get(1).and_then(|v| v.as_f64()).unwrap_or(0.0))),
+    ];
     out.extend(a.iter().skip(2).cloned());
     Some(Value::Array(out))
 }
@@ -160,7 +177,13 @@ pub struct Part {
 
 impl Part {
     pub fn new(id: impl Into<String>, lib: impl Into<String>, at: [f64; 2]) -> Part {
-        Part { id: id.into(), lib: lib.into(), at, unit: 1, ..Default::default() }
+        Part {
+            id: id.into(),
+            lib: lib.into(),
+            at,
+            unit: 1,
+            ..Default::default()
+        }
     }
 
     pub fn to_json(&self) -> Value {
@@ -223,7 +246,13 @@ pub struct Power {
 impl Power {
     pub fn new(net: impl Into<String>, at: [f64; 2], rot: i32) -> Power {
         let net = net.into();
-        Power { lib: format!("power:{net}"), net, at, rot, ..Default::default() }
+        Power {
+            lib: format!("power:{net}"),
+            net,
+            at,
+            rot,
+            ..Default::default()
+        }
     }
 
     pub fn to_json(&self) -> Value {
@@ -429,7 +458,12 @@ impl Design {
             .map(|(i, p)| json!({"id": format!("n{}", i + 1), "at": p}))
             .collect();
         o.insert("nc".into(), Value::Array(nc));
-        for (key, pre) in [("labels", "l"), ("power", "p"), ("texts", "t"), ("rects", "r")] {
+        for (key, pre) in [
+            ("labels", "l"),
+            ("power", "p"),
+            ("texts", "t"),
+            ("rects", "r"),
+        ] {
             let items: Vec<Value> = o[key]
                 .as_array()
                 .unwrap()
@@ -465,20 +499,45 @@ impl Design {
         if !self.comments.is_empty() {
             d.insert("comments".into(), json!(self.comments));
         }
-        d.insert("parts".into(), Value::Array(self.parts.iter().map(|p| p.to_json()).collect()));
-        d.insert("power".into(), Value::Array(self.power.iter().map(|p| p.to_json()).collect()));
+        d.insert(
+            "parts".into(),
+            Value::Array(self.parts.iter().map(|p| p.to_json()).collect()),
+        );
+        d.insert(
+            "power".into(),
+            Value::Array(self.power.iter().map(|p| p.to_json()).collect()),
+        );
         d.insert(
             "wires".into(),
             Value::Array(
-                self.wires.iter().map(|w| Value::Array(w.iter().map(|p| pt_gu(*p)).collect())).collect(),
+                self.wires
+                    .iter()
+                    .map(|w| Value::Array(w.iter().map(|p| pt_gu(*p)).collect()))
+                    .collect(),
             ),
         );
-        d.insert("labels".into(), Value::Array(self.labels.iter().map(|l| l.to_json()).collect()));
-        d.insert("nc".into(), Value::Array(self.nc.iter().map(|p| pt_gu(*p)).collect()));
-        d.insert("texts".into(), Value::Array(self.texts.iter().map(|t| t.to_json()).collect()));
-        d.insert("rects".into(), Value::Array(self.rects.iter().map(|r| r.to_json()).collect()));
+        d.insert(
+            "labels".into(),
+            Value::Array(self.labels.iter().map(|l| l.to_json()).collect()),
+        );
+        d.insert(
+            "nc".into(),
+            Value::Array(self.nc.iter().map(|p| pt_gu(*p)).collect()),
+        );
+        d.insert(
+            "texts".into(),
+            Value::Array(self.texts.iter().map(|t| t.to_json()).collect()),
+        );
+        d.insert(
+            "rects".into(),
+            Value::Array(self.rects.iter().map(|r| r.to_json()).collect()),
+        );
         if !self.extra_nodes.is_empty() {
-            let mut tags: Vec<String> = self.extra_nodes.iter().map(|n| n.tag().to_string()).collect();
+            let mut tags: Vec<String> = self
+                .extra_nodes
+                .iter()
+                .map(|n| n.tag().to_string())
+                .collect();
             tags.sort();
             tags.dedup();
             d.insert("_preserved".into(), json!(tags));
@@ -492,11 +551,25 @@ pub fn normalize_json(d: &Value) -> Value {
     let mut d = d.as_object().cloned().unwrap_or_default();
     let wires: Vec<Value> = arr(&d, "wires")
         .iter()
-        .map(|w| if w.is_object() { w["pts"].clone() } else { w.clone() })
+        .map(|w| {
+            if w.is_object() {
+                w["pts"].clone()
+            } else {
+                w.clone()
+            }
+        })
         .collect();
     d.insert("wires".into(), Value::Array(wires));
-    let nc: Vec<Value> =
-        arr(&d, "nc").iter().map(|n| if n.is_object() { n["at"].clone() } else { n.clone() }).collect();
+    let nc: Vec<Value> = arr(&d, "nc")
+        .iter()
+        .map(|n| {
+            if n.is_object() {
+                n["at"].clone()
+            } else {
+                n.clone()
+            }
+        })
+        .collect();
     d.insert("nc".into(), Value::Array(nc));
     for key in ["labels", "power", "texts", "rects", "parts"] {
         let items: Vec<Value> = arr(&d, key)
@@ -515,7 +588,10 @@ pub fn normalize_json(d: &Value) -> Value {
 }
 
 fn arr(d: &Map<String, Value>, key: &str) -> Vec<Value> {
-    d.get(key).and_then(|v| v.as_array()).cloned().unwrap_or_default()
+    d.get(key)
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default()
 }
 
 const PATCH_KEYS: [&str; 7] = ["parts", "power", "wires", "labels", "nc", "texts", "rects"];
@@ -539,7 +615,11 @@ pub fn apply_patch(base_json: &Value, patch: &Value) -> (Value, Vec<String>) {
     let remove: std::collections::BTreeSet<String> = patch
         .get("remove")
         .and_then(|v| v.as_array())
-        .map(|a| a.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect()
+        })
         .unwrap_or_default();
     for r in &remove {
         if !known.contains(r) {
@@ -569,7 +649,9 @@ pub fn apply_patch(base_json: &Value, patch: &Value) -> (Value, Vec<String>) {
                 if let Some(hit) = items.iter_mut().find(|it| ident(it) == Some(pid.as_str())) {
                     found = true;
                     match changes.as_object() {
-                        None => errors.push(format!("update: '{pid}' needs an object of fields to change")),
+                        None => errors.push(format!(
+                            "update: '{pid}' needs an object of fields to change"
+                        )),
                         Some(ch) => {
                             let obj = hit.as_object_mut().unwrap();
                             for (ck, cv) in ch {
@@ -589,7 +671,11 @@ pub fn apply_patch(base_json: &Value, patch: &Value) -> (Value, Vec<String>) {
         }
     }
 
-    let add = patch.get("add").and_then(|v| v.as_object()).cloned().unwrap_or_default();
+    let add = patch
+        .get("add")
+        .and_then(|v| v.as_object())
+        .cloned()
+        .unwrap_or_default();
     let mut counters: std::collections::BTreeMap<&str, usize> =
         PATCH_KEYS.iter().map(|k| (*k, arr(&d, k).len())).collect();
     let prefix: std::collections::BTreeMap<&str, &str> = [
@@ -603,7 +689,12 @@ pub fn apply_patch(base_json: &Value, patch: &Value) -> (Value, Vec<String>) {
     .into_iter()
     .collect();
     for k in PATCH_KEYS {
-        for it in add.get(k).and_then(|v| v.as_array()).cloned().unwrap_or_default() {
+        for it in add
+            .get(k)
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default()
+        {
             let mut it = match (k, it.is_object()) {
                 ("wires", false) => json!({ "pts": it }),
                 ("nc", false) => json!({ "at": it }),
@@ -614,8 +705,10 @@ pub fn apply_patch(base_json: &Value, patch: &Value) -> (Value, Vec<String>) {
                 let unit = it.get("unit").and_then(|v| v.as_i64()).unwrap_or(1);
                 let parts = arr(&d, "parts");
                 let dup = parts.iter().any(|x| x.get("id") == Some(&id));
-                let multi =
-                    parts.iter().any(|x| x.get("id") == Some(&id) && x.get("unit").and_then(|v| v.as_i64()).unwrap_or(1) != 1);
+                let multi = parts.iter().any(|x| {
+                    x.get("id") == Some(&id)
+                        && x.get("unit").and_then(|v| v.as_i64()).unwrap_or(1) != 1
+                });
                 if dup && unit == 1 && !multi {
                     errors.push(format!(
                         "add: part id '{}' already exists (use update or a new id)",
@@ -661,7 +754,10 @@ pub fn design_from_json(d: &Value, base: Option<&Design>) -> Design {
         des.project = b.project.clone();
     }
     let s = |k: &str, fallback: &str| -> String {
-        d.get(k).and_then(|v| v.as_str()).map(|v| v.to_string()).unwrap_or_else(|| fallback.to_string())
+        d.get(k)
+            .and_then(|v| v.as_str())
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| fallback.to_string())
     };
     des.title = s("title", base.map(|b| b.title.as_str()).unwrap_or(""));
     des.paper = s("paper", base.map(|b| b.paper.as_str()).unwrap_or("A4"));
@@ -669,7 +765,10 @@ pub fn design_from_json(d: &Value, base: Option<&Design>) -> Design {
     des.company = s("company", base.map(|b| b.company.as_str()).unwrap_or(""));
     des.date = s("date", base.map(|b| b.date.as_str()).unwrap_or(""));
     des.comments = match d.get("comments").and_then(|v| v.as_array()) {
-        Some(a) => a.iter().map(|v| v.as_str().unwrap_or_default().to_string()).collect(),
+        Some(a) => a
+            .iter()
+            .map(|v| v.as_str().unwrap_or_default().to_string())
+            .collect(),
         None => base.map(|b| b.comments.clone()).unwrap_or_default(),
     };
 
@@ -685,10 +784,17 @@ pub fn design_from_json(d: &Value, base: Option<&Design>) -> Design {
             unit: o.get("unit").and_then(|v| v.as_f64()).unwrap_or(1.0) as i32,
             footprint: str_of(&o, "footprint"),
             dnp: o.get("dnp").and_then(|v| v.as_bool()).unwrap_or(false),
-            fields: o.get("fields").and_then(|v| v.as_object()).cloned().unwrap_or_default(),
+            fields: o
+                .get("fields")
+                .and_then(|v| v.as_object())
+                .cloned()
+                .unwrap_or_default(),
             ref_at: at_mm(o.get("ref_at")),
             val_at: at_mm(o.get("val_at")),
-            hide_value: o.get("hide_value").and_then(|v| v.as_bool()).unwrap_or(false),
+            hide_value: o
+                .get("hide_value")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
             uuid: String::new(),
             lib_name: str_of(&o, "lib_name"),
         };
@@ -711,7 +817,11 @@ pub fn design_from_json(d: &Value, base: Option<&Design>) -> Design {
         let net = str_of(&o, "net");
         let lib = {
             let l = str_of(&o, "lib");
-            if l.is_empty() { format!("power:{net}") } else { l }
+            if l.is_empty() {
+                format!("power:{net}")
+            } else {
+                l
+            }
         };
         let mut p = Power {
             net: net.clone(),

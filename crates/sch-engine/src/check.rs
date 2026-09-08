@@ -26,12 +26,20 @@ pub const PAPER_MM: [(&str, (f64, f64)); 8] = [
 ];
 
 pub fn paper_mm(paper: &str) -> (f64, f64) {
-    PAPER_MM.iter().find(|(k, _)| *k == paper).map(|(_, v)| *v).unwrap_or((297.0, 210.0))
+    PAPER_MM
+        .iter()
+        .find(|(k, _)| *k == paper)
+        .map(|(_, v)| *v)
+        .unwrap_or((297.0, 210.0))
 }
 
 /// KiCad ERC kinds the agent is never asked to fix.
-pub const IGNORED_ERC: [&str; 4] =
-    ["lib_symbol_issues", "footprint_link_issues", "lib_symbol_mismatch", "undefined_netclass"];
+pub const IGNORED_ERC: [&str; 4] = [
+    "lib_symbol_issues",
+    "footprint_link_issues",
+    "lib_symbol_mismatch",
+    "undefined_netclass",
+];
 
 // ---------------------------------------------------------------- formatting helpers
 
@@ -102,7 +110,11 @@ fn pin_map(info: &SymbolInfo, unit: i32, rot: i32, mirror: &str, ax: f64, ay: f6
     let mut m = PinMap::default();
     for pin in info.pins_for_unit(unit) {
         let (dx, dy) = rot_point(pin.x, pin.y, rot, mirror);
-        let pt = (round_py(ax + dx / GRID, 3), round_py(ay + dy / GRID, 3), pin_dir(pin, rot, mirror));
+        let pt = (
+            round_py(ax + dx / GRID, 3),
+            round_py(ay + dy / GRID, 3),
+            pin_dir(pin, rot, mirror),
+        );
         m.insert(pin.number.clone(), pt);
         if !pin.name.is_empty() {
             m.insert(pin.name.clone(), pt);
@@ -145,15 +157,23 @@ fn part_rot(p: &Value) -> i32 {
 }
 
 fn part_mirror(p: &Value) -> String {
-    part_field(p, "mirror").and_then(|v| v.as_str()).unwrap_or("").to_string()
+    part_field(p, "mirror")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string()
 }
 
 fn part_unit(p: &Value) -> i32 {
-    part_field(p, "unit").and_then(|v| v.as_f64()).unwrap_or(1.0) as i32
+    part_field(p, "unit")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(1.0) as i32
 }
 
 fn part_at(p: &Value) -> (f64, f64) {
-    let a = part_field(p, "at").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+    let a = part_field(p, "at")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
     (
         a.first().and_then(|v| v.as_f64()).unwrap_or(0.0),
         a.get(1).and_then(|v| v.as_f64()).unwrap_or(0.0),
@@ -161,27 +181,55 @@ fn part_at(p: &Value) -> (f64, f64) {
 }
 
 fn part_id(p: &Value) -> String {
-    part_field(p, "id").map(|v| v.as_str().map(|s| s.to_string()).unwrap_or_else(|| v.to_string())).unwrap_or_default()
+    part_field(p, "id")
+        .map(|v| {
+            v.as_str()
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| v.to_string())
+        })
+        .unwrap_or_default()
 }
 
 fn parts_of(d: &Value) -> Vec<Value> {
-    d.get("parts").and_then(|v| v.as_array()).cloned().unwrap_or_default()
+    d.get("parts")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default()
 }
 
 fn pin_lookup_table(d: &Value) -> PinTable {
     let mut table = PinTable::default();
     for pj in parts_of(d) {
-        let lib_id = part_field(&pj, "lib").and_then(|v| v.as_str()).unwrap_or("");
-        let Some(info) = index().get(lib_id) else { continue };
+        let lib_id = part_field(&pj, "lib")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let Some(info) = index().get(lib_id) else {
+            continue;
+        };
         let (ax, ay) = part_at(&pj);
-        table.insert(part_id(&pj), pin_map(&info, part_unit(&pj), part_rot(&pj), &part_mirror(&pj), ax, ay));
+        table.insert(
+            part_id(&pj),
+            pin_map(
+                &info,
+                part_unit(&pj),
+                part_rot(&pj),
+                &part_mirror(&pj),
+                ax,
+                ay,
+            ),
+        );
     }
     table
 }
 
 fn lib_infos_from_base(base: Option<&Design>) -> HashMap<String, SymbolInfo> {
-    base.map(|b| b.lib_symbols.iter().map(|(k, v)| (k.clone(), parse_symbol_node(v, k))).collect())
-        .unwrap_or_default()
+    base.map(|b| {
+        b.lib_symbols
+            .iter()
+            .map(|(k, v)| (k.clone(), parse_symbol_node(v, k)))
+            .collect()
+    })
+    .unwrap_or_default()
 }
 
 /// Replace `"REF.PIN"` strings in wires/labels/power/nc with coordinates (grid units).
@@ -196,83 +244,109 @@ pub fn resolve_pin_refs(d: &mut Value, base: Option<&Design>) -> Vec<String> {
                 .and_then(|v| v.as_str())
                 .filter(|s| !s.is_empty())
                 .map(|s| s.to_string())
-                .unwrap_or_else(|| part_field(&pj, "lib").and_then(|v| v.as_str()).unwrap_or("").to_string());
-            let Some(info) = infos.get(&key) else { continue };
+                .unwrap_or_else(|| {
+                    part_field(&pj, "lib")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string()
+                });
+            let Some(info) = infos.get(&key) else {
+                continue;
+            };
             if table.contains(&part_id(&pj)) {
                 continue;
             }
             let (ax, ay) = part_at(&pj);
-            table.insert(part_id(&pj), pin_map(info, part_unit(&pj), part_rot(&pj), &part_mirror(&pj), ax, ay));
+            table.insert(
+                part_id(&pj),
+                pin_map(
+                    info,
+                    part_unit(&pj),
+                    part_rot(&pj),
+                    &part_mirror(&pj),
+                    ax,
+                    ay,
+                ),
+            );
         }
     }
 
-    let resolve = |errors: &mut Vec<String>, v: &Value, ctx: &str| -> (f64, f64, Option<(i32, i32)>) {
-        if let Some(s) = v.as_str() {
-            let vs = s.trim();
-            if !vs.contains('.') {
-                errors.push(format!(
-                    "{ctx}: bad point {} (use [x,y] or \"REF.PIN\"; net names are not points - \
+    let resolve =
+        |errors: &mut Vec<String>, v: &Value, ctx: &str| -> (f64, f64, Option<(i32, i32)>) {
+            if let Some(s) = v.as_str() {
+                let vs = s.trim();
+                if !vs.contains('.') {
+                    errors.push(format!(
+                        "{ctx}: bad point {} (use [x,y] or \"REF.PIN\"; net names are not points - \
                      use a power symbol or label at a coordinate instead)",
-                    repr(v)
-                ));
-                return (0.0, 0.0, None);
-            }
-            // split at the first '.' that yields a known part reference (refs may contain odd characters)
-            let mut found: Option<(String, String)> = None;
-            let b: Vec<char> = vs.chars().collect();
-            for k in 0..b.len() {
-                if b[k] == '.' {
-                    let head: String = b[..k].iter().collect();
-                    if table.contains(&head) {
-                        found = Some((head, b[k + 1..].iter().collect()));
-                        break;
+                        repr(v)
+                    ));
+                    return (0.0, 0.0, None);
+                }
+                // split at the first '.' that yields a known part reference (refs may contain odd characters)
+                let mut found: Option<(String, String)> = None;
+                let b: Vec<char> = vs.chars().collect();
+                for k in 0..b.len() {
+                    if b[k] == '.' {
+                        let head: String = b[..k].iter().collect();
+                        if table.contains(&head) {
+                            found = Some((head, b[k + 1..].iter().collect()));
+                            break;
+                        }
                     }
                 }
-            }
-            let Some((r, pin)) = found else {
-                let (r, _pin) = vs.split_once('.').unwrap();
-                let near = table.refs().iter().find(|x| x.to_lowercase() == r.to_lowercase());
-                errors.push(format!(
-                    "{ctx}: unknown part {} in pin reference {}{}",
-                    repr(&json!(r)),
-                    repr(v),
-                    near.map(|n| format!(" (did you mean {n}?)")).unwrap_or_default()
-                ));
-                return (0.0, 0.0, None);
-            };
-            let m = table.get(&r).unwrap();
-            match m.get(&pin) {
-                Some(e) => (e.0, e.1, Some(e.2)),
-                None => {
-                    let mut avail: Vec<String> = m.keys().to_vec();
-                    avail.sort();
-                    avail.truncate(30);
+                let Some((r, pin)) = found else {
+                    let (r, _pin) = vs.split_once('.').unwrap();
+                    let near = table
+                        .refs()
+                        .iter()
+                        .find(|x| x.to_lowercase() == r.to_lowercase());
                     errors.push(format!(
-                        "{ctx}: part {r} has no pin {} (available: {})",
-                        repr(&json!(pin)),
-                        avail.join(", ")
+                        "{ctx}: unknown part {} in pin reference {}{}",
+                        repr(&json!(r)),
+                        repr(v),
+                        near.map(|n| format!(" (did you mean {n}?)"))
+                            .unwrap_or_default()
                     ));
-                    (0.0, 0.0, Some((0, 0)))
+                    return (0.0, 0.0, None);
+                };
+                let m = table.get(&r).unwrap();
+                match m.get(&pin) {
+                    Some(e) => (e.0, e.1, Some(e.2)),
+                    None => {
+                        let mut avail: Vec<String> = m.keys().to_vec();
+                        avail.sort();
+                        avail.truncate(30);
+                        errors.push(format!(
+                            "{ctx}: part {r} has no pin {} (available: {})",
+                            repr(&json!(pin)),
+                            avail.join(", ")
+                        ));
+                        (0.0, 0.0, Some((0, 0)))
+                    }
                 }
-            }
-        } else if let Some(a) = v.as_array().filter(|a| a.len() == 2) {
-            match (a[0].as_f64(), a[1].as_f64()) {
-                (Some(x), Some(y)) => (x, y, None),
-                _ => {
-                    errors.push(format!("{ctx}: bad point {}", repr(v)));
-                    (0.0, 0.0, None)
+            } else if let Some(a) = v.as_array().filter(|a| a.len() == 2) {
+                match (a[0].as_f64(), a[1].as_f64()) {
+                    (Some(x), Some(y)) => (x, y, None),
+                    _ => {
+                        errors.push(format!("{ctx}: bad point {}", repr(v)));
+                        (0.0, 0.0, None)
+                    }
                 }
+            } else {
+                errors.push(format!("{ctx}: bad point {}", repr(v)));
+                (0.0, 0.0, None)
             }
-        } else {
-            errors.push(format!("{ctx}: bad point {}", repr(v)));
-            (0.0, 0.0, None)
-        }
-    };
+        };
 
     let obj = d.as_object_mut().unwrap();
     let mut extra_wires: Vec<Value> = Vec::new();
 
-    let old_wires = obj.get("wires").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+    let old_wires = obj
+        .get("wires")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
     let mut wires: Vec<Value> = Vec::new();
     for (wi, w) in old_wires.iter().enumerate() {
         match w.as_array() {
@@ -292,7 +366,11 @@ pub fn resolve_pin_refs(d: &mut Value, base: Option<&Design>) -> Vec<String> {
     }
 
     for key in ["labels", "power", "texts"] {
-        let items = obj.get(key).and_then(|v| v.as_array()).cloned().unwrap_or_default();
+        let items = obj
+            .get(key)
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
         let mut out: Vec<Value> = Vec::new();
         for (i, it) in items.into_iter().enumerate() {
             let mut m = it.as_object().cloned().unwrap_or_default();
@@ -340,7 +418,11 @@ pub fn resolve_pin_refs(d: &mut Value, base: Option<&Design>) -> Vec<String> {
         obj.insert(key.into(), Value::Array(out));
     }
 
-    let old_nc = obj.get("nc").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+    let old_nc = obj
+        .get("nc")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
     let nc: Vec<Value> = old_nc
         .iter()
         .enumerate()
@@ -356,7 +438,11 @@ pub fn resolve_pin_refs(d: &mut Value, base: Option<&Design>) -> Vec<String> {
     // survives; new designs use integers
     fn h(v: f64) -> Value {
         let r = round_py(v * 2.0, 0) / 2.0;
-        if r == r.trunc() { json!(r as i64) } else { json!(r) }
+        if r == r.trunc() {
+            json!(r as i64)
+        } else {
+            json!(r)
+        }
     }
     fn snap_pt(p: &Value) -> Value {
         let a = p.as_array().cloned().unwrap_or_default();
@@ -366,7 +452,11 @@ pub fn resolve_pin_refs(d: &mut Value, base: Option<&Design>) -> Vec<String> {
         ])
     }
     for key in ["parts", "power", "labels"] {
-        let items = obj.get(key).and_then(|v| v.as_array()).cloned().unwrap_or_default();
+        let items = obj
+            .get(key)
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
         let out: Vec<Value> = items
             .into_iter()
             .map(|it| {
@@ -435,7 +525,10 @@ fn segments_cross(a: (f64, f64), b: (f64, f64), c: (f64, f64), d: (f64, f64)) ->
     }
     let (a, b, c, d) = if va { (a, b, c, d) } else { (c, d, a, b) };
     let (x, y) = (a.0, c.1);
-    a.1.min(b.1) + EPS < y && y < a.1.max(b.1) - EPS && c.0.min(d.0) + EPS < x && x < c.0.max(d.0) - EPS
+    a.1.min(b.1) + EPS < y
+        && y < a.1.max(b.1) - EPS
+        && c.0.min(d.0) + EPS < x
+        && x < c.0.max(d.0) - EPS
 }
 
 type TextBox = (String, String, [f64; 4], (f64, f64));
@@ -450,7 +543,12 @@ pub struct Checker<'a> {
 
 impl<'a> Checker<'a> {
     pub fn new(comp: &'a Compiler) -> Checker<'a> {
-        Checker { comp, issues: Vec::new(), warnings: Vec::new(), nets: Vec::new() }
+        Checker {
+            comp,
+            issues: Vec::new(),
+            warnings: Vec::new(),
+            nets: Vec::new(),
+        }
     }
 
     fn des(&self) -> &Design {
@@ -459,8 +557,14 @@ impl<'a> Checker<'a> {
 
     /// Transformed bbox in mm (schematic coords).
     fn bbox(&self, p: &Part, body_only: bool) -> [f64; 4] {
-        let Some(info) = self.comp.resolve_lib(&p.lib, &p.lib_name) else { return [0.0; 4] };
-        let bb = if body_only { info.body_for(p.unit) } else { info.bbox_for(p.unit) };
+        let Some(info) = self.comp.resolve_lib(&p.lib, &p.lib_name) else {
+            return [0.0; 4];
+        };
+        let bb = if body_only {
+            info.body_for(p.unit)
+        } else {
+            info.bbox_for(p.unit)
+        };
         let pts = [
             rot_point(bb.0, bb.1, p.rot, &p.mirror),
             rot_point(bb.2, bb.3, p.rot, &p.mirror),
@@ -479,12 +583,19 @@ impl<'a> Checker<'a> {
 
     pub fn run(&mut self) {
         let des_pins = self.comp.all_pin_positions();
-        let pin_at: HashMap<Key, usize> = des_pins.iter().enumerate().map(|(i, (k, _))| (*k, i)).collect();
+        let pin_at: HashMap<Key, usize> = des_pins
+            .iter()
+            .enumerate()
+            .map(|(i, (k, _))| (*k, i))
+            .collect();
         let segs: Vec<(Key, Key)> = self
             .des()
             .wires
             .iter()
-            .flat_map(|w| w.windows(2).map(|ab| (Key::of(ab[0][0], ab[0][1]), Key::of(ab[1][0], ab[1][1]))))
+            .flat_map(|w| {
+                w.windows(2)
+                    .map(|ab| (Key::of(ab[0][0], ab[0][1]), Key::of(ab[1][0], ab[1][1])))
+            })
             .collect();
         let mut wire_pts: HashMap<Key, i32> = HashMap::new();
         for (a, b) in &segs {
@@ -501,7 +612,10 @@ impl<'a> Checker<'a> {
         }
         let nc_pts: BTreeSet<Key> = self.des().nc.iter().map(|p| Key::of(p[0], p[1])).collect();
 
-        let on_seg = |pt: Key| segs.iter().any(|(a, b)| on_segment(pt.xy(), a.xy(), b.xy(), 0.01));
+        let on_seg = |pt: Key| {
+            segs.iter()
+                .any(|(a, b)| on_segment(pt.xy(), a.xy(), b.xy(), 0.01))
+        };
         let touches_wire = |pt: Key| wire_pts.contains_key(&pt) || on_seg(pt);
 
         // paper bounds
@@ -590,7 +704,8 @@ impl<'a> Checker<'a> {
                 let hint = match nearest(pt, &pin_keys) {
                     Some(np) => {
                         let lst = &des_pins[pin_at[&np]].1;
-                        let names: Vec<String> = lst.iter().map(|(r, n, _)| format!("{r}.{n}")).collect();
+                        let names: Vec<String> =
+                            lst.iter().map(|(r, n, _)| format!("{r}.{n}")).collect();
                         let (nx, ny) = np.xy();
                         format!(
                             "; nearest pin {} is at {} - use \"{}\" as the wire point",
@@ -601,7 +716,10 @@ impl<'a> Checker<'a> {
                     }
                     None => String::new(),
                 };
-                self.issues.push(format!("wire end at {} is dangling (connects to nothing){hint}", fmt_pt(x, y)));
+                self.issues.push(format!(
+                    "wire end at {} is dangling (connects to nothing){hint}",
+                    fmt_pt(x, y)
+                ));
             }
         }
         // labels must sit on a wire end or pin
@@ -624,12 +742,19 @@ impl<'a> Checker<'a> {
                 continue;
             }
             let (x, y) = pt.xy();
-            self.issues.push(format!("power symbol {} at {} is not connected to anything", pw.net, fmt_pt(x, y)));
+            self.issues.push(format!(
+                "power symbol {} at {} is not connected to anything",
+                pw.net,
+                fmt_pt(x, y)
+            ));
         }
         for pt in &nc_pts {
             if !pin_at.contains_key(pt) {
                 let (x, y) = pt.xy();
-                self.issues.push(format!("no-connect marker at {} is not on a pin", fmt_pt(x, y)));
+                self.issues.push(format!(
+                    "no-connect marker at {} is not on a pin",
+                    fmt_pt(x, y)
+                ));
             }
         }
         // diagonal wires
@@ -650,11 +775,17 @@ impl<'a> Checker<'a> {
             allb.push((p.id.clone(), self.bbox(p, false), self.bbox(p, true)));
         }
         for pw in &self.des().power.clone() {
-            let Some(info) = self.comp.resolve_lib(&pw.lib, "") else { continue };
+            let Some(info) = self.comp.resolve_lib(&pw.lib, "") else {
+                continue;
+            };
             if pw.net == "PWR_FLAG" {
                 continue;
             }
-            let id = if pw.reference.is_empty() { pw.net.clone() } else { pw.reference.clone() };
+            let id = if pw.reference.is_empty() {
+                pw.net.clone()
+            } else {
+                pw.reference.clone()
+            };
             let mut fake = Part {
                 id: id.clone(),
                 lib: pw.lib.clone(),
@@ -692,7 +823,10 @@ impl<'a> Checker<'a> {
             }
         }
         // wires crossing symbol bodies
-        let bodies: Vec<(String, [f64; 4])> = parts.iter().map(|p| (p.id.clone(), self.bbox(p, true))).collect();
+        let bodies: Vec<(String, [f64; 4])> = parts
+            .iter()
+            .map(|p| (p.id.clone(), self.bbox(p, true)))
+            .collect();
         for (a, b) in &segs {
             for (id, bb) in &bodies {
                 if seg_crosses_box(a.xy(), b.xy(), *bb, 1.0) {
@@ -751,7 +885,10 @@ impl<'a> Checker<'a> {
         for (name, members) in &nets {
             let real: Vec<&String> = members.iter().filter(|m| !m.starts_with('#')).collect();
             if real.len() == 1 && name.starts_with("N$") {
-                self.warnings.push(format!("net with single pin {} (wire leads nowhere)", real[0]));
+                self.warnings.push(format!(
+                    "net with single pin {} (wire leads nowhere)",
+                    real[0]
+                ));
             }
         }
         // label used only once (typo?)
@@ -827,7 +964,8 @@ impl<'a> Checker<'a> {
             ));
         }
         for l in &self.des().labels {
-            let w = CW * 1.27 * l.text.chars().count() as f64 + if l.kind != "local" { 3.0 } else { 0.6 };
+            let w = CW * 1.27 * l.text.chars().count() as f64
+                + if l.kind != "local" { 3.0 } else { 0.6 };
             let h = CH * 1.27;
             let (x, y) = (l.at[0], l.at[1]);
             let bb = if l.kind == "local" {
@@ -846,7 +984,12 @@ impl<'a> Checker<'a> {
                     _ => [x - h / 2.0, y, x + h / 2.0, y + w],
                 }
             };
-            boxes.push((format!("label:{}", l.text), format!("label '{}'", l.text), bb, (x, y)));
+            boxes.push((
+                format!("label:{}", l.text),
+                format!("label '{}'", l.text),
+                bb,
+                (x, y),
+            ));
         }
         for t in &self.des().texts {
             let lines: Vec<&str> = t.text.split('\n').collect();
@@ -864,12 +1007,7 @@ impl<'a> Checker<'a> {
         boxes
     }
 
-    fn text_checks(
-        &mut self,
-        bodies: &[(String, [f64; 4])],
-        segs: &[(Key, Key)],
-        pins: &PinsAt,
-    ) {
+    fn text_checks(&mut self, bodies: &[(String, [f64; 4])], segs: &[(Key, Key)], pins: &PinsAt) {
         let boxes = self.text_boxes();
         for (owner, desc, bb, anchor) in &boxes {
             for (id, body) in bodies {
@@ -877,8 +1015,10 @@ impl<'a> Checker<'a> {
                     continue;
                 }
                 if overlap(*bb, *body, 0.25) {
-                    self.issues
-                        .push(format!("{desc} at {} overlaps the body of {id} - move/rotate it", fmt_pt(anchor.0, anchor.1)));
+                    self.issues.push(format!(
+                        "{desc} at {} overlaps the body of {id} - move/rotate it",
+                        fmt_pt(anchor.0, anchor.1)
+                    ));
                     break;
                 }
             }
@@ -917,7 +1057,10 @@ impl<'a> Checker<'a> {
             let ak = Key::of(anchor.0, anchor.1);
             let own = own_pts.get(owner);
             for (a, b) in segs {
-                if *a == ak || *b == ak || own.map(|s| s.contains(a) || s.contains(b)).unwrap_or(false) {
+                if *a == ak
+                    || *b == ak
+                    || own.map(|s| s.contains(a) || s.contains(b)).unwrap_or(false)
+                {
                     continue;
                 }
                 if seg_crosses_box(a.xy(), b.xy(), *bb, 0.2) {
@@ -940,7 +1083,12 @@ impl<'a> Checker<'a> {
         let mut cross = 0;
         for i in 0..segs.len() {
             for j in i + 1..segs.len() {
-                if segments_cross(segs[i].0.xy(), segs[i].1.xy(), segs[j].0.xy(), segs[j].1.xy()) {
+                if segments_cross(
+                    segs[i].0.xy(),
+                    segs[i].1.xy(),
+                    segs[j].0.xy(),
+                    segs[j].1.xy(),
+                ) {
                     cross += 1;
                 }
             }
@@ -1021,18 +1169,33 @@ impl<'a> Checker<'a> {
                 continue;
             }
             for (r, num, _) in lst {
-                union(&mut parent, &mut order, Node::Pt(*pt), Node::Pin(r.clone(), num.clone()));
+                union(
+                    &mut parent,
+                    &mut order,
+                    Node::Pt(*pt),
+                    Node::Pin(r.clone(), num.clone()),
+                );
             }
         }
         for pt in label_order {
             let l = &self.des().labels[label_pts[pt]];
-            union(&mut parent, &mut order, Node::Pt(*pt), Node::Net(l.text.clone()));
+            union(
+                &mut parent,
+                &mut order,
+                Node::Pt(*pt),
+                Node::Net(l.text.clone()),
+            );
         }
         for pw in &self.des().power.clone() {
             if pw.net == "PWR_FLAG" {
                 continue;
             }
-            union(&mut parent, &mut order, Node::Pt(Key::of(pw.at[0], pw.at[1])), Node::Net(pw.net.clone()));
+            union(
+                &mut parent,
+                &mut order,
+                Node::Pt(Key::of(pw.at[0], pw.at[1])),
+                Node::Net(pw.net.clone()),
+            );
         }
 
         let mut group_order: Vec<Node> = Vec::new();
@@ -1048,8 +1211,16 @@ impl<'a> Checker<'a> {
         let mut n = 0;
         for r in group_order {
             let gr = &groups[&r];
-            let mut names: Vec<String> =
-                gr.iter().filter_map(|k| if let Node::Net(s) = k { Some(s.clone()) } else { None }).collect();
+            let mut names: Vec<String> = gr
+                .iter()
+                .filter_map(|k| {
+                    if let Node::Net(s) = k {
+                        Some(s.clone())
+                    } else {
+                        None
+                    }
+                })
+                .collect();
             names.sort();
             let mut members: Vec<String> = gr
                 .iter()
@@ -1066,7 +1237,11 @@ impl<'a> Checker<'a> {
                 if names.len() > 1 {
                     self.warnings.push(format!(
                         "nets [{}] are shorted together",
-                        names.iter().map(|s| format!("'{s}'")).collect::<Vec<_>>().join(", ")
+                        names
+                            .iter()
+                            .map(|s| format!("'{s}'"))
+                            .collect::<Vec<_>>()
+                            .join(", ")
                     ));
                 }
                 names[0].clone()
@@ -1082,8 +1257,10 @@ impl<'a> Checker<'a> {
     pub fn netlist_text(&self, limit: usize) -> String {
         let mut items = self.nets.clone();
         items.sort_by(|a, b| (a.0.starts_with("N$"), &a.0).cmp(&(b.0.starts_with("N$"), &b.0)));
-        let mut lines: Vec<String> =
-            items.iter().map(|(name, members)| format!("{name}: {}", members.join(" "))).collect();
+        let mut lines: Vec<String> = items
+            .iter()
+            .map(|(name, members)| format!("{name}: {}", members.join(" ")))
+            .collect();
         if lines.len() > limit {
             let more = self.nets.len() - limit;
             lines.truncate(limit);
@@ -1094,7 +1271,10 @@ impl<'a> Checker<'a> {
 
     /// `net -> {"U1.12", ...}` for [`crate::BuildReport`].
     pub fn netlist_map(&self) -> BTreeMap<String, BTreeSet<String>> {
-        self.nets.iter().map(|(k, v)| (k.clone(), v.iter().cloned().collect())).collect()
+        self.nets
+            .iter()
+            .map(|(k, v)| (k.clone(), v.iter().cloned().collect()))
+            .collect()
     }
 }
 
@@ -1121,8 +1301,18 @@ pub fn run_erc(kicad_cli: &Path, sch: &Path) -> Result<Vec<String>> {
     let data: Value = serde_json::from_str(&std::fs::read_to_string(&rep)?)?;
     let mut errors: Vec<String> = Vec::new();
     let mut rest: Vec<String> = Vec::new();
-    for sh in data.get("sheets").and_then(|v| v.as_array()).cloned().unwrap_or_default() {
-        for v in sh.get("violations").and_then(|v| v.as_array()).cloned().unwrap_or_default() {
+    for sh in data
+        .get("sheets")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default()
+    {
+        for v in sh
+            .get("violations")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default()
+        {
             let kind = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
             if IGNORED_ERC.contains(&kind) {
                 continue;
@@ -1137,15 +1327,25 @@ pub fn run_erc(kicad_cli: &Path, sch: &Path) -> Result<Vec<String>> {
                         .map(|it| {
                             let d = it.get("description").and_then(|t| t.as_str()).unwrap_or("");
                             let pos = it.get("pos");
-                            let x = pos.and_then(|p| p.get("x")).map(|v| v.to_string()).unwrap_or("?".into());
-                            let y = pos.and_then(|p| p.get("y")).map(|v| v.to_string()).unwrap_or("?".into());
+                            let x = pos
+                                .and_then(|p| p.get("x"))
+                                .map(|v| v.to_string())
+                                .unwrap_or("?".into());
+                            let y = pos
+                                .and_then(|p| p.get("y"))
+                                .map(|v| v.to_string())
+                                .unwrap_or("?".into());
                             erc_item(&format!("{d} @({x},{y})"))
                         })
                         .collect()
                 })
                 .unwrap_or_default();
             let line = format!("[{sev}] {kind}: {desc} -- {}", items.join("; "));
-            if sev == "error" { errors.push(line) } else { rest.push(line) }
+            if sev == "error" {
+                errors.push(line)
+            } else {
+                rest.push(line)
+            }
         }
     }
     errors.extend(rest);
@@ -1156,9 +1356,11 @@ pub fn run_erc(kicad_cli: &Path, sch: &Path) -> Result<Vec<String>> {
 pub fn erc_item(it: &str) -> String {
     static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
     let re = RE.get_or_init(|| regex::Regex::new(r"@\(([-\d.]+),([-\d.]+)\)").unwrap());
-    re.replace_all(it, |c: &regex::Captures| match (c[1].parse::<f64>(), c[2].parse::<f64>()) {
-        (Ok(x), Ok(y)) => format!("@({},{})", g(x * 100.0), g(y * 100.0)),
-        _ => c[0].to_string(),
+    re.replace_all(it, |c: &regex::Captures| {
+        match (c[1].parse::<f64>(), c[2].parse::<f64>()) {
+            (Ok(x), Ok(y)) => format!("@({},{})", g(x * 100.0), g(y * 100.0)),
+            _ => c[0].to_string(),
+        }
     })
     .into_owned()
 }
@@ -1176,12 +1378,27 @@ pub fn annotate_wires(d: &mut Value, base: Option<&Design>) {
             .and_then(|v| v.as_str())
             .filter(|s| !s.is_empty())
             .map(|s| s.to_string())
-            .unwrap_or_else(|| part_field(&pj, "lib").and_then(|v| v.as_str()).unwrap_or("").to_string());
+            .unwrap_or_else(|| {
+                part_field(&pj, "lib")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string()
+            });
         if !table.contains(&part_id(&pj))
             && let Some(info) = infos.get(&key)
         {
             let (ax, ay) = part_at(&pj);
-            table.insert(part_id(&pj), pin_map(info, part_unit(&pj), part_rot(&pj), &part_mirror(&pj), ax, ay));
+            table.insert(
+                part_id(&pj),
+                pin_map(
+                    info,
+                    part_unit(&pj),
+                    part_rot(&pj),
+                    &part_mirror(&pj),
+                    ax,
+                    ay,
+                ),
+            );
         }
     }
     let mut at_pt: HashMap<Key, Vec<String>> = HashMap::new();
@@ -1197,17 +1414,51 @@ pub fn annotate_wires(d: &mut Value, base: Option<&Design>) {
             at_pt.entry(key).or_default().push(format!("{r}.{k}"));
         }
     }
-    for it in d.get("labels").and_then(|v| v.as_array()).cloned().unwrap_or_default() {
-        let at = it.get("at").and_then(|v| v.as_array()).cloned().unwrap_or_default();
-        let (x, y) = (at.first().and_then(|v| v.as_f64()).unwrap_or(0.0), at.get(1).and_then(|v| v.as_f64()).unwrap_or(0.0));
-        at_pt.entry(Key::of(x, y)).or_default().push(format!("label:{}", it["text"].as_str().unwrap_or("")));
+    for it in d
+        .get("labels")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default()
+    {
+        let at = it
+            .get("at")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let (x, y) = (
+            at.first().and_then(|v| v.as_f64()).unwrap_or(0.0),
+            at.get(1).and_then(|v| v.as_f64()).unwrap_or(0.0),
+        );
+        at_pt
+            .entry(Key::of(x, y))
+            .or_default()
+            .push(format!("label:{}", it["text"].as_str().unwrap_or("")));
     }
-    for it in d.get("power").and_then(|v| v.as_array()).cloned().unwrap_or_default() {
-        let at = it.get("at").and_then(|v| v.as_array()).cloned().unwrap_or_default();
-        let (x, y) = (at.first().and_then(|v| v.as_f64()).unwrap_or(0.0), at.get(1).and_then(|v| v.as_f64()).unwrap_or(0.0));
-        at_pt.entry(Key::of(x, y)).or_default().push(format!("power:{}", it["net"].as_str().unwrap_or("")));
+    for it in d
+        .get("power")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default()
+    {
+        let at = it
+            .get("at")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let (x, y) = (
+            at.first().and_then(|v| v.as_f64()).unwrap_or(0.0),
+            at.get(1).and_then(|v| v.as_f64()).unwrap_or(0.0),
+        );
+        at_pt
+            .entry(Key::of(x, y))
+            .or_default()
+            .push(format!("power:{}", it["net"].as_str().unwrap_or("")));
     }
-    let wires = d.get("wires").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+    let wires = d
+        .get("wires")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
     let mut ends: HashMap<Key, Vec<String>> = HashMap::new();
     for w in &wires {
         if let Some(o) = w.as_object() {
@@ -1218,7 +1469,9 @@ pub fn annotate_wires(d: &mut Value, base: Option<&Design>) {
                     a.first().and_then(|v| v.as_f64()).unwrap_or(0.0),
                     a.get(1).and_then(|v| v.as_f64()).unwrap_or(0.0),
                 );
-                ends.entry(k).or_default().push(o["id"].as_str().unwrap_or("").to_string());
+                ends.entry(k)
+                    .or_default()
+                    .push(o["id"].as_str().unwrap_or("").to_string());
             }
         }
     }
@@ -1239,12 +1492,23 @@ pub fn annotate_wires(d: &mut Value, base: Option<&Design>) {
                 a.get(1).and_then(|v| v.as_f64()).unwrap_or(0.0),
             );
             touches.extend(at_pt.get(&k).cloned().unwrap_or_default());
-            touches.extend(ends.get(&k).cloned().unwrap_or_default().into_iter().filter(|x| *x != id));
+            touches.extend(
+                ends.get(&k)
+                    .cloned()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|x| *x != id),
+            );
         }
-        o.insert("touches".into(), json!(touches.into_iter().collect::<Vec<_>>()));
+        o.insert(
+            "touches".into(),
+            json!(touches.into_iter().collect::<Vec<_>>()),
+        );
         out.push(Value::Object(o));
     }
-    d.as_object_mut().unwrap().insert("wires".into(), Value::Array(out));
+    d.as_object_mut()
+        .unwrap()
+        .insert("wires".into(), Value::Array(out));
 }
 
 /// Every intended net of a netlist design must come out as exactly one connected net.
@@ -1252,22 +1516,34 @@ pub fn netlist_mismatch(d: &Value, nets: &BTreeMap<String, BTreeSet<String>>) ->
     let mut intended: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for p in parts_of(d) {
         let lib_id = part_field(&p, "lib").and_then(|v| v.as_str()).unwrap_or("");
-        let Some(info) = index().get(lib_id) else { continue };
+        let Some(info) = index().get(lib_id) else {
+            continue;
+        };
         if info.power || lib_id.starts_with("power:") || lib_id.ends_with(":PWR_FLAG") {
             continue;
         }
         let mut canon: HashMap<String, String> = HashMap::new();
         for pin in &info.pins {
-            canon.entry(pin.number.clone()).or_insert_with(|| pin.number.clone());
+            canon
+                .entry(pin.number.clone())
+                .or_insert_with(|| pin.number.clone());
             if !pin.name.is_empty() {
-                canon.entry(pin.name.clone()).or_insert_with(|| pin.number.clone());
+                canon
+                    .entry(pin.name.clone())
+                    .or_insert_with(|| pin.number.clone());
             }
         }
-        let pins: Map<String, Value> =
-            part_field(&p, "pins").and_then(|v| v.as_object()).cloned().unwrap_or_default();
+        let pins: Map<String, Value> = part_field(&p, "pins")
+            .and_then(|v| v.as_object())
+            .cloned()
+            .unwrap_or_default();
         for (num, spec) in pins {
             let spec = match &spec {
-                Value::Object(o) => o.get("net").or_else(|| o.get("power")).and_then(|v| v.as_str()).unwrap_or(""),
+                Value::Object(o) => o
+                    .get("net")
+                    .or_else(|| o.get("power"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(""),
                 Value::String(s) => s.as_str(),
                 _ => "",
             };
@@ -1275,7 +1551,10 @@ pub fn netlist_mismatch(d: &Value, nets: &BTreeMap<String, BTreeSet<String>>) ->
                 continue;
             }
             let n = canon.get(&num).cloned().unwrap_or(num.clone());
-            intended.entry(spec.to_string()).or_default().insert(format!("{}.{n}", part_id(&p)));
+            intended
+                .entry(spec.to_string())
+                .or_default()
+                .insert(format!("{}.{n}", part_id(&p)));
         }
     }
     let mut where_: HashMap<&String, &String> = HashMap::new();

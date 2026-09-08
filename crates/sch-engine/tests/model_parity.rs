@@ -25,10 +25,18 @@ fn design_json_round_trip_matches_python() {
         let name = entry.file_name().to_string_lossy().to_string();
         let raw = read(&raw_path);
         let want = read(&want_path);
-        assert_eq!(normalize_json(&raw), want["normalized"], "{name}: normalize_json");
+        assert_eq!(
+            normalize_json(&raw),
+            want["normalized"],
+            "{name}: normalize_json"
+        );
         let des = design_from_json(&raw, None);
         assert_eq!(des.to_json(false), want["plain"], "{name}: to_json()");
-        assert_eq!(des.to_json(true), want["with_ids"], "{name}: to_json(with_ids)");
+        assert_eq!(
+            des.to_json(true),
+            want["with_ids"],
+            "{name}: to_json(with_ids)"
+        );
         checked += 1;
     }
     assert!(checked >= 15, "only {checked} fixtures had model goldens");
@@ -39,18 +47,34 @@ fn apply_patch_matches_python() {
     let g = read(&fixtures().join("patch.json"));
     let (out, errs) = apply_patch(&g["base"], &g["patch"]);
     assert_eq!(out, g["result"], "patched design");
-    let want: Vec<String> = g["errors"].as_array().unwrap().iter().map(|e| e.as_str().unwrap().into()).collect();
+    let want: Vec<String> = g["errors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e.as_str().unwrap().into())
+        .collect();
     assert_eq!(errs, want, "patch errors");
 }
 
 /// `round_py` / `round_py_dp` against 4000 Python `round()` results.
 #[test]
 fn python_round_matches_on_4000_values() {
-    let cases: Vec<Vec<f64>> = serde_json::from_value(read(&fixtures().join("roundfuzz.json"))).unwrap();
+    let cases: Vec<Vec<f64>> =
+        serde_json::from_value(read(&fixtures().join("roundfuzz.json"))).unwrap();
     for c in &cases {
         assert_eq!(sch_engine::model::round_py(c[0]), c[1], "round({})", c[0]);
-        assert_eq!(sch_engine::model::round_py_dp(c[0], 3), c[2], "round({},3)", c[0]);
-        assert_eq!(sch_engine::model::round_py_dp(c[0], 4), c[3], "round({},4)", c[0]);
+        assert_eq!(
+            sch_engine::model::round_py_dp(c[0], 3),
+            c[2],
+            "round({},3)",
+            c[0]
+        );
+        assert_eq!(
+            sch_engine::model::round_py_dp(c[0], 4),
+            c[3],
+            "round({},4)",
+            c[0]
+        );
     }
     assert!(cases.len() > 3000);
 }

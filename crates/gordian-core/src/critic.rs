@@ -36,6 +36,7 @@ const REFERENCE: &str = "human sheet rated 9";
 pub const SAMPLES: usize = 7;
 
 /// One review: the rounded mean, the mean, every sample and one coherent verdict.
+#[derive(Clone)]
 pub struct Review {
     pub score: f64,
     pub mean: f64,

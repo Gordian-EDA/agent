@@ -41,9 +41,7 @@ fn stm32f405rg_exposes_oscillator_alternates() {
         eprintln!("SKIP");
         return;
     };
-    let symbol = table
-        .symbol("MCU_ST_STM32F4:STM32F405RGTx")
-        .unwrap();
+    let symbol = table.symbol("MCU_ST_STM32F4:STM32F405RGTx").unwrap();
     let ph0 = symbol.pins.iter().find(|pin| pin.number == "5").unwrap();
     assert_eq!(ph0.name, "PH0");
     assert!(ph0.alternates.iter().any(|name| name == "RCC_OSC_IN"));

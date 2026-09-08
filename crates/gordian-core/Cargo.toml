@@ -34,4 +34,5 @@ resvg.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+kicad = { path = "../kicad" }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

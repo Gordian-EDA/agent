@@ -28,6 +28,11 @@ col of output-side parts; decoupling caps in a row next to the IC; symmetric hal
 blocks of 3-12 parts; compact gaps (4-6 passives, 6-8 around ICs); balanced blocks (wider than tall, never a long
 column); unused units of an IC in a row beside that IC's power unit; titles for blocks. Do not change part ids or nets."#;
 
+/// Layouts asked for per round. They are drawn and graded concurrently, so two
+/// candidates cost one candidate's wall time and roughly double the chance that
+/// a round beats the score it started from.
+const CANDIDATES: usize = 2;
+
 /// What a polish pass produced.
 #[derive(Default)]
 pub struct Composed {
@@ -82,48 +87,69 @@ pub async fn compose(client: &dyn Provider, pass: Pass<'_>) -> Result<Composed> 
             ));
             break;
         }
-        let Some(layout) = ask(client, &current, &critique, latest_grid(out_dir, round)).await?
-        else {
-            break;
-        };
-        current["layout"] = layout;
+        // The two model calls and every grade of the round run concurrently, so a
+        // round explores CANDIDATES layouts for the wall time of one.
+        let grid = latest_grid(out_dir, round);
+        let layouts = futures::future::join_all(
+            (0..CANDIDATES).map(|_| ask(client, &current, &critique, grid.clone())),
+        )
+        .await;
         done += 1;
 
-        let sheet = out_dir.join(format!("c{round}.kicad_sch"));
-        let report = match sch::build(lib, &current, &sheet) {
-            Ok(report) => report,
-            Err(error) => {
-                event(format!("compose round {round}: build failed: {error:#}"));
-                break;
+        let mut built = Vec::new();
+        for (k, layout) in layouts.into_iter().enumerate() {
+            let Some(layout) = layout? else { continue };
+            let mut candidate = current.clone();
+            candidate["layout"] = layout;
+            let sheet = out_dir.join(format!("c{round}_{k}.kicad_sch"));
+            let report = match sch::build(lib, &candidate, &sheet) {
+                Ok(report) => report,
+                Err(error) => {
+                    event(format!("compose {round}.{k}: build failed: {error:#}"));
+                    continue;
+                }
+            };
+            if !report.issues.is_empty() {
+                event(format!(
+                    "compose {round}.{k}: {} issue(s), discarded",
+                    report.issues.len()
+                ));
+                continue;
             }
-        };
-        if !report.issues.is_empty() {
-            event(format!(
-                "compose round {round}: {} issue(s), discarded",
-                report.issues.len()
-            ));
-            continue;
+            let clean = sheet.with_extension("png");
+            let grid = out_dir.join(format!("c{round}_{k}_grid.png"));
+            let rendered = render::sheet(kicad_cli, &sheet, &clean, &grid)?;
+            let summary = part_summary(&report.raw);
+            built.push((k, sheet, candidate, rendered, summary, report.warnings.is_empty()));
         }
-        let stem = sheet.with_extension("");
-        let clean = stem.with_extension("png");
-        let grid = out_dir.join(format!("c{round}_grid.png"));
-        let rendered = render::sheet(kicad_cli, &sheet, &clean, &grid)?;
-        let engine_clean = report.warnings.is_empty();
-        let Some(review) = critic::review(
-            client,
-            &rendered.clean,
-            &part_summary(&report.raw),
-            engine_clean,
-        )
-        .await?
-        else {
+        if built.is_empty() {
             break;
-        };
-        event(format!("compose round {round}: {}", review.event()));
-        critique = critic::defect_lines(&review);
-        let beaten = best.as_ref().map_or(baseline, |(score, _, _, _)| *score);
-        if review.mean > beaten {
-            best = Some((review.mean, sheet, current.clone(), review));
+        }
+        let graded = futures::future::join_all(
+            built
+                .iter()
+                .map(|(_, _, _, rendered, summary, clean)| {
+                    critic::review(client, &rendered.clean, summary, *clean)
+                }),
+        )
+        .await;
+
+        let mut round_best: Option<(f64, Value, Review)> = None;
+        for ((k, sheet, candidate, ..), review) in built.into_iter().zip(graded) {
+            let Some(review) = review? else { continue };
+            event(format!("compose {round}.{k}: {}", review.event()));
+            let beaten = best.as_ref().map_or(baseline, |(score, _, _, _)| *score);
+            if review.mean > beaten {
+                best = Some((review.mean, sheet, candidate.clone(), review.clone()));
+            }
+            if round_best.as_ref().is_none_or(|(s, ..)| review.mean > *s) {
+                round_best = Some((review.mean, candidate, review));
+            }
+        }
+        // The next round works from the round's best layout and its defects.
+        if let Some((_, candidate, review)) = round_best {
+            current = candidate;
+            critique = critic::defect_lines(&review);
         }
     }
 
@@ -144,16 +170,20 @@ pub async fn compose(client: &dyn Provider, pass: Pass<'_>) -> Result<Composed> 
 /// and a conservative guess before the first one has finished.
 fn round_cost(started: Instant, done: usize) -> Duration {
     if done == 0 {
-        Duration::from_secs(45)
+        // A round is two model calls plus a seven-read grade of each candidate;
+        // measured at 70-75 s, and a round that cannot finish is wasted entirely.
+        Duration::from_secs(75)
     } else {
         started.elapsed() / done as u32
     }
 }
 
+/// The render the composer is shown: the newest grid image a round wrote.
 fn latest_grid(out_dir: &Path, round: usize) -> Option<PathBuf> {
     (0..round)
         .rev()
-        .map(|r| out_dir.join(format!("c{r}_grid.png")))
+        .flat_map(|r| (0..CANDIDATES).map(move |k| (r, k)))
+        .map(|(r, k)| out_dir.join(format!("c{r}_{k}_grid.png")))
         .find(|p| p.is_file())
 }
 
@@ -205,7 +235,7 @@ mod tests {
     #[test]
     fn the_first_round_is_costed_conservatively_and_then_by_measurement() {
         let started = Instant::now() - Duration::from_secs(60);
-        assert_eq!(round_cost(started, 0), Duration::from_secs(45));
+        assert_eq!(round_cost(started, 0), Duration::from_secs(75));
         assert!(round_cost(started, 2) >= Duration::from_secs(29));
     }
 }

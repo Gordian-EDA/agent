@@ -37,7 +37,10 @@ pub struct Key(i64, i64);
 
 impl Key {
     pub fn of(x: f64, y: f64) -> Key {
-        Key((r2(x) * 100.0).round() as i64, (r2(y) * 100.0).round() as i64)
+        Key(
+            (r2(x) * 100.0).round() as i64,
+            (r2(y) * 100.0).round() as i64,
+        )
     }
     pub fn xy(self) -> (f64, f64) {
         (self.0 as f64 / 100.0, self.1 as f64 / 100.0)
@@ -49,7 +52,10 @@ fn num(v: f64) -> Sexp {
 }
 
 fn font(size: f64, bold: bool, hide: bool, justify: &str) -> Sexp {
-    let mut f = vec![Sexp::sym("font"), Sexp::List(vec![Sexp::sym("size"), num(size), num(size)])];
+    let mut f = vec![
+        Sexp::sym("font"),
+        Sexp::List(vec![Sexp::sym("size"), num(size), num(size)]),
+    ];
     if bold {
         f.push(Sexp::List(vec![Sexp::sym("bold"), Sexp::sym("yes")]));
     }
@@ -79,7 +85,10 @@ pub fn ground_like(net: &str) -> bool {
     let n = net.to_uppercase();
     n.ends_with("GND")
         || n.starts_with("GND")
-        || matches!(n.as_str(), "VSS" | "VSSA" | "AGND" | "DGND" | "PGND" | "0V" | "EARTH" | "VEE")
+        || matches!(
+            n.as_str(),
+            "VSS" | "VSSA" | "AGND" | "DGND" | "PGND" | "0V" | "EARTH" | "VEE"
+        )
 }
 
 /// The power symbol that draws `net`: its own symbol when one exists, else a generic GND/VCC.
@@ -88,7 +97,11 @@ pub fn power_lib_for(net: &str, lib_symbols: &std::collections::BTreeMap<String,
     if lib_symbols.contains_key(&cand) || index().get(&cand).is_some() {
         return cand;
     }
-    if ground_like(net) { "power:GND".into() } else { "power:VCC".into() }
+    if ground_like(net) {
+        "power:GND".into()
+    } else {
+        "power:VCC".into()
+    }
 }
 
 /// A property anchor: `[x, y, stored angle, justify]`.
@@ -102,7 +115,12 @@ pub struct At {
 
 impl At {
     fn new(x: f64, y: f64, rot: i32, justify: &str) -> At {
-        At { x, y, rot, justify: justify.into() }
+        At {
+            x,
+            y,
+            rot,
+            justify: justify.into(),
+        }
     }
     fn from_json(v: &[Value]) -> At {
         At {
@@ -113,16 +131,25 @@ impl At {
         }
     }
     fn round4(&self) -> At {
-        At { x: r4(self.x), y: r4(self.y), rot: self.rot, justify: self.justify.clone() }
+        At {
+            x: r4(self.x),
+            y: r4(self.y),
+            rot: self.rot,
+            justify: self.justify.clone(),
+        }
     }
 }
 
 fn swap_lr(j: &str) -> String {
-    j.replace("left", "\u{1}").replace("right", "left").replace('\u{1}', "right")
+    j.replace("left", "\u{1}")
+        .replace("right", "left")
+        .replace('\u{1}', "right")
 }
 
 fn swap_tb(j: &str) -> String {
-    j.replace("top", "\u{1}").replace("bottom", "top").replace('\u{1}', "bottom")
+    j.replace("top", "\u{1}")
+        .replace("bottom", "top")
+        .replace('\u{1}', "bottom")
 }
 
 /// A visible text the checker measures (the rendered angle and justification, not the stored ones).
@@ -168,14 +195,22 @@ impl Compiler {
     }
 
     fn lib_node(&self, key: &str) -> Option<Sexp> {
-        self.libs.borrow().iter().find(|(k, _)| k == key).map(|(_, n)| n.clone())
+        self.libs
+            .borrow()
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, n)| n.clone())
     }
 
     // ---- library resolution ------------------------------------------
 
     /// The symbol definition behind an instance, embedding its raw node on first use.
     pub fn resolve_lib(&self, lib_id: &str, lib_name: &str) -> Option<Arc<SymbolInfo>> {
-        let key = if lib_name.is_empty() { lib_id.to_string() } else { lib_name.to_string() };
+        let key = if lib_name.is_empty() {
+            lib_id.to_string()
+        } else {
+            lib_name.to_string()
+        };
         if let Some(i) = self.infos.borrow().get(&key) {
             return Some(i.clone());
         }
@@ -189,7 +224,9 @@ impl Compiler {
             node = index().raw_symbol(&lib_id);
         }
         let Some(node) = node else {
-            self.errors.borrow_mut().push(format!("unknown symbol {lib_id}"));
+            self.errors
+                .borrow_mut()
+                .push(format!("unknown symbol {lib_id}"));
             return None;
         };
         if !self.libs.borrow().iter().any(|(k, _)| *k == key) {
@@ -227,18 +264,30 @@ impl Compiler {
             }
         };
         for p in &self.des.parts {
-            let Some(info) = self.resolve_lib(&p.lib, &p.lib_name) else { continue };
+            let Some(info) = self.resolve_lib(&p.lib, &p.lib_name) else {
+                continue;
+            };
             for pin in info.pins_for_unit(p.unit) {
                 if pin.hidden {
                     continue;
                 }
                 let (dx, dy) = rot_point(pin.x, pin.y, p.rot, &p.mirror);
-                push(Key::of(p.at[0] + dx, p.at[1] + dy), (p.id.clone(), pin.number.clone(), pin.etype.clone()));
+                push(
+                    Key::of(p.at[0] + dx, p.at[1] + dy),
+                    (p.id.clone(), pin.number.clone(), pin.etype.clone()),
+                );
             }
         }
         for pw in &self.des.power {
-            let r = if pw.reference.is_empty() { "#PWR".to_string() } else { pw.reference.clone() };
-            push(Key::of(pw.at[0], pw.at[1]), (r, "1".into(), "power_in".into()));
+            let r = if pw.reference.is_empty() {
+                "#PWR".to_string()
+            } else {
+                pw.reference.clone()
+            };
+            push(
+                Key::of(pw.at[0], pw.at[1]),
+                (r, "1".into(), "power_in".into()),
+            );
         }
         out
     }
@@ -251,7 +300,10 @@ impl Compiler {
             .des
             .wires
             .iter()
-            .flat_map(|w| w.windows(2).map(|ab| (Key::of(ab[0][0], ab[0][1]), Key::of(ab[1][0], ab[1][1]))))
+            .flat_map(|w| {
+                w.windows(2)
+                    .map(|ab| (Key::of(ab[0][0], ab[0][1]), Key::of(ab[1][0], ab[1][1])))
+            })
             .collect();
         let mut order: Vec<Key> = Vec::new();
         let mut deg: HashMap<Key, i32> = HashMap::new();
@@ -296,7 +348,13 @@ impl Compiler {
     fn wire_segs(&self) -> Vec<Seg> {
         let mut cache = self.segs.borrow_mut();
         cache
-            .get_or_insert_with(|| self.des.wires.iter().flat_map(|w| w.windows(2).map(|ab| (ab[0], ab[1]))).collect())
+            .get_or_insert_with(|| {
+                self.des
+                    .wires
+                    .iter()
+                    .flat_map(|w| w.windows(2).map(|ab| (ab[0], ab[1])))
+                    .collect()
+            })
             .clone()
     }
 
@@ -308,7 +366,14 @@ impl Compiler {
                 self.des
                     .power
                     .iter()
-                    .map(|pw| [pw.at[0] - 3.0, pw.at[1] - 4.5, pw.at[0] + 3.0, pw.at[1] + 4.5])
+                    .map(|pw| {
+                        [
+                            pw.at[0] - 3.0,
+                            pw.at[1] - 4.5,
+                            pw.at[0] + 3.0,
+                            pw.at[1] + 4.5,
+                        ]
+                    })
                     .collect()
             })
             .clone()
@@ -316,21 +381,42 @@ impl Compiler {
 
     fn box_hit(&self, b: Box4, segs: &[Seg], pboxes: &[Box4]) -> bool {
         segs.iter().any(|(a, c)| seg_in_box(*a, *c, b, 0.2))
-            || pboxes.iter().any(|q| !(b[2] <= q[0] || q[2] <= b[0] || b[3] <= q[1] || q[3] <= b[1]))
+            || pboxes
+                .iter()
+                .any(|q| !(b[2] <= q[0] || q[2] <= b[0] || b[3] <= q[1] || q[3] <= b[1]))
     }
 
     // ---- symbol instance emit --------------------------------------
 
     pub fn emit_part(&self, p: &Part) -> Option<Sexp> {
         let info = self.resolve_lib(&p.lib, &p.lib_name)?;
-        let key = if p.lib_name.is_empty() { p.lib.clone() } else { p.lib_name.clone() };
+        let key = if p.lib_name.is_empty() {
+            p.lib.clone()
+        } else {
+            p.lib_name.clone()
+        };
         let libnode = self.lib_node(&key)?;
-        let uuid = if p.uuid.is_empty() { new_uuid() } else { p.uuid.clone() };
-        let mut node = vec![Sexp::sym("symbol"), Sexp::List(vec![Sexp::sym("lib_id"), Sexp::str(&p.lib)])];
+        let uuid = if p.uuid.is_empty() {
+            new_uuid()
+        } else {
+            p.uuid.clone()
+        };
+        let mut node = vec![
+            Sexp::sym("symbol"),
+            Sexp::List(vec![Sexp::sym("lib_id"), Sexp::str(&p.lib)]),
+        ];
         if !p.lib_name.is_empty() {
-            node.push(Sexp::List(vec![Sexp::sym("lib_name"), Sexp::str(&p.lib_name)]));
+            node.push(Sexp::List(vec![
+                Sexp::sym("lib_name"),
+                Sexp::str(&p.lib_name),
+            ]));
         }
-        node.push(Sexp::List(vec![Sexp::sym("at"), num(p.at[0]), num(p.at[1]), num(p.rot as f64)]));
+        node.push(Sexp::List(vec![
+            Sexp::sym("at"),
+            num(p.at[0]),
+            num(p.at[1]),
+            num(p.rot as f64),
+        ]));
         if !p.mirror.is_empty() {
             node.push(Sexp::List(vec![Sexp::sym("mirror"), Sexp::sym(&p.mirror)]));
         }
@@ -339,7 +425,10 @@ impl Compiler {
             Sexp::List(vec![Sexp::sym("exclude_from_sim"), Sexp::sym("no")]),
             Sexp::List(vec![Sexp::sym("in_bom"), Sexp::sym("yes")]),
             Sexp::List(vec![Sexp::sym("on_board"), Sexp::sym("yes")]),
-            Sexp::List(vec![Sexp::sym("dnp"), Sexp::sym(if p.dnp { "yes" } else { "no" })]),
+            Sexp::List(vec![
+                Sexp::sym("dnp"),
+                Sexp::sym(if p.dnp { "yes" } else { "no" }),
+            ]),
             Sexp::List(vec![Sexp::sym("uuid"), Sexp::str(&uuid)]),
         ]);
 
@@ -348,8 +437,11 @@ impl Compiler {
             .as_ref()
             .map(|v| At::from_json(v))
             .unwrap_or_else(|| self.auto_prop_pos(p, libnode.prop("Reference")));
-        let mut val_at =
-            p.val_at.as_ref().map(|v| At::from_json(v)).unwrap_or_else(|| self.auto_prop_pos(p, libnode.prop("Value")));
+        let mut val_at = p
+            .val_at
+            .as_ref()
+            .map(|v| At::from_json(v))
+            .unwrap_or_else(|| self.auto_prop_pos(p, libnode.prop("Value")));
 
         let pins_u = info.pins_for_unit(p.unit);
         let npins = pins_u.len();
@@ -358,7 +450,9 @@ impl Compiler {
             let bb = info.body_for(p.unit);
             let (top, bot) = (p.at[1] - bb.1.max(bb.3), p.at[1] - bb.1.min(bb.3));
             let powered = |side: &str| {
-                pins_u.iter().any(|pin| pin.side() == side && matches!(pin.etype.as_str(), "power_in" | "power_out"))
+                pins_u.iter().any(|pin| {
+                    pin.side() == side && matches!(pin.etype.as_str(), "power_in" | "power_out")
+                })
             };
             // power symbols above the pins need ~9 units of clearance
             let top_air = if powered("top") { 4.5 } else { 2.0 };
@@ -370,7 +464,11 @@ impl Compiler {
                 val_at.y = r4(val_at.y + bot_air);
             }
         }
-        let axis2 = if npins == 2 { two_pin_axis(&info, p.unit, p.rot, &p.mirror) } else { "" };
+        let axis2 = if npins == 2 {
+            two_pin_axis(&info, p.unit, p.rot, &p.mirror)
+        } else {
+            ""
+        };
         let mut passive_h = (0.0f64, 0i32);
         if p.ref_at.is_none() && npins == 2 && info.ref_prefix != "J" && axis2 == "h" {
             // horizontal passive: reference above and value below the body, both drawn horizontally
@@ -385,7 +483,11 @@ impl Compiler {
         // a wire or power symbol running through the value/reference text moves the text away
         let segs = self.wire_segs();
         let pboxes = self.power_boxes();
-        let value_text = if p.value.is_empty() { info.value.clone() } else { p.value.clone() };
+        let value_text = if p.value.is_empty() {
+            info.value.clone()
+        } else {
+            p.value.clone()
+        };
         let anchored = |txt: &str, at_: &At| -> Box4 {
             let w = 1.27 * 0.95 * txt.chars().count().max(1) as f64 + 1.0;
             let h = 2.6;
@@ -403,7 +505,16 @@ impl Compiler {
         let hit_centred = |txt: &str, at_: &At| {
             let w = 1.27 * 0.95 * txt.chars().count().max(1) as f64 + 1.0;
             let h = 2.6;
-            self.box_hit([at_.x - w / 2.0, at_.y - h / 2.0, at_.x + w / 2.0, at_.y + h / 2.0], &segs, &pboxes)
+            self.box_hit(
+                [
+                    at_.x - w / 2.0,
+                    at_.y - h / 2.0,
+                    at_.x + w / 2.0,
+                    at_.y + h / 2.0,
+                ],
+                &segs,
+                &pboxes,
+            )
         };
 
         let sideways = npins > 2 && (p.rot == 90 || p.rot == 270);
@@ -424,7 +535,9 @@ impl Compiler {
 
         if p.ref_at.is_none()
             && p.val_at.is_none()
-            && ((npins > 3 && p.rot == 0 && p.mirror.is_empty()) || info.ref_prefix == "J" || sideways)
+            && ((npins > 3 && p.rot == 0 && p.mirror.is_empty())
+                || info.ref_prefix == "J"
+                || sideways)
         {
             // reference + value as a stacked pair; try above, beside (either side), below - the
             // first position whose texts are clear of wires wins
@@ -433,7 +546,11 @@ impl Compiler {
             let (bt, bbm) = (p.at[1] - hy, p.at[1] + hy);
             let sides: Vec<&str> = ["top", "bottom", "right", "left"]
                 .into_iter()
-                .filter(|s| pins_u.iter().any(|pin| side_of(dir_of(pin, p.rot, &p.mirror)) == *s))
+                .filter(|s| {
+                    pins_u
+                        .iter()
+                        .any(|pin| side_of(dir_of(pin, p.rot, &p.mirror)) == *s)
+                })
                 .collect();
             let has = |s: &str| sides.contains(&s);
             // texts above/below end at the body edge away from lateral pins (so power stubs stay clear)
@@ -448,9 +565,18 @@ impl Compiler {
             let slot = |name: &str| -> (At, At) {
                 match name {
                     "above" => (At::new(cx, bt - 4.4, sa, cj), At::new(cx, bt - 1.8, sa, cj)),
-                    "below" => (At::new(cx, bbm + 1.8, sa, cj), At::new(cx, bbm + 4.4, sa, cj)),
-                    "right" => (At::new(br + 1.0, bt + 1.0, sa, "left"), At::new(br + 1.0, bt + 3.6, sa, "left")),
-                    _ => (At::new(bl - 1.0, bt + 1.0, sa, "right"), At::new(bl - 1.0, bt + 3.6, sa, "right")),
+                    "below" => (
+                        At::new(cx, bbm + 1.8, sa, cj),
+                        At::new(cx, bbm + 4.4, sa, cj),
+                    ),
+                    "right" => (
+                        At::new(br + 1.0, bt + 1.0, sa, "left"),
+                        At::new(br + 1.0, bt + 3.6, sa, "left"),
+                    ),
+                    _ => (
+                        At::new(bl - 1.0, bt + 1.0, sa, "right"),
+                        At::new(bl - 1.0, bt + 3.6, sa, "right"),
+                    ),
                 }
             };
             let mut cands: Vec<(At, At)> = Vec::new();
@@ -503,20 +629,43 @@ impl Compiler {
             let right = p.at[0] + rot_body(&info, p.unit, p.rot, &p.mirror).0 + 0.9;
             let ang = (-p.rot).rem_euclid(180);
             // KiCad flips the justification back for 180-degree / mirrored text
-            let j = if ((ang + p.rot).rem_euclid(360) == 180) != (p.mirror == "y") { "right" } else { "left" };
+            let j = if ((ang + p.rot).rem_euclid(360) == 180) != (p.mirror == "y") {
+                "right"
+            } else {
+                "left"
+            };
             ref_at = At::new(r4(right), r4(p.at[1] - 1.3), ang, j);
             val_at = At::new(r4(right), r4(p.at[1] + 1.3), ang, j);
         }
 
-        node.push(property("Reference", &p.id, ref_at.x, ref_at.y, ref_at.rot as f64, false, &ref_at.justify));
+        node.push(property(
+            "Reference",
+            &p.id,
+            ref_at.x,
+            ref_at.y,
+            ref_at.rot as f64,
+            false,
+            &ref_at.justify,
+        ));
         let value = if !p.value.is_empty() {
             p.value.clone()
         } else if !info.value.is_empty() {
             info.value.clone()
         } else {
-            p.lib.split_once(':').map(|(_, n)| n.to_string()).unwrap_or_default()
+            p.lib
+                .split_once(':')
+                .map(|(_, n)| n.to_string())
+                .unwrap_or_default()
         };
-        node.push(property("Value", &value, val_at.x, val_at.y, val_at.rot as f64, p.hide_value, &val_at.justify));
+        node.push(property(
+            "Value",
+            &value,
+            val_at.x,
+            val_at.y,
+            val_at.rot as f64,
+            p.hide_value,
+            &val_at.justify,
+        ));
 
         let rendered_justify = |at_: &At| {
             if ((at_.rot + p.rot).rem_euclid(360) == 180) != (p.mirror == "y") {
@@ -548,19 +697,44 @@ impl Compiler {
             });
         }
 
-        let fp = if p.footprint.is_empty() { info.footprint.clone() } else { p.footprint.clone() };
+        let fp = if p.footprint.is_empty() {
+            info.footprint.clone()
+        } else {
+            p.footprint.clone()
+        };
         node.push(property("Footprint", &fp, p.at[0], p.at[1], 0.0, true, ""));
-        let field = |k: &str| p.fields.get(k).and_then(|v| v.as_str()).map(|s| s.to_string());
-        let ds = field("Datasheet")
-            .unwrap_or_else(|| if info.datasheet.is_empty() { "~".into() } else { info.datasheet.clone() });
+        let field = |k: &str| {
+            p.fields
+                .get(k)
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+        };
+        let ds = field("Datasheet").unwrap_or_else(|| {
+            if info.datasheet.is_empty() {
+                "~".into()
+            } else {
+                info.datasheet.clone()
+            }
+        });
         node.push(property("Datasheet", &ds, p.at[0], p.at[1], 0.0, true, ""));
         let desc = field("Description").unwrap_or_else(|| info.description.clone());
-        node.push(property("Description", &desc, p.at[0], p.at[1], 0.0, true, ""));
+        node.push(property(
+            "Description",
+            &desc,
+            p.at[0],
+            p.at[1],
+            0.0,
+            true,
+            "",
+        ));
         for (k, v) in p.fields.iter() {
             if k == "Datasheet" || k == "Description" {
                 continue;
             }
-            let s = v.as_str().map(|s| s.to_string()).unwrap_or_else(|| v.to_string());
+            let s = v
+                .as_str()
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| v.to_string());
             node.push(property(k, &s, p.at[0], p.at[1], 0.0, true, ""));
         }
         for pin in info.pins_for_unit(p.unit) {
@@ -579,12 +753,22 @@ impl Compiler {
         let (lx, ly, mut justify) = match libprop {
             Some(lp) => {
                 let at = lp.child("at");
-                let x = at.and_then(|a| a.as_list()?.get(1)?.as_f64()).unwrap_or(0.0);
-                let y = at.and_then(|a| a.as_list()?.get(2)?.as_f64()).unwrap_or(0.0);
+                let x = at
+                    .and_then(|a| a.as_list()?.get(1)?.as_f64())
+                    .unwrap_or(0.0);
+                let y = at
+                    .and_then(|a| a.as_list()?.get(2)?.as_f64())
+                    .unwrap_or(0.0);
                 let j = lp
                     .child("effects")
                     .and_then(|e| e.child("justify"))
-                    .map(|j| j.as_list().unwrap()[1..].iter().map(|a| a.text()).collect::<Vec<_>>().join(" "))
+                    .map(|j| {
+                        j.as_list().unwrap()[1..]
+                            .iter()
+                            .map(|a| a.text())
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                    })
                     .unwrap_or_default();
                 (x, y, j)
             }
@@ -611,7 +795,11 @@ impl Compiler {
     }
 
     pub fn emit_power(&self, pw: &mut Power, n: usize) -> Option<Sexp> {
-        let mut lib_id = if pw.lib.is_empty() { power_lib_for(&pw.net, &self.des.lib_symbols) } else { pw.lib.clone() };
+        let mut lib_id = if pw.lib.is_empty() {
+            power_lib_for(&pw.net, &self.des.lib_symbols)
+        } else {
+            pw.lib.clone()
+        };
         if !self.des.lib_symbols.contains_key(&lib_id) && index().get(&lib_id).is_none() {
             // generic bar/ground symbol showing the net name
             lib_id = power_lib_for(&pw.net, &self.des.lib_symbols);
@@ -624,7 +812,11 @@ impl Compiler {
             None => (0.0, 0.0),
         };
         let (ax, ay) = (r4(pw.at[0] - px), r4(pw.at[1] - py));
-        let reference = if pw.reference.is_empty() { format!("#PWR{n:03}") } else { pw.reference.clone() };
+        let reference = if pw.reference.is_empty() {
+            format!("#PWR{n:03}")
+        } else {
+            pw.reference.clone()
+        };
         pw.reference = reference.clone();
         let mut node = vec![
             Sexp::sym("symbol"),
@@ -642,7 +834,11 @@ impl Compiler {
             Sexp::List(vec![Sexp::sym("dnp"), Sexp::sym("no")]),
             Sexp::List(vec![
                 Sexp::sym("uuid"),
-                Sexp::str(if pw.uuid.is_empty() { new_uuid() } else { pw.uuid.clone() }),
+                Sexp::str(if pw.uuid.is_empty() {
+                    new_uuid()
+                } else {
+                    pw.uuid.clone()
+                }),
             ]),
         ]);
         let libnode = self.lib_node(&lib_id)?;
@@ -661,9 +857,21 @@ impl Compiler {
             .as_ref()
             .map(|v| At::from_json(v))
             .unwrap_or_else(|| self.auto_prop_pos(&fake, libnode.prop("Value")));
-        let shown = if pw.value.is_empty() { pw.net.clone() } else { pw.value.clone() };
+        let shown = if pw.value.is_empty() {
+            pw.net.clone()
+        } else {
+            pw.value.clone()
+        };
         node.push(property("Reference", &reference, rp.x, rp.y, 0.0, true, ""));
-        node.push(property("Value", &shown, vp.x, vp.y, vp.rot as f64, false, &vp.justify));
+        node.push(property(
+            "Value",
+            &shown,
+            vp.x,
+            vp.y,
+            vp.rot as f64,
+            false,
+            &vp.justify,
+        ));
         self.text_items.borrow_mut().push(TextItem {
             owner: reference.clone(),
             kind: "power".into(),
@@ -676,7 +884,15 @@ impl Compiler {
         });
         node.push(property("Footprint", "", ax, ay, 0.0, true, ""));
         node.push(property("Datasheet", "", ax, ay, 0.0, true, ""));
-        node.push(property("Description", &info.description, ax, ay, 0.0, true, ""));
+        node.push(property(
+            "Description",
+            &info.description,
+            ax,
+            ay,
+            0.0,
+            true,
+            "",
+        ));
         node.push(Sexp::List(vec![
             Sexp::sym("pin"),
             Sexp::str(pin.map(|p| p.number).unwrap_or_else(|| "1".into())),
@@ -711,7 +927,10 @@ impl Compiler {
             let des = &self.des;
             let mut tb = vec![Sexp::sym("title_block")];
             if !des.title.is_empty() {
-                tb.push(Sexp::List(vec![Sexp::sym("title"), Sexp::str(trunc(&des.title, 70))]));
+                tb.push(Sexp::List(vec![
+                    Sexp::sym("title"),
+                    Sexp::str(trunc(&des.title, 70)),
+                ]));
             }
             if !des.date.is_empty() {
                 tb.push(Sexp::List(vec![Sexp::sym("date"), Sexp::str(&des.date)]));
@@ -720,10 +939,17 @@ impl Compiler {
                 tb.push(Sexp::List(vec![Sexp::sym("rev"), Sexp::str(&des.rev)]));
             }
             if !des.company.is_empty() {
-                tb.push(Sexp::List(vec![Sexp::sym("company"), Sexp::str(&des.company)]));
+                tb.push(Sexp::List(vec![
+                    Sexp::sym("company"),
+                    Sexp::str(&des.company),
+                ]));
             }
             for (i, c) in des.comments.iter().take(9).enumerate() {
-                tb.push(Sexp::List(vec![Sexp::sym("comment"), Sexp::Int(i as i64 + 1), Sexp::str(trunc(c, 75))]));
+                tb.push(Sexp::List(vec![
+                    Sexp::sym("comment"),
+                    Sexp::Int(i as i64 + 1),
+                    Sexp::str(trunc(c, 75)),
+                ]));
             }
             if tb.len() > 1 {
                 root.push(Sexp::List(tb));
@@ -733,8 +959,11 @@ impl Compiler {
         let parts = self.des.parts.clone();
         let part_nodes: Vec<Option<Sexp>> = parts.iter().map(|p| self.emit_part(p)).collect();
         let mut power = std::mem::take(&mut self.des.power);
-        let mut used: std::collections::BTreeSet<String> =
-            power.iter().filter(|pw| !pw.reference.is_empty()).map(|pw| pw.reference.clone()).collect();
+        let mut used: std::collections::BTreeSet<String> = power
+            .iter()
+            .filter(|pw| !pw.reference.is_empty())
+            .map(|pw| pw.reference.clone())
+            .collect();
         let mut n = 1usize;
         let mut pwr_nodes: Vec<Option<Sexp>> = Vec::new();
         for pw in power.iter_mut() {
@@ -761,7 +990,13 @@ impl Compiler {
                 Sexp::sym("junction"),
                 Sexp::List(vec![Sexp::sym("at"), num(j[0]), num(j[1])]),
                 Sexp::List(vec![Sexp::sym("diameter"), Sexp::Int(0)]),
-                Sexp::List(vec![Sexp::sym("color"), Sexp::Int(0), Sexp::Int(0), Sexp::Int(0), Sexp::Int(0)]),
+                Sexp::List(vec![
+                    Sexp::sym("color"),
+                    Sexp::Int(0),
+                    Sexp::Int(0),
+                    Sexp::Int(0),
+                    Sexp::Int(0),
+                ]),
                 Sexp::List(vec![Sexp::sym("uuid"), Sexp::str(new_uuid())]),
             ]));
         }
@@ -793,10 +1028,17 @@ impl Compiler {
                 Sexp::List(vec![Sexp::sym("start"), num(r.start[0]), num(r.start[1])]),
                 Sexp::List(vec![Sexp::sym("end"), num(r.end[0]), num(r.end[1])]),
                 stroke(),
-                Sexp::List(vec![Sexp::sym("fill"), Sexp::List(vec![Sexp::sym("type"), Sexp::sym("none")])]),
+                Sexp::List(vec![
+                    Sexp::sym("fill"),
+                    Sexp::List(vec![Sexp::sym("type"), Sexp::sym("none")]),
+                ]),
                 Sexp::List(vec![
                     Sexp::sym("uuid"),
-                    Sexp::str(if r.uuid.is_empty() { new_uuid() } else { r.uuid.clone() }),
+                    Sexp::str(if r.uuid.is_empty() {
+                        new_uuid()
+                    } else {
+                        r.uuid.clone()
+                    }),
                 ]),
             ]));
         }
@@ -805,11 +1047,20 @@ impl Compiler {
                 Sexp::sym("text"),
                 Sexp::str(&t.text),
                 Sexp::List(vec![Sexp::sym("exclude_from_sim"), Sexp::sym("no")]),
-                Sexp::List(vec![Sexp::sym("at"), num(t.at[0]), num(t.at[1]), num(t.rot as f64)]),
+                Sexp::List(vec![
+                    Sexp::sym("at"),
+                    num(t.at[0]),
+                    num(t.at[1]),
+                    num(t.rot as f64),
+                ]),
                 font(t.size, t.bold, false, &t.justify),
                 Sexp::List(vec![
                     Sexp::sym("uuid"),
-                    Sexp::str(if t.uuid.is_empty() { new_uuid() } else { t.uuid.clone() }),
+                    Sexp::str(if t.uuid.is_empty() {
+                        new_uuid()
+                    } else {
+                        t.uuid.clone()
+                    }),
                 ]),
             ]));
         }
@@ -823,12 +1074,25 @@ impl Compiler {
             if l.kind != "local" {
                 node.push(Sexp::List(vec![Sexp::sym("shape"), Sexp::sym(&l.shape)]));
             }
-            node.push(Sexp::List(vec![Sexp::sym("at"), num(l.at[0]), num(l.at[1]), num(l.rot as f64)]));
-            let just = if l.justify.is_empty() { label_justify(l) } else { l.justify.clone() };
+            node.push(Sexp::List(vec![
+                Sexp::sym("at"),
+                num(l.at[0]),
+                num(l.at[1]),
+                num(l.rot as f64),
+            ]));
+            let just = if l.justify.is_empty() {
+                label_justify(l)
+            } else {
+                l.justify.clone()
+            };
             node.push(font(1.27, false, false, &just));
             node.push(Sexp::List(vec![
                 Sexp::sym("uuid"),
-                Sexp::str(if l.uuid.is_empty() { new_uuid() } else { l.uuid.clone() }),
+                Sexp::str(if l.uuid.is_empty() {
+                    new_uuid()
+                } else {
+                    l.uuid.clone()
+                }),
             ]));
             root.push(Sexp::List(node));
         }
@@ -838,9 +1102,16 @@ impl Compiler {
         root.extend(des.extra_nodes.iter().cloned());
         root.push(Sexp::List(vec![
             Sexp::sym("sheet_instances"),
-            Sexp::List(vec![Sexp::sym("path"), Sexp::str("/"), Sexp::List(vec![Sexp::sym("page"), Sexp::str("1")])]),
+            Sexp::List(vec![
+                Sexp::sym("path"),
+                Sexp::str("/"),
+                Sexp::List(vec![Sexp::sym("page"), Sexp::str("1")]),
+            ]),
         ]));
-        root.push(Sexp::List(vec![Sexp::sym("embedded_fonts"), Sexp::sym("no")]));
+        root.push(Sexp::List(vec![
+            Sexp::sym("embedded_fonts"),
+            Sexp::sym("no"),
+        ]));
         sexp::dumps(&Sexp::List(root), 0) + "\n"
     }
 }
@@ -895,7 +1166,11 @@ pub fn seg_in_box(a: [f64; 2], b: [f64; 2], bx: Box4, eps: f64) -> bool {
 pub fn label_justify(l: &Label) -> String {
     let r = l.rot.rem_euclid(360);
     if l.kind == "local" {
-        if r == 0 || r == 90 { "left bottom".into() } else { "right bottom".into() }
+        if r == 0 || r == 90 {
+            "left bottom".into()
+        } else {
+            "right bottom".into()
+        }
     } else if r == 0 || r == 90 {
         "left".into()
     } else {

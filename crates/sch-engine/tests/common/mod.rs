@@ -24,7 +24,10 @@ pub fn fixtures() -> PathBuf {
 }
 
 fn read(p: &Path) -> Value {
-    serde_json::from_str(&std::fs::read_to_string(p).unwrap_or_else(|e| panic!("{}: {e}", p.display()))).unwrap()
+    serde_json::from_str(
+        &std::fs::read_to_string(p).unwrap_or_else(|e| panic!("{}: {e}", p.display())),
+    )
+    .unwrap()
 }
 
 pub fn cases() -> Vec<Case> {
@@ -39,17 +42,26 @@ pub fn cases() -> Vec<Case> {
             raw: read(&dir.join("raw.json")),
             sheet: std::fs::read_to_string(dir.join("sheet.kicad_sch")).ok(),
             report: read(&dir.join("report.json")),
-            extract: if dir.join("extract.json").is_file() { read(&dir.join("extract.json")) } else { Value::Null },
+            extract: if dir.join("extract.json").is_file() {
+                read(&dir.join("extract.json"))
+            } else {
+                Value::Null
+            },
         });
     }
     out.sort_by(|a, b| a.name.cmp(&b.name));
-    assert!(!out.is_empty(), "no fixtures under {}", fixtures().display());
+    assert!(
+        !out.is_empty(),
+        "no fixtures under {}",
+        fixtures().display()
+    );
     out
 }
 
 /// The library index, or `None` when this machine has no KiCad symbols (the test then passes).
 pub fn library() -> Option<Library> {
-    let dir = PathBuf::from(std::env::var("KICAD_SYMBOL_DIR").unwrap_or_else(|_| SYMBOL_DIR.to_string()));
+    let dir =
+        PathBuf::from(std::env::var("KICAD_SYMBOL_DIR").unwrap_or_else(|_| SYMBOL_DIR.to_string()));
     dir.is_dir().then(|| Library::load(&dir).expect("index"))
 }
 

@@ -59,7 +59,8 @@ fn cases() -> Vec<Case> {
 }
 
 fn library() -> Option<Library> {
-    let dir = PathBuf::from(std::env::var("KICAD_SYMBOL_DIR").unwrap_or_else(|_| SYMBOL_DIR.to_string()));
+    let dir =
+        PathBuf::from(std::env::var("KICAD_SYMBOL_DIR").unwrap_or_else(|_| SYMBOL_DIR.to_string()));
     dir.is_dir().then(|| Library::load(&dir).expect("index"))
 }
 
@@ -86,8 +87,10 @@ fn laid_out_geometry_matches_python() {
     for case in cases() {
         let out = tmp.path().join(format!("{}.kicad_sch", case.name));
         let report = sch_engine::build(&lib, &case.design, &out).expect("build");
-        let (got_parts, want_parts) =
-            (canon(report.raw.get("parts").unwrap_or(&Value::Null)), canon(case.raw.get("parts").unwrap_or(&Value::Null)));
+        let (got_parts, want_parts) = (
+            canon(report.raw.get("parts").unwrap_or(&Value::Null)),
+            canon(case.raw.get("parts").unwrap_or(&Value::Null)),
+        );
         if got_parts != want_parts {
             let first = got_parts
                 .as_array()
@@ -100,14 +103,28 @@ fn laid_out_geometry_matches_python() {
         for key in ["power", "wires", "labels", "nc", "texts", "rects"] {
             let (got, want) = (multiset(report.raw.get(key)), multiset(case.raw.get(key)));
             if got != want {
-                let missing: Vec<&String> = want.keys().filter(|k| !got.contains_key(*k)).take(2).collect();
-                let extra: Vec<&String> = got.keys().filter(|k| !want.contains_key(*k)).take(2).collect();
-                failures.push(format!("{}: {key} differs (missing {missing:?}, extra {extra:?})", case.name));
+                let missing: Vec<&String> = want
+                    .keys()
+                    .filter(|k| !got.contains_key(*k))
+                    .take(2)
+                    .collect();
+                let extra: Vec<&String> = got
+                    .keys()
+                    .filter(|k| !want.contains_key(*k))
+                    .take(2)
+                    .collect();
+                failures.push(format!(
+                    "{}: {key} differs (missing {missing:?}, extra {extra:?})",
+                    case.name
+                ));
             }
         }
         let want_paper = case.report["paper"].as_str().unwrap();
         if report.paper != want_paper {
-            failures.push(format!("{}: paper {} vs {want_paper}", case.name, report.paper));
+            failures.push(format!(
+                "{}: paper {} vs {want_paper}",
+                case.name, report.paper
+            ));
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
@@ -127,10 +144,22 @@ fn netlist_matches_python() {
             .as_object()
             .unwrap()
             .iter()
-            .map(|(k, v)| (k.clone(), v.as_array().unwrap().iter().map(|p| p.as_str().unwrap().into()).collect()))
+            .map(|(k, v)| {
+                (
+                    k.clone(),
+                    v.as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|p| p.as_str().unwrap().into())
+                        .collect(),
+                )
+            })
             .collect();
         let named = |m: &BTreeMap<String, BTreeSet<String>>| -> BTreeMap<String, BTreeSet<String>> {
-            m.iter().filter(|(k, _)| !k.starts_with("N$")).map(|(k, v)| (k.clone(), v.clone())).collect()
+            m.iter()
+                .filter(|(k, _)| !k.starts_with("N$"))
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect()
         };
         let anon = |m: &BTreeMap<String, BTreeSet<String>>| -> BTreeSet<Vec<String>> {
             m.iter()
@@ -146,7 +175,12 @@ fn netlist_matches_python() {
         }
         let want_issues = case.report["issues"].as_array().unwrap().len();
         if report.issues.len() != want_issues {
-            failures.push(format!("{}: {} issues vs {want_issues}: {:?}", case.name, report.issues.len(), report.issues));
+            failures.push(format!(
+                "{}: {} issues vs {want_issues}: {:?}",
+                case.name,
+                report.issues.len(),
+                report.issues
+            ));
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
@@ -169,12 +203,27 @@ fn compiled_sheet_matches_python_modulo_uuids() {
         let got = sheet_elements(&std::fs::read_to_string(&out).unwrap());
         let want = sheet_elements(&std::fs::read_to_string(&want_path).unwrap());
         if got != want {
-            let missing: Vec<&String> = want.keys().filter(|k| !got.contains_key(*k)).take(2).collect();
-            let extra: Vec<&String> = got.keys().filter(|k| !want.contains_key(*k)).take(2).collect();
-            failures.push(format!("{}: missing {missing:?}, extra {extra:?}", case.name));
+            let missing: Vec<&String> = want
+                .keys()
+                .filter(|k| !got.contains_key(*k))
+                .take(2)
+                .collect();
+            let extra: Vec<&String> = got
+                .keys()
+                .filter(|k| !want.contains_key(*k))
+                .take(2)
+                .collect();
+            failures.push(format!(
+                "{}: missing {missing:?}, extra {extra:?}",
+                case.name
+            ));
         }
     }
-    assert!(failures.is_empty(), "sheets differ:\n{}", failures.join("\n"));
+    assert!(
+        failures.is_empty(),
+        "sheets differ:\n{}",
+        failures.join("\n")
+    );
 }
 
 /// Top-level sheet elements as a multiset of their text, with every `uuid` node dropped.
@@ -183,19 +232,31 @@ fn sheet_elements(text: &str) -> BTreeMap<String, usize> {
         let s = s.strip_prefix('/').unwrap_or(s);
         s.len() == 36
             && s.bytes().enumerate().all(|(i, c)| {
-                if matches!(i, 8 | 13 | 18 | 23) { c == b'-' } else { c.is_ascii_hexdigit() }
+                if matches!(i, 8 | 13 | 18 | 23) {
+                    c == b'-'
+                } else {
+                    c.is_ascii_hexdigit()
+                }
             })
     }
     fn is_auto_ref(s: &str) -> bool {
-        s.len() > 4 && (s.starts_with("#PWR") || s.starts_with("#FLG")) && s[4..].bytes().all(|c| c.is_ascii_digit())
+        s.len() > 4
+            && (s.starts_with("#PWR") || s.starts_with("#FLG"))
+            && s[4..].bytes().all(|c| c.is_ascii_digit())
     }
     fn strip(node: &sch_engine::sexp::Sexp) -> sch_engine::sexp::Sexp {
         match node {
             sch_engine::sexp::Sexp::List(items) => sch_engine::sexp::Sexp::List(
-                items.iter().filter(|c| c.tag() != "uuid").map(strip).collect(),
+                items
+                    .iter()
+                    .filter(|c| c.tag() != "uuid")
+                    .map(strip)
+                    .collect(),
             ),
             // the sheet-path uuid appears as an atom inside (instances (project (path "/<uuid>" ..)))
-            sch_engine::sexp::Sexp::Str(s) if is_uuid(s) => sch_engine::sexp::Sexp::Str("<uuid>".into()),
+            sch_engine::sexp::Sexp::Str(s) if is_uuid(s) => {
+                sch_engine::sexp::Sexp::Str("<uuid>".into())
+            }
             // auto-annotated power/flag references are numbered in the order the symbols were
             // emitted, which Python leaves to `set` iteration
             sch_engine::sexp::Sexp::Str(s) if is_auto_ref(s) => {
@@ -207,7 +268,8 @@ fn sheet_elements(text: &str) -> BTreeMap<String, usize> {
     let root = sch_engine::sexp::loads(text).expect("sheet parses");
     let mut m = BTreeMap::new();
     for child in root.as_list().unwrap().iter().filter(|c| c.is_list()) {
-        *m.entry(sch_engine::sexp::dumps(&strip(child), 0)).or_insert(0) += 1;
+        *m.entry(sch_engine::sexp::dumps(&strip(child), 0))
+            .or_insert(0) += 1;
     }
     m
 }

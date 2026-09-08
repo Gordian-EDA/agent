@@ -58,7 +58,8 @@ fn explicit_cli_and_library_paths_are_selected() {
     std::fs::write(&cli, "#!/bin/sh\necho 10.0.5\n").unwrap();
     std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o755)).unwrap();
 
-    let env = KicadInstallation::detect_with(Some(&symbols), Some(&footprints), Some(&cli)).unwrap();
+    let env =
+        KicadInstallation::detect_with(Some(&symbols), Some(&footprints), Some(&cli)).unwrap();
 
     assert_eq!(env.version(), "10.0.5");
     assert_eq!(env.major_version(), Some(10));

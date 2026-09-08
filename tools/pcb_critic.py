@@ -187,7 +187,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("image")
     ap.add_argument("--circuit", help="one-line description of the intended circuit")
-    ap.add_argument("--model", default=os.environ.get("CRITIC_MODEL", "anthropic/claude-opus-4-8"))
+    ap.add_argument("--model", default=os.environ.get("CRITIC_MODEL", "gpt-5.6-luna"))
     ap.add_argument("--layers-note", help="extra note about the render's layer colours")
     ap.add_argument("--drc-clean", action="store_true",
                     help="KiCAD DRC confirms 0 clearance/short/unconnected violations; "

@@ -13,6 +13,9 @@ use std::sync::Arc;
 
 /// Label stub length.
 pub const STUB: f64 = 3.0;
+
+/// Pins fanning off one side of a part into one net, in first-seen order.
+type PinFanout = ((Dir, String), Vec<([f64; 2], Dir)>);
 /// Power stub length.
 pub const PSTUB: f64 = 2.0;
 pub const BLOCK_GAP_X: f64 = 8.0;
@@ -47,7 +50,10 @@ pub const TWO_PIN_HORIZONTAL_ROT: [(&str, i32); 12] = [
 ];
 
 pub fn two_pin_horizontal_rot(lib: &str) -> Option<i32> {
-    TWO_PIN_HORIZONTAL_ROT.iter().find(|(n, _)| *n == lib).map(|(_, v)| *v)
+    TWO_PIN_HORIZONTAL_ROT
+        .iter()
+        .find(|(n, _)| *n == lib)
+        .map(|(_, v)| *v)
 }
 
 #[derive(Debug, Clone)]
@@ -127,7 +133,11 @@ pub fn flag_at_symbol_clear() {
 pub fn info(lib: &str) -> Result<Arc<SymbolInfo>, LayoutError> {
     extra_infos_get(lib)
         .or_else(|| index().get(lib))
-        .ok_or_else(|| LayoutError(format!("unknown symbol '{lib}' - use search_symbols to find the right lib id")))
+        .ok_or_else(|| {
+            LayoutError(format!(
+                "unknown symbol '{lib}' - use search_symbols to find the right lib id"
+            ))
+        })
 }
 
 pub fn pin_pos(pin: &crate::symlib::Pin, at: [f64; 2], rot: i32, mirror: &str) -> [f64; 2] {
@@ -184,7 +194,11 @@ pub struct PartOpts {
 
 impl PartOpts {
     pub fn new(rot: i32) -> PartOpts {
-        PartOpts { rot, unit: 1, ..Default::default() }
+        PartOpts {
+            rot,
+            unit: 1,
+            ..Default::default()
+        }
     }
 }
 
@@ -301,7 +315,13 @@ impl Geo {
     pub fn add_text(&mut self, text: &str, at: [f64; 2], size: f64, bold: bool) {
         let text = if !bold && size <= 1.5 {
             text.split('\n')
-                .map(|par| if par.chars().count() > 60 { fill(par, 60) } else { par.to_string() })
+                .map(|par| {
+                    if par.chars().count() > 60 {
+                        fill(par, 60)
+                    } else {
+                        par.to_string()
+                    }
+                })
                 .collect::<Vec<_>>()
                 .join("\n")
         } else {
@@ -314,7 +334,8 @@ impl Geo {
         d.insert("bold".into(), json!(bold));
         self.texts.push(d);
         let lines: Vec<&str> = text.split('\n').collect();
-        let w = 0.95 * size / 1.27 * lines.iter().map(|l| l.chars().count()).max().unwrap_or(0) as f64;
+        let w =
+            0.95 * size / 1.27 * lines.iter().map(|l| l.chars().count()).max().unwrap_or(0) as f64;
         let h = 1.5 * size / 1.27 * lines.len() as f64;
         self.boxes.push([at[0], at[1] - h, at[0] + w, at[1]]);
     }
@@ -334,9 +355,17 @@ impl Geo {
     pub fn translate(&mut self, dx: f64, dy: f64) {
         let t = |p: &Value| -> Value {
             let a = p.as_array().unwrap();
-            json!([a[0].as_f64().unwrap_or(0.0) + dx, a[1].as_f64().unwrap_or(0.0) + dy])
+            json!([
+                a[0].as_f64().unwrap_or(0.0) + dx,
+                a[1].as_f64().unwrap_or(0.0) + dy
+            ])
         };
-        for group in [&mut self.parts, &mut self.power, &mut self.labels, &mut self.texts] {
+        for group in [
+            &mut self.parts,
+            &mut self.power,
+            &mut self.labels,
+            &mut self.texts,
+        ] {
             for it in group.iter_mut() {
                 let v = t(&it["at"]);
                 it.insert("at".into(), v);
@@ -374,7 +403,9 @@ impl Geo {
     /// The raw design JSON. Coordinates that landed on whole grid units are written as integers,
     /// the way the Python engine's integer arithmetic does.
     pub fn to_json(&self) -> Value {
-        let objs = |v: &Vec<Map<String, Value>>| Value::Array(v.iter().cloned().map(Value::Object).collect());
+        let objs = |v: &Vec<Map<String, Value>>| {
+            Value::Array(v.iter().cloned().map(Value::Object).collect())
+        };
         let mut out = json!({
             "parts": objs(&self.parts),
             "power": objs(&self.power),
@@ -433,7 +464,11 @@ fn fill(text: &str, width: usize) -> String {
             }
             if cur.is_empty() {
                 // break a word longer than the width
-                let cut = word.char_indices().nth(width).map(|(i, _)| i).unwrap_or(word.len());
+                let cut = word
+                    .char_indices()
+                    .nth(width)
+                    .map(|(i, _)| i)
+                    .unwrap_or(word.len());
                 lines.push(word[..cut].to_string());
                 word = &word[cut..];
                 if word.is_empty() {
@@ -454,7 +489,10 @@ pub fn is_gnd(net: &str) -> bool {
     let n = net.to_uppercase();
     n.ends_with("GND")
         || n.starts_with("GND")
-        || matches!(n.as_str(), "VSS" | "VSSA" | "AGND" | "DGND" | "PGND" | "EARTH" | "VEE" | "0V")
+        || matches!(
+            n.as_str(),
+            "VSS" | "VSSA" | "AGND" | "DGND" | "PGND" | "EARTH" | "VEE" | "0V"
+        )
 }
 
 pub fn snap_even(v: f64) -> f64 {
@@ -478,10 +516,19 @@ pub fn flag_next_to(g: &mut Geo, net: &str, pt: [f64; 2], d: Dir) {
     if d.0 == 0 {
         pt = [pt[0], pt[1] - d.1 as f64 * 2.0];
     }
-    let sides: Vec<Dir> = if d.0 == 0 { vec![(1, 0), (-1, 0)] } else { vec![(d.0, 0)] };
+    let sides: Vec<Dir> = if d.0 == 0 {
+        vec![(1, 0), (-1, 0)]
+    } else {
+        vec![(d.0, 0)]
+    };
     for side in sides {
         let far = [pt[0] + side.0 as f64 * 8.0, pt[1]];
-        let box_ = [pt[0].min(far[0]) - 4.5, pt[1] - 6.0, pt[0].max(far[0]) + 4.5, pt[1] + 1.0];
+        let box_ = [
+            pt[0].min(far[0]) - 4.5,
+            pt[1] - 6.0,
+            pt[0].max(far[0]) + 4.5,
+            pt[1] + 1.0,
+        ];
         let n = g.boxes.len().saturating_sub(1);
         if g.boxes[..n].iter().any(|b| overlap_box(box_, *b, 0.0)) {
             continue;
@@ -529,7 +576,10 @@ pub fn power_rot(net: &str, d: Dir) -> i32 {
 }
 
 fn key2(p: [f64; 2]) -> (i64, i64) {
-    (((p[0] * 100.0).round()) as i64, ((p[1] * 100.0).round()) as i64)
+    (
+        ((p[0] * 100.0).round()) as i64,
+        ((p[1] * 100.0).round()) as i64,
+    )
 }
 
 fn spec_str(v: &Value) -> Option<&str> {
@@ -551,16 +601,28 @@ pub fn connect_pins(
     default: &Value,
     skip: &std::collections::BTreeSet<String>,
 ) -> Result<(), LayoutError> {
-    let pins: Vec<&crate::symlib::Pin> = sym.pins_for_unit(unit).into_iter().filter(|p| !p.hidden).collect();
+    let pins: Vec<&crate::symlib::Pin> = sym
+        .pins_for_unit(unit)
+        .into_iter()
+        .filter(|p| !p.hidden)
+        .collect();
     let mut spec_of: HashMap<String, Value> = HashMap::new();
     for (key, spec) in pinmap {
         let matched: Vec<&&crate::symlib::Pin> = {
-            let by_num: Vec<&&crate::symlib::Pin> = pins.iter().filter(|p| p.number == *key).collect();
-            if by_num.is_empty() { pins.iter().filter(|p| p.name == *key).collect() } else { by_num }
+            let by_num: Vec<&&crate::symlib::Pin> =
+                pins.iter().filter(|p| p.number == *key).collect();
+            if by_num.is_empty() {
+                pins.iter().filter(|p| p.name == *key).collect()
+            } else {
+                by_num
+            }
         };
         if matched.is_empty() {
-            let all: String =
-                pins.iter().map(|p| format!("{}={}", p.number, p.name)).collect::<Vec<_>>().join(", ");
+            let all: String = pins
+                .iter()
+                .map(|p| format!("{}={}", p.number, p.name))
+                .collect::<Vec<_>>()
+                .join(", ");
             return Err(LayoutError(format!(
                 "{}: no pin '{}' (pins: {})",
                 sym.lib_id,
@@ -574,12 +636,15 @@ pub fn connect_pins(
     }
 
     // (dir, net) -> [(pos, dir)] in first-seen order
-    let mut groups: Vec<((Dir, String), Vec<([f64; 2], Dir)>)> = Vec::new();
+    let mut groups: Vec<PinFanout> = Vec::new();
     for p in &pins {
         if skip.contains(&p.number) {
             continue;
         }
-        let mut spec = spec_of.get(&p.number).cloned().unwrap_or_else(|| default.clone());
+        let mut spec = spec_of
+            .get(&p.number)
+            .cloned()
+            .unwrap_or_else(|| default.clone());
         if spec.is_null() {
             spec = default.clone();
         }
@@ -588,7 +653,9 @@ pub fn connect_pins(
         if matches!(spec_str(&spec), Some("float" | "wired" | "labelled")) {
             continue;
         }
-        if spec_str(&spec) == Some("nc") || spec.get("nc").and_then(|v| v.as_bool()).unwrap_or(false) {
+        if spec_str(&spec) == Some("nc")
+            || spec.get("nc").and_then(|v| v.as_bool()).unwrap_or(false)
+        {
             g.add_nc(pos);
             continue;
         }
@@ -611,9 +678,18 @@ pub fn connect_pins(
             .get("net")
             .and_then(|v| v.as_str())
             .or_else(|| spec.get("label").and_then(|v| v.as_str()))
-            .ok_or_else(|| LayoutError(format!("{} pin {}: bad spec {}", sym.lib_id, p.number, spec)))?
+            .ok_or_else(|| {
+                LayoutError(format!(
+                    "{} pin {}: bad spec {}",
+                    sym.lib_id, p.number, spec
+                ))
+            })?
             .to_string();
-        let stub = spec.get("stub").and_then(|v| v.as_f64()).unwrap_or(STUB).trunc();
+        let stub = spec
+            .get("stub")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(STUB)
+            .trunc();
         let end = [pos[0] + d.0 as f64 * stub, pos[1] + d.1 as f64 * stub];
         g.add_wire(&[pos, end]);
         g.add_label(
@@ -621,14 +697,19 @@ pub fn connect_pins(
             end,
             rot_label(d),
             spec.get("type").and_then(|v| v.as_str()).unwrap_or("local"),
-            spec.get("shape").and_then(|v| v.as_str()).unwrap_or("input"),
+            spec.get("shape")
+                .and_then(|v| v.as_str())
+                .unwrap_or("input"),
         );
     }
 
     // occupied positions along each side (connected pins) decide where a power stub may turn
     let mut occupied: std::collections::HashSet<(i64, i64)> = Default::default();
     for p in &pins {
-        let spec = spec_of.get(&p.number).cloned().unwrap_or_else(|| default.clone());
+        let spec = spec_of
+            .get(&p.number)
+            .cloned()
+            .unwrap_or_else(|| default.clone());
         if matches!(spec_str(&spec), Some("float" | "nc" | "wired"))
             || spec.is_null()
             || spec.get("nc").and_then(|v| v.as_bool()).unwrap_or(false)
@@ -641,7 +722,8 @@ pub fn connect_pins(
     if sym.ref_prefix == "J" {
         // the connector's reference/value slot must stay clear of power stubs
         let slot = crate::engine::connector_text_slot(sym, unit, rot, mirror);
-        let dirs: std::collections::HashSet<Dir> = pins.iter().map(|p| dir_of(p, rot, mirror)).collect();
+        let dirs: std::collections::HashSet<Dir> =
+            pins.iter().map(|p| dir_of(p, rot, mirror)).collect();
         let lateral = dirs.contains(&(1, 0)) || dirs.contains(&(-1, 0));
         for p in &pins {
             let pos = pin_pos(p, at, rot, mirror);
@@ -654,11 +736,15 @@ pub fn connect_pins(
             }
         }
     }
-    let free = |occupied: &std::collections::HashSet<(i64, i64)>, pt: [f64; 2]| !occupied.contains(&key2(pt));
+    let free = |occupied: &std::collections::HashSet<(i64, i64)>, pt: [f64; 2]| {
+        !occupied.contains(&key2(pt))
+    };
 
     for ((d, net), mut lst) in groups {
         lst.sort_by(|a, b| {
-            (a.0[0], a.0[1]).partial_cmp(&(b.0[0], b.0[1])).unwrap_or(std::cmp::Ordering::Equal)
+            (a.0[0], a.0[1])
+                .partial_cmp(&(b.0[0], b.0[1]))
+                .unwrap_or(std::cmp::Ordering::Equal)
         });
         // split into runs of adjacent pins (distance 2 along the side)
         let mut runs: Vec<Vec<([f64; 2], Dir)>> = Vec::new();
@@ -681,8 +767,10 @@ pub fn connect_pins(
             } else {
                 PSTUB * 2.0
             };
-            let ends: Vec<[f64; 2]> =
-                run.iter().map(|(pos, _)| [pos[0] + d.0 as f64 * stub, pos[1] + d.1 as f64 * stub]).collect();
+            let ends: Vec<[f64; 2]> = run
+                .iter()
+                .map(|(pos, _)| [pos[0] + d.0 as f64 * stub, pos[1] + d.1 as f64 * stub])
+                .collect();
             for (i, (pos, _)) in run.iter().enumerate() {
                 g.add_wire(&[*pos, ends[i]]);
             }
@@ -705,7 +793,11 @@ pub fn connect_pins(
                         flag_next_to(g, &net, ends[0], d);
                     }
                 } else {
-                    let mid = if ends.len() % 2 == 1 { ends[ends.len() / 2] } else { ends[ends.len() / 2 - 1] };
+                    let mid = if ends.len() % 2 == 1 {
+                        ends[ends.len() / 2]
+                    } else {
+                        ends[ends.len() / 2 - 1]
+                    };
                     let far = [mid[0] + d.0 as f64 * PSTUB, mid[1] + d.1 as f64 * PSTUB];
                     g.add_wire(&[mid, far]);
                     if crowded {
@@ -719,14 +811,21 @@ pub fn connect_pins(
             // horizontal stub: turn up for supplies / down for grounds when free
             let want_up = !is_gnd(&net);
             let (first, last) = (run[0].0, run.last().unwrap().0);
-            let mut turn_pt = if want_up { ends[0] } else { *ends.last().unwrap() };
+            let mut turn_pt = if want_up {
+                ends[0]
+            } else {
+                *ends.last().unwrap()
+            };
             let mut check_pin = if want_up { first } else { last };
             let mut dy: f64 = if want_up { -1.0 } else { 1.0 };
             if !(free(&occupied, [check_pin[0], check_pin[1] + 2.0 * dy])
                 && free(&occupied, [check_pin[0], check_pin[1] + 4.0 * dy]))
             {
-                let (alt_pt, alt_pin) =
-                    if want_up { (*ends.last().unwrap(), last) } else { (ends[0], first) };
+                let (alt_pt, alt_pin) = if want_up {
+                    (*ends.last().unwrap(), last)
+                } else {
+                    (ends[0], first)
+                };
                 if free(&occupied, [alt_pin[0], alt_pin[1] - 2.0 * dy])
                     && free(&occupied, [alt_pin[0], alt_pin[1] - 4.0 * dy])
                 {
@@ -780,7 +879,11 @@ pub fn pack_blocks(
     };
     let by = |key: &dyn Fn(usize) -> f64| {
         let mut v: Vec<usize> = (0..n).collect();
-        v.sort_by(|a, b| key(*a).partial_cmp(&key(*b)).unwrap_or(std::cmp::Ordering::Equal));
+        v.sort_by(|a, b| {
+            key(*a)
+                .partial_cmp(&key(*b))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         v
     };
     let orders: Vec<Vec<usize>> = vec![
@@ -793,13 +896,24 @@ pub fn pack_blocks(
     let mut best_score = f64::INFINITY;
     let mut best_blocks: Option<Vec<(String, Geo)>> = None;
     let sheet_aspect = (xmax - x0) / f64::max(1.0, ymax - y0);
-    let fracs: &[f64] = if obstacles.is_empty() { &[1.0, 0.85, 0.7, 0.55] } else { &[1.0] };
+    let fracs: &[f64] = if obstacles.is_empty() {
+        &[1.0, 0.85, 0.7, 0.55]
+    } else {
+        &[1.0]
+    };
     for (oi, order) in orders.iter().enumerate() {
         for frac in fracs {
             let mut trial: Vec<(String, Geo)> = geos.to_vec();
-            let Some(res) =
-                pack_blocks_ordered(&mut trial, order, x0, y0, x0 + (xmax - x0) * frac, ymax, tb, obstacles)
-            else {
+            let Some(res) = pack_blocks_ordered(
+                &mut trial,
+                order,
+                x0,
+                y0,
+                x0 + (xmax - x0) * frac,
+                ymax,
+                tb,
+                obstacles,
+            ) else {
                 continue;
             };
             let bb = res.bbox();
@@ -830,9 +944,22 @@ pub fn pack_blocks(
         let by1 = fmax(&bbs.iter().map(|b| b[3]).collect::<Vec<_>>());
         let (bw, bh) = (bx1 - bx0, by1 - by0);
         let cap = if bbs.len() <= 3 { 1.35 } else { 1.7 };
-        let kx = if bbs.len() > 1 { f64::min(cap, 0.80 * (xmax - x0) / f64::max(1.0, bw)) } else { 1.0 };
-        let ky = if bbs.len() > 1 { f64::min(cap, 0.80 * (ymax - y0) / f64::max(1.0, bh)) } else { 1.0 };
-        for (kx_, ky_) in [(kx, ky), (kx, 1.0), (1.0, ky), ((1.0 + kx) / 2.0, (1.0 + ky) / 2.0)] {
+        let kx = if bbs.len() > 1 {
+            f64::min(cap, 0.80 * (xmax - x0) / f64::max(1.0, bw))
+        } else {
+            1.0
+        };
+        let ky = if bbs.len() > 1 {
+            f64::min(cap, 0.80 * (ymax - y0) / f64::max(1.0, bh))
+        } else {
+            1.0
+        };
+        for (kx_, ky_) in [
+            (kx, ky),
+            (kx, 1.0),
+            (1.0, ky),
+            ((1.0 + kx) / 2.0, (1.0 + ky) / 2.0),
+        ] {
             let (kx_, ky_) = (kx_.max(1.0), ky_.max(1.0));
             if kx_ < 1.02 && ky_ < 1.02 {
                 continue;
@@ -845,7 +972,10 @@ pub fn pack_blocks(
                 g2.translate(snap_even(nx - b[0]), snap_even(ny - b[1]));
                 spread.merge(&g2);
             }
-            if !spread.boxes.iter().any(|b| b[2] > tb.0 - 4.0 && b[3] > tb.1 - 4.0)
+            if !spread
+                .boxes
+                .iter()
+                .any(|b| b[2] > tb.0 - 4.0 && b[3] > tb.1 - 4.0)
                 && spread.boxes.iter().all(|b| b[2] <= xmax && b[3] <= ymax)
             {
                 best = Some(spread);
@@ -865,8 +995,11 @@ pub fn pack_blocks(
             if dx < 0.0 || dy < 0.0 {
                 continue;
             }
-            let boxes: Vec<[f64; 4]> =
-                b.boxes.iter().map(|x| [x[0] + dx, x[1] + dy, x[2] + dx, x[3] + dy]).collect();
+            let boxes: Vec<[f64; 4]> = b
+                .boxes
+                .iter()
+                .map(|x| [x[0] + dx, x[1] + dy, x[2] + dx, x[3] + dy])
+                .collect();
             if !boxes.iter().any(|x| x[2] > tb.0 - 4.0 && x[3] > tb.1 - 4.0)
                 && boxes.iter().all(|x| x[2] <= xmax && x[3] <= ymax)
             {
@@ -908,13 +1041,22 @@ pub fn pack_blocks_ordered(
         let (w, h) = (bb[2] - bb[0], bb[3] - bb[1]);
         let mut cands: Vec<(f64, f64)> = vec![(x0, y0)];
         for r in &corners {
-            for c in [(r[2] + BLOCK_GAP_X, r[1]), (r[0], r[3] + BLOCK_GAP_Y), (r[2] + BLOCK_GAP_X, y0), (x0, r[3] + BLOCK_GAP_Y)] {
-                if !cands.iter().any(|e| *e == c) {
+            for c in [
+                (r[2] + BLOCK_GAP_X, r[1]),
+                (r[0], r[3] + BLOCK_GAP_Y),
+                (r[2] + BLOCK_GAP_X, y0),
+                (x0, r[3] + BLOCK_GAP_Y),
+            ] {
+                if !cands.contains(&c) {
                     cands.push(c);
                 }
             }
         }
-        cands.sort_by(|a, b| (a.1, a.0).partial_cmp(&(b.1, b.0)).unwrap_or(std::cmp::Ordering::Equal));
+        cands.sort_by(|a, b| {
+            (a.1, a.0)
+                .partial_cmp(&(b.1, b.0))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         let mut best: Option<(f64, f64)> = None;
         for (cx, cy) in cands {
             let rect = [cx, cy, cx + w, cy + h];
@@ -946,13 +1088,22 @@ pub fn pack_blocks_ordered(
 /// Occupied rectangles (grid units) of a raw design — obstacles when adding a circuit to a sheet.
 pub fn raw_boxes(raw: &Value) -> Vec<[f64; 4]> {
     let mut boxes: Vec<[f64; 4]> = Vec::new();
-    let list = |k: &str| raw.get(k).and_then(|v| v.as_array()).cloned().unwrap_or_default();
+    let list = |k: &str| {
+        raw.get(k)
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default()
+    };
     for p in list("parts") {
         let lib = p.get("lib").and_then(|v| v.as_str()).unwrap_or("");
         let lib_name = p.get("lib_name").and_then(|v| v.as_str()).unwrap_or(lib);
         let sym = index().get(lib).or_else(|| extra_infos_get(lib_name));
         if let Some(sym) = sym {
-            let at = p.get("at").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+            let at = p
+                .get("at")
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default();
             let at = [
                 at.first().and_then(|v| v.as_f64()).unwrap_or(0.0),
                 at.get(1).and_then(|v| v.as_f64()).unwrap_or(0.0),
@@ -972,13 +1123,24 @@ pub fn raw_boxes(raw: &Value) -> Vec<[f64; 4]> {
         Some([a.first()?.as_f64()?, a.get(1)?.as_f64()?])
     };
     for w in list("wires") {
-        let pts_v = if w.is_object() { w.get("pts").cloned().unwrap_or(Value::Null) } else { w.clone() };
-        let pts: Vec<[f64; 2]> =
-            pts_v.as_array().map(|a| a.iter().filter_map(num_pt).collect()).unwrap_or_default();
+        let pts_v = if w.is_object() {
+            w.get("pts").cloned().unwrap_or(Value::Null)
+        } else {
+            w.clone()
+        };
+        let pts: Vec<[f64; 2]> = pts_v
+            .as_array()
+            .map(|a| a.iter().filter_map(num_pt).collect())
+            .unwrap_or_default();
         if !pts.is_empty() {
             let xs: Vec<f64> = pts.iter().map(|p| p[0]).collect();
             let ys: Vec<f64> = pts.iter().map(|p| p[1]).collect();
-            boxes.push([fmin(&xs) - 0.5, fmin(&ys) - 0.5, fmax(&xs) + 0.5, fmax(&ys) + 0.5]);
+            boxes.push([
+                fmin(&xs) - 0.5,
+                fmin(&ys) - 0.5,
+                fmax(&xs) + 0.5,
+                fmax(&ys) + 0.5,
+            ]);
         }
     }
     for l in list("labels").into_iter().chain(list("power")) {
@@ -991,7 +1153,12 @@ pub fn raw_boxes(raw: &Value) -> Vec<[f64; 4]> {
             let text = t.get("text").and_then(|v| v.as_str()).unwrap_or("");
             let lines: Vec<&str> = text.split('\n').collect();
             let w = lines.iter().map(|l| l.chars().count()).max().unwrap_or(0) as f64;
-            boxes.push([p[0], p[1] - 2.0, p[0] + 0.95 * w + 1.0, p[1] + 2.0 * lines.len() as f64]);
+            boxes.push([
+                p[0],
+                p[1] - 2.0,
+                p[0] + 0.95 * w + 1.0,
+                p[1] + 2.0 * lines.len() as f64,
+            ]);
         }
     }
     boxes
@@ -1019,7 +1186,15 @@ mod tests {
 
     #[test]
     fn snap_even_is_bankers_like_python() {
-        for (v, want) in [(1.0, 0.0), (3.0, 4.0), (5.0, 4.0), (7.0, 8.0), (-1.0, 0.0), (-3.0, -4.0), (2.0, 2.0)] {
+        for (v, want) in [
+            (1.0, 0.0),
+            (3.0, 4.0),
+            (5.0, 4.0),
+            (7.0, 8.0),
+            (-1.0, 0.0),
+            (-3.0, -4.0),
+            (2.0, 2.0),
+        ] {
             assert_eq!(snap_even(v), want, "snap_even({v})");
         }
     }

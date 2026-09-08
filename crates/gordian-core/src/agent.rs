@@ -100,8 +100,8 @@ pub struct Outcome {
     pub seconds: f64,
 }
 
-/// Told the sheet of the first clean build, so a deterministic downstream stage
-/// can start while the model is still running ERC and the review on it.
+/// Told the sheet of every clean build, so a deterministic downstream stage can
+/// start while the model is still running ERC and the review on it.
 pub type OnCleanBuild<'a> = &'a (dyn Fn(&Path) + Sync);
 
 /// One design session over a project directory.
@@ -194,9 +194,10 @@ impl<'a> Agent<'a> {
         })
     }
 
-    /// Call `hook` with the first clean build's sheet, before ERC and the review
-    /// are run on it, so the board stage can start on the finished netlist.
-    pub fn on_first_clean_build(&mut self, hook: OnCleanBuild<'a>) {
+    /// Call `hook` with each clean build's sheet, before ERC and the review are
+    /// run on it, so the board stage always works on the newest netlist and a
+    /// later build does not push the whole board into the last seconds of the run.
+    pub fn on_clean_build(&mut self, hook: OnCleanBuild<'a>) {
         self.on_clean_build = Some(hook);
     }
 
@@ -460,6 +461,13 @@ impl<'a> Agent<'a> {
             .cloned()
             .collect();
         report.issues.retain(|i| !self.baseline_issues.contains(i));
+        let parts_now = part_ids(&report.raw);
+        if let Some(base) = self.base.as_ref() {
+            let was: BTreeSet<String> = base.parts.iter().map(|p| p.id.clone()).collect();
+            report
+                .issues
+                .extend(stranded(&was, &report.netlist, &parts_now));
+        }
         let ok = report.issues.is_empty();
 
         self.last_build = Some(sch_path.clone());
@@ -467,7 +475,7 @@ impl<'a> Agent<'a> {
         self.last_raw = report.raw.clone();
         if ok {
             self.last_ok_build = Some(sch_path.clone());
-            if let Some(hook) = self.on_clean_build.take() {
+            if let Some(hook) = self.on_clean_build {
                 hook(&sch_path);
             }
         }
@@ -500,19 +508,7 @@ impl<'a> Agent<'a> {
             out.push(format!("NETLIST:\n{netlist}"));
         }
         if self.base.is_some() {
-            let now: BTreeSet<String> = report
-                .raw
-                .get("parts")
-                .and_then(Value::as_array)
-                .map(|parts| {
-                    parts
-                        .iter()
-                        .filter_map(|p| p.get("id").and_then(Value::as_str))
-                        .map(str::to_string)
-                        .collect()
-                })
-                .unwrap_or_default();
-            let diff = net_diff(&self.base_nets, &report.netlist, &now);
+            let diff = net_diff(&self.base_nets, &report.netlist, &parts_now);
             out.push(format!(
                 "NET CHANGES vs original:\n{}",
                 if diff.is_empty() { "  none" } else { &diff }
@@ -778,6 +774,60 @@ impl FinishState {
 
 /// Human-readable differences between two netlists; `N$` autonames and pins of
 /// removed parts are ignored.
+/// The references of every part in a laid-out raw design.
+fn part_ids(raw: &Value) -> BTreeSet<String> {
+    raw.get("parts")
+        .and_then(Value::as_array)
+        .map(|parts| {
+            parts
+                .iter()
+                .filter_map(|p| p.get("id").and_then(Value::as_str))
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Edit-mode issues about parts the patch added and did not attach.
+///
+/// A patch adds circuitry *to* a sheet, so a new part that shares no net with
+/// anything that was already there is floating next to the drawing rather than
+/// wired into it, and a pin alone on a net is a wire that leads nowhere. Both
+/// pass every check a fresh design is judged by — the added block is internally
+/// consistent — so edit mode has to say it here.
+fn stranded(
+    was: &BTreeSet<String>,
+    netlist: &BTreeMap<String, BTreeSet<String>>,
+    parts_now: &BTreeSet<String>,
+) -> Vec<String> {
+    let owner = |pin: &str| pin.split('.').next().unwrap_or("").to_string();
+    let added: BTreeSet<&String> = parts_now.iter().filter(|id| !was.contains(*id)).collect();
+    let mut issues = Vec::new();
+    for (net, pins) in netlist {
+        if pins.len() == 1
+            && let Some(pin) = pins.iter().next()
+            && added.contains(&owner(pin))
+        {
+            issues.push(format!(
+                "{pin} is alone on net {net}: the new part's pin connects to nothing. Wire it, or \
+                 join the existing net by putting a label with the SAME name on one of its wires."
+            ));
+        }
+    }
+    for part in &added {
+        let reaches = netlist.values().any(|pins| {
+            pins.iter().any(|p| owner(p) == **part) && pins.iter().any(|p| was.contains(&owner(p)))
+        });
+        if !reaches {
+            issues.push(format!(
+                "the added part {part} shares no net with any part of the original design - it is \
+                 drawn beside the sheet, not connected into it"
+            ));
+        }
+    }
+    issues
+}
+
 fn net_diff(
     old: &BTreeMap<String, BTreeSet<String>>,
     new: &BTreeMap<String, BTreeSet<String>>,

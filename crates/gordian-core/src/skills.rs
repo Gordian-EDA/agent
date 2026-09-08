@@ -11,8 +11,11 @@ const TOP_K: usize = 2;
 
 /// The instruction that frames the starters.
 const FRAMING: &str = "If one of these skills covers the request, ADAPT ITS DESIGN JSON to what was \
-    asked and `build` it FIRST, then fix only what the checks and the review report. Do not start \
-    from a blank sheet when a skill covers the circuit.";
+    asked and `build` it FIRST, then fix only what the checks and the review report. Every lib id, pin key, \
+    footprint and net in a skill is already verified against the installed libraries, so do not look those parts up \
+    again with `search_symbols` or `symbol_info` - go straight to `build`. Check before building that every part of \
+    the netlist appears exactly once in a layout tree. Do not start from a blank sheet when a skill covers the \
+    circuit.";
 
 /// The context block appended to the opening user message, or empty when nothing
 /// in the library matches.

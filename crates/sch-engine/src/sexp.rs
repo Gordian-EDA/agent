@@ -80,20 +80,32 @@ impl Sexp {
     /// All child lists with the given tag.
     pub fn children(&self, tag: &str) -> Vec<&Sexp> {
         self.as_list()
-            .map(|v| v[1.min(v.len())..].iter().filter(|c| c.is_list() && c.tag() == tag).collect())
+            .map(|v| {
+                v[1.min(v.len())..]
+                    .iter()
+                    .filter(|c| c.is_list() && c.tag() == tag)
+                    .collect()
+            })
             .unwrap_or_default()
     }
 
     /// The first child list with the given tag.
     pub fn child(&self, tag: &str) -> Option<&Sexp> {
         let v = self.as_list()?;
-        v[1.min(v.len())..].iter().find(|c| c.is_list() && c.tag() == tag)
+        v[1.min(v.len())..]
+            .iter()
+            .find(|c| c.is_list() && c.tag() == tag)
     }
 
     /// Non-list children (the node's own atoms, tag excluded).
     pub fn atoms(&self) -> Vec<&Sexp> {
         self.as_list()
-            .map(|v| v[1.min(v.len())..].iter().filter(|c| !c.is_list()).collect())
+            .map(|v| {
+                v[1.min(v.len())..]
+                    .iter()
+                    .filter(|c| !c.is_list())
+                    .collect()
+            })
             .unwrap_or_default()
     }
 
@@ -102,12 +114,16 @@ impl Sexp {
         let v = self.as_list()?;
         v[1.min(v.len())..].iter().find(|c| {
             c.tag() == "property"
-                && c.as_list().map(|l| l.len() > 2 && l[1].as_str() == Some(name)).unwrap_or(false)
+                && c.as_list()
+                    .map(|l| l.len() > 2 && l[1].as_str() == Some(name))
+                    .unwrap_or(false)
         })
     }
 
     pub fn prop_value(&self, name: &str) -> Option<String> {
-        self.prop(name).and_then(|p| p.as_list()).map(|l| l[2].text())
+        self.prop(name)
+            .and_then(|p| p.as_list())
+            .map(|l| l[2].text())
     }
 }
 
@@ -159,7 +175,9 @@ pub fn loads(text: &str) -> Option<Sexp> {
                 let raw = &text[start..pos.min(n)];
                 pos += 1;
                 let s = if escaped {
-                    raw.replace("\\\"", "\"").replace("\\n", "\n").replace("\\\\", "\\")
+                    raw.replace("\\\"", "\"")
+                        .replace("\\n", "\n")
+                        .replace("\\\\", "\\")
                 } else {
                     raw.to_string()
                 };
@@ -244,7 +262,11 @@ pub fn fmt_num(v: f64) -> String {
     if s.contains('.') {
         s = s.trim_end_matches('0').trim_end_matches('.').to_string();
     }
-    if s == "-0" || s.is_empty() { "0".into() } else { s }
+    if s == "-0" || s.is_empty() {
+        "0".into()
+    } else {
+        s
+    }
 }
 
 fn esc(s: &str) -> String {
@@ -320,17 +342,26 @@ mod tests {
         let t = "(kicad_sch (version 20250114) (at 1.27 -2.54 90) (name \"a \\\"b\\\"\"))";
         let n = loads(t).unwrap();
         assert_eq!(n.tag(), "kicad_sch");
-        assert_eq!(n.child("version").unwrap().as_list().unwrap()[1], Sexp::Int(20250114));
+        assert_eq!(
+            n.child("version").unwrap().as_list().unwrap()[1],
+            Sexp::Int(20250114)
+        );
         let at = n.child("at").unwrap().as_list().unwrap();
         assert_eq!(at[1].as_f64(), Some(1.27));
         assert_eq!(at[2].as_f64(), Some(-2.54));
-        assert_eq!(n.child("name").unwrap().as_list().unwrap()[1], Sexp::Str("a \"b\"".into()));
+        assert_eq!(
+            n.child("name").unwrap().as_list().unwrap()[1],
+            Sexp::Str("a \"b\"".into())
+        );
         assert!(dumps(&n, 0).contains("\\\"b\\\""));
     }
 
     #[test]
     fn symbols_stay_symbols() {
         let n = loads("(pin passive line 1e 2x)").unwrap();
-        assert_eq!(n.atoms().iter().map(|a| a.text()).collect::<Vec<_>>(), ["passive", "line", "1e", "2x"]);
+        assert_eq!(
+            n.atoms().iter().map(|a| a.text()).collect::<Vec<_>>(),
+            ["passive", "line", "1e", "2x"]
+        );
     }
 }

@@ -107,10 +107,7 @@ impl LibReader {
 
 /// Pins owned by a symbol: direct pins plus pins of all
 /// `<NAME>_<unit>_<bodystyle>` sub-blocks, tagged with their unit number.
-fn own_pins(
-    sym: &Symbol,
-    alternates: Option<&HashMap<String, Vec<String>>>,
-) -> Vec<PinMeta> {
+fn own_pins(sym: &Symbol, alternates: Option<&HashMap<String, Vec<String>>>) -> Vec<PinMeta> {
     let empty = HashMap::new();
     let alternates = alternates.unwrap_or(&empty);
     let mut pins: Vec<PinMeta> = sym
@@ -143,11 +140,7 @@ fn unit_number(block_name: &str) -> Option<u8> {
     parts.next()?.parse().ok()
 }
 
-fn pin_meta(
-    pin: &SymPin,
-    unit: u8,
-    alternates: &HashMap<String, Vec<String>>,
-) -> Option<PinMeta> {
+fn pin_meta(pin: &SymPin, unit: u8, alternates: &HashMap<String, Vec<String>>) -> Option<PinMeta> {
     let etype = match pin.electrical_type.as_deref() {
         Some("power_in") => PinType::PowerInput,
         Some("power_out") => PinType::PowerOutput,
@@ -184,7 +177,11 @@ fn alternate_functions(doc: &CstDocument) -> HashMap<String, HashMap<String, Vec
         return HashMap::new();
     };
     let mut symbols = HashMap::new();
-    for node in items.iter().skip(1).filter(|node| head(node) == Some("symbol")) {
+    for node in items
+        .iter()
+        .skip(1)
+        .filter(|node| head(node) == Some("symbol"))
+    {
         let Some(name) = positional_text(node, 1) else {
             continue;
         };

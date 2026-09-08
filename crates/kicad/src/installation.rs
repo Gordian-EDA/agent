@@ -278,7 +278,10 @@ fn cli_candidates_from(
     path_cli: Option<PathBuf>,
     local_roots: Vec<PathBuf>,
 ) -> Vec<PathBuf> {
-    let mut candidates = environment_cli.into_iter().chain(path_cli).collect::<Vec<_>>();
+    let mut candidates = environment_cli
+        .into_iter()
+        .chain(path_cli)
+        .collect::<Vec<_>>();
     for local in local_roots {
         if let Ok(entries) = std::fs::read_dir(local) {
             let mut app_dirs = entries

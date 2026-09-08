@@ -9,7 +9,11 @@ use sch_engine::check;
 fn strings(v: &serde_json::Value, key: &str) -> Vec<String> {
     v.get(key)
         .and_then(|a| a.as_array())
-        .map(|a| a.iter().filter_map(|s| s.as_str().map(|s| s.to_string())).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(|s| s.as_str().map(|s| s.to_string()))
+                .collect()
+        })
         .unwrap_or_default()
 }
 
@@ -18,15 +22,25 @@ fn report_matches_python() {
     let Some(_lib) = library() else { return };
     let tmp = tempfile::tempdir().unwrap();
     let mut failures = Vec::new();
-    for Case { name, raw, report, .. } in cases() {
-        let built = check::build(&raw, &tmp.path().join(format!("{name}.kicad_sch")), None).unwrap();
+    for Case {
+        name, raw, report, ..
+    } in cases()
+    {
+        let built =
+            check::build(&raw, &tmp.path().join(format!("{name}.kicad_sch")), None).unwrap();
         let want_issues = strings(&report, "issues");
         let want_warnings = strings(&report, "warnings");
         if built.issues != want_issues {
-            failures.push(format!("{name} issues:\n  rust:   {:#?}\n  python: {want_issues:#?}", built.issues));
+            failures.push(format!(
+                "{name} issues:\n  rust:   {:#?}\n  python: {want_issues:#?}",
+                built.issues
+            ));
         }
         if built.warnings != want_warnings {
-            failures.push(format!("{name} warnings:\n  rust:   {:#?}\n  python: {want_warnings:#?}", built.warnings));
+            failures.push(format!(
+                "{name} warnings:\n  rust:   {:#?}\n  python: {want_warnings:#?}",
+                built.warnings
+            ));
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
@@ -39,14 +53,23 @@ fn netlist_matches_python() {
     let Some(_lib) = library() else { return };
     let tmp = tempfile::tempdir().unwrap();
     let mut failures = Vec::new();
-    for Case { name, raw, report, .. } in cases() {
-        let built = check::build(&raw, &tmp.path().join(format!("{name}.kicad_sch")), None).unwrap();
+    for Case {
+        name, raw, report, ..
+    } in cases()
+    {
+        let built =
+            check::build(&raw, &tmp.path().join(format!("{name}.kicad_sch")), None).unwrap();
         let want: std::collections::BTreeMap<String, Vec<String>> =
             serde_json::from_value(report["netlist"].clone()).unwrap();
-        let got: std::collections::BTreeMap<String, Vec<String>> =
-            built.nets.iter().map(|(k, v)| (k.clone(), v.iter().cloned().collect())).collect();
+        let got: std::collections::BTreeMap<String, Vec<String>> = built
+            .nets
+            .iter()
+            .map(|(k, v)| (k.clone(), v.iter().cloned().collect()))
+            .collect();
         if got != want {
-            failures.push(format!("{name} netlist:\n  rust:   {got:#?}\n  python: {want:#?}"));
+            failures.push(format!(
+                "{name} netlist:\n  rust:   {got:#?}\n  python: {want:#?}"
+            ));
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
@@ -57,9 +80,10 @@ fn netlist_matches_python() {
 #[test]
 fn pin_reference_resolution_matches_python() {
     let Some(_lib) = library() else { return };
-    let f: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(common::fixtures().join("pinrefs/pinrefs.json")).unwrap())
-            .unwrap();
+    let f: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(common::fixtures().join("pinrefs/pinrefs.json")).unwrap(),
+    )
+    .unwrap();
 
     let mut d = sch_engine::model::normalize_json(&f["design"]);
     let errors = check::resolve_pin_refs(&mut d, None);
@@ -72,5 +96,8 @@ fn pin_reference_resolution_matches_python() {
 
     let nets: std::collections::BTreeMap<String, std::collections::BTreeSet<String>> =
         serde_json::from_value(f["nets"].clone()).unwrap();
-    assert_eq!(check::netlist_mismatch(&f["design"], &nets), strings(&f, "netlist_mismatch"));
+    assert_eq!(
+        check::netlist_mismatch(&f["design"], &nets),
+        strings(&f, "netlist_mismatch")
+    );
 }

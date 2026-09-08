@@ -10,7 +10,10 @@ use sch_engine::check;
 fn compiled_sheet_matches_python() {
     let Some(_lib) = library() else { return };
     let mut failures = Vec::new();
-    for Case { name, raw, sheet, .. } in cases() {
+    for Case {
+        name, raw, sheet, ..
+    } in cases()
+    {
         let Some(sheet) = sheet else { continue };
         let mut d = raw.clone();
         let errs = check::resolve_pin_refs(&mut d, None);
@@ -23,7 +26,9 @@ fn compiled_sheet_matches_python() {
         if got != want {
             let g: Vec<&str> = got.lines().collect();
             let w: Vec<&str> = want.lines().collect();
-            let first = (0..g.len().max(w.len())).find(|i| g.get(*i) != w.get(*i)).unwrap_or(0);
+            let first = (0..g.len().max(w.len()))
+                .find(|i| g.get(*i) != w.get(*i))
+                .unwrap_or(0);
             failures.push(format!(
                 "{name}: {} vs {} lines, first difference at line {}:\n  rust:   {:?}\n  python: {:?}",
                 g.len(),
@@ -40,11 +45,16 @@ fn compiled_sheet_matches_python() {
 /// KiCad itself must read the Rust sheet the same way it reads the Python one.
 #[test]
 fn erc_matches_python() {
-    let Some(kicad) = common::kicad_cli() else { return };
+    let Some(kicad) = common::kicad_cli() else {
+        return;
+    };
     let Some(_lib) = library() else { return };
     let tmp = tempfile::tempdir().unwrap();
     let mut failures = Vec::new();
-    for Case { name, raw, sheet, .. } in cases() {
+    for Case {
+        name, raw, sheet, ..
+    } in cases()
+    {
         let Some(sheet) = sheet else { continue };
         let ours = tmp.path().join(format!("{name}.kicad_sch"));
         let theirs = tmp.path().join(format!("{name}_py.kicad_sch"));

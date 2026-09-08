@@ -80,7 +80,8 @@ fn compare(name: &str, got: &Value, want: &Value, fails: &mut Vec<String>) {
     for k in ["wires", "labels", "power", "nc", "texts", "rects"] {
         let (x, y) = (multiset(got.get(k)), multiset(want.get(k)));
         if x != y {
-            let only_want: Vec<&String> = y.keys().filter(|e| !x.contains_key(*e)).take(2).collect();
+            let only_want: Vec<&String> =
+                y.keys().filter(|e| !x.contains_key(*e)).take(2).collect();
             let only_got: Vec<&String> = x.keys().filter(|e| !y.contains_key(*e)).take(2).collect();
             fails.push(format!(
                 "{name}: {k} differ ({} vs {}); missing {only_want:?}; extra {only_got:?}",
@@ -122,8 +123,10 @@ fn build_flex_design_matches_python() {
     let mut fails: Vec<String> = Vec::new();
     for name in &names {
         let p = dir.join(name);
-        let d: Value = serde_json::from_str(&std::fs::read_to_string(p.join("design.json")).unwrap()).unwrap();
-        let want: Value = serde_json::from_str(&std::fs::read_to_string(p.join("raw.json")).unwrap()).unwrap();
+        let d: Value =
+            serde_json::from_str(&std::fs::read_to_string(p.join("design.json")).unwrap()).unwrap();
+        let want: Value =
+            serde_json::from_str(&std::fs::read_to_string(p.join("raw.json")).unwrap()).unwrap();
         let (got, errors) = sch_engine::flexlayout::build_flex_design(&d);
         let hard: Vec<&String> = errors.iter().filter(|e| !e.starts_with("note:")).collect();
         if !hard.is_empty() {
@@ -160,17 +163,38 @@ fn raw_element_order_matches_python() {
     let mut fails = Vec::new();
     for name in fixture_names() {
         let p = dir.join(&name);
-        let d: Value = serde_json::from_str(&std::fs::read_to_string(p.join("design.json")).unwrap()).unwrap();
-        let want: Value = serde_json::from_str(&std::fs::read_to_string(p.join("raw.json")).unwrap()).unwrap();
+        let d: Value =
+            serde_json::from_str(&std::fs::read_to_string(p.join("design.json")).unwrap()).unwrap();
+        let want: Value =
+            serde_json::from_str(&std::fs::read_to_string(p.join("raw.json")).unwrap()).unwrap();
         let (got, _) = sch_engine::flexlayout::build_flex_design(&d);
         for k in ["parts", "labels", "nc", "texts", "rects"] {
-            let a: Vec<String> = got.get(k).and_then(|v| v.as_array()).into_iter().flatten().map(canon).collect();
-            let b: Vec<String> = want.get(k).and_then(|v| v.as_array()).into_iter().flatten().map(canon).collect();
+            let a: Vec<String> = got
+                .get(k)
+                .and_then(|v| v.as_array())
+                .into_iter()
+                .flatten()
+                .map(canon)
+                .collect();
+            let b: Vec<String> = want
+                .get(k)
+                .and_then(|v| v.as_array())
+                .into_iter()
+                .flatten()
+                .map(canon)
+                .collect();
             if a != b {
-                let i = a.iter().zip(b.iter()).position(|(x, y)| x != y).unwrap_or(a.len().min(b.len()));
+                let i = a
+                    .iter()
+                    .zip(b.iter())
+                    .position(|(x, y)| x != y)
+                    .unwrap_or(a.len().min(b.len()));
                 fails.push(format!(
                     "{name}/{k}: {} vs {} elems, first diff at {i}:\n    got  {:?}\n    want {:?}",
-                    a.len(), b.len(), a.get(i), b.get(i)
+                    a.len(),
+                    b.len(),
+                    a.get(i),
+                    b.get(i)
                 ));
             }
         }
@@ -191,12 +215,14 @@ fn layout_errors_match_python() {
             continue;
         }
         let name = e.file_name().to_string_lossy().to_string();
-        let report: Value = serde_json::from_str(&std::fs::read_to_string(p.join("report.json")).unwrap()).unwrap();
+        let report: Value =
+            serde_json::from_str(&std::fs::read_to_string(p.join("report.json")).unwrap()).unwrap();
         if !report["layout_failed"].as_bool().unwrap_or(false) {
             continue;
         }
         seen += 1;
-        let d: Value = serde_json::from_str(&std::fs::read_to_string(p.join("design.json")).unwrap()).unwrap();
+        let d: Value =
+            serde_json::from_str(&std::fs::read_to_string(p.join("design.json")).unwrap()).unwrap();
         let (_, errors) = sch_engine::flexlayout::build_flex_design(&d);
         // TODO(S2): PartInst::new's "did you mean" hint does not reproduce Python's difflib
         // get_close_matches ranking yet, so the suggestion list is normalised away here.

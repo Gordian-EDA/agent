@@ -47,7 +47,12 @@ impl BuildReport {
         nets.sort_by(|a, b| (a.0.starts_with("N$"), a.0).cmp(&(b.0.starts_with("N$"), b.0)));
         let mut lines: Vec<String> = nets
             .iter()
-            .map(|(net, pins)| format!("{net}: {}", pins.iter().cloned().collect::<Vec<_>>().join(" ")))
+            .map(|(net, pins)| {
+                format!(
+                    "{net}: {}",
+                    pins.iter().cloned().collect::<Vec<_>>().join(" ")
+                )
+            })
             .collect();
         if lines.len() > limit {
             lines.truncate(limit);
@@ -67,7 +72,9 @@ pub fn build(_lib: &Library, design: &serde_json::Value, out_sch: &Path) -> Resu
         .and_then(|v| v.as_array())
         .is_some_and(|a| a.iter().any(|p| p.get("pins").is_some()));
     if has_pins && !report.netlist.is_empty() {
-        report.issues.extend(check::netlist_mismatch(design, &report.netlist));
+        report
+            .issues
+            .extend(check::netlist_mismatch(design, &report.netlist));
     }
     Ok(report)
 }
@@ -81,7 +88,11 @@ pub fn build_patch(
 ) -> Result<BuildReport> {
     let (mut raw, mut errors) = model::apply_patch(&base.to_json(true), patch);
     if let Some(circuit) = patch.get("add").and_then(|a| a.get("circuit")) {
-        let paper = raw.get("paper").and_then(|p| p.as_str()).unwrap_or("A4").to_string();
+        let paper = raw
+            .get("paper")
+            .and_then(|p| p.as_str())
+            .unwrap_or("A4")
+            .to_string();
         let (next, errs) = engine::add_circuit_to_raw(&raw, circuit, &paper);
         raw = next;
         errors.extend(errs);
@@ -98,9 +109,19 @@ fn finish(
 ) -> Result<BuildReport> {
     let (notes, hard): (Vec<String>, Vec<String>) =
         errors.into_iter().partition(|e| e.starts_with("note:"));
-    let paper = raw.get("paper").and_then(|p| p.as_str()).unwrap_or("A4").to_string();
+    let paper = raw
+        .get("paper")
+        .and_then(|p| p.as_str())
+        .unwrap_or("A4")
+        .to_string();
     if !hard.is_empty() {
-        return Ok(BuildReport { issues: hard, notes, paper, raw, ..Default::default() });
+        return Ok(BuildReport {
+            issues: hard,
+            notes,
+            paper,
+            raw,
+            ..Default::default()
+        });
     }
     let built = check::build(&raw, out_sch, base)?;
     Ok(BuildReport {

@@ -40,7 +40,10 @@ impl Pin {
     /// Far end of the pin (where a wire attaches), in library coordinates.
     pub fn tip(&self) -> (f64, f64) {
         let r = (self.angle as f64).to_radians();
-        (self.x + self.length * r.cos(), self.y + self.length * r.sin())
+        (
+            self.x + self.length * r.cos(),
+            self.y + self.length * r.sin(),
+        )
     }
 }
 
@@ -83,7 +86,10 @@ impl SymbolInfo {
     }
 
     pub fn pins_for_unit(&self, unit: i32) -> Vec<&Pin> {
-        self.pins.iter().filter(|p| p.unit == 0 || p.unit == unit).collect()
+        self.pins
+            .iter()
+            .filter(|p| p.unit == 0 || p.unit == unit)
+            .collect()
     }
 
     /// Pin by number, falling back to a lookup by name.
@@ -98,9 +104,15 @@ impl SymbolInfo {
 
 fn symbol_starts(text: &str) -> Vec<(usize, String)> {
     static RE: OnceLock<regex::Regex> = OnceLock::new();
-    let re = RE.get_or_init(|| regex::Regex::new(r#"(?m)^\t\(symbol "((?:[^"\\]|\\.)*)""#).unwrap());
+    let re =
+        RE.get_or_init(|| regex::Regex::new(r#"(?m)^\t\(symbol "((?:[^"\\]|\\.)*)""#).unwrap());
     re.captures_iter(text)
-        .map(|c| (c.get(0).unwrap().start(), c.get(1).unwrap().as_str().to_string()))
+        .map(|c| {
+            (
+                c.get(0).unwrap().start(),
+                c.get(1).unwrap().as_str().to_string(),
+            )
+        })
         .collect()
 }
 
@@ -122,7 +134,10 @@ fn minmax(v: &[f64]) -> Option<(f64, f64)> {
     if v.is_empty() {
         return None;
     }
-    Some((v.iter().cloned().fold(f64::INFINITY, f64::min), v.iter().cloned().fold(f64::NEG_INFINITY, f64::max)))
+    Some((
+        v.iter().cloned().fold(f64::INFINITY, f64::min),
+        v.iter().cloned().fold(f64::NEG_INFINITY, f64::max),
+    ))
 }
 
 #[derive(Default)]
@@ -141,37 +156,75 @@ pub fn parse_symbol_node(node: &Sexp, lib_id: &str) -> SymbolInfo {
     let (mut xs, mut ys, mut gxs, mut gys) = (vec![], vec![], vec![], vec![]);
     let mut per_unit: HashMap<i32, UnitAcc> = HashMap::new();
     let mut units = 1;
-    let extends = node.child("extends").and_then(|e| e.as_list()).map(|l| l[1].text()).unwrap_or_default();
+    let extends = node
+        .child("extends")
+        .and_then(|e| e.as_list())
+        .map(|l| l[1].text())
+        .unwrap_or_default();
 
     for sub in node.children("symbol") {
-        let subname = sub.as_list().and_then(|l| l.get(1)).map(|v| v.text()).unwrap_or_default();
+        let subname = sub
+            .as_list()
+            .and_then(|l| l.get(1))
+            .map(|v| v.text())
+            .unwrap_or_default();
         let caps = unit_re.captures(&subname);
-        let unit: i32 = caps.as_ref().map(|c| c[1].parse().unwrap_or(0)).unwrap_or(0);
-        let style: i32 = caps.as_ref().map(|c| c[2].parse().unwrap_or(1)).unwrap_or(1);
+        let unit: i32 = caps
+            .as_ref()
+            .map(|c| c[1].parse().unwrap_or(0))
+            .unwrap_or(0);
+        let style: i32 = caps
+            .as_ref()
+            .map(|c| c[2].parse().unwrap_or(1))
+            .unwrap_or(1);
         if style > 1 {
             continue; // skip De Morgan alternates
         }
         units = units.max(unit);
         let acc = per_unit.entry(unit).or_default();
-        for item in sub.as_list().unwrap().iter().skip(1).filter(|i| i.is_list()) {
+        for item in sub
+            .as_list()
+            .unwrap()
+            .iter()
+            .skip(1)
+            .filter(|i| i.is_list())
+        {
             match item.tag() {
                 "pin" => {
                     let l = item.as_list().unwrap();
-                    let at = item.child("at").and_then(|a| a.as_list()).map(|a| a.to_vec()).unwrap_or_default();
+                    let at = item
+                        .child("at")
+                        .and_then(|a| a.as_list())
+                        .map(|a| a.to_vec())
+                        .unwrap_or_default();
                     let hidden = item
                         .child("hide")
                         .and_then(|h| h.as_list())
                         .map(|h| h.get(1).map(|v| v.text()) == Some("yes".into()))
                         .unwrap_or(false)
-                        || l[1..4.min(l.len())].iter().any(|a| a.as_str() == Some("hide"));
+                        || l[1..4.min(l.len())]
+                            .iter()
+                            .any(|a| a.as_str() == Some("hide"));
                     let p = Pin {
-                        number: item.child("number").and_then(|n| n.as_list()).map(|n| n[1].text()).unwrap_or_default(),
-                        name: item.child("name").and_then(|n| n.as_list()).map(|n| n[1].text()).unwrap_or_default(),
+                        number: item
+                            .child("number")
+                            .and_then(|n| n.as_list())
+                            .map(|n| n[1].text())
+                            .unwrap_or_default(),
+                        name: item
+                            .child("name")
+                            .and_then(|n| n.as_list())
+                            .map(|n| n[1].text())
+                            .unwrap_or_default(),
                         etype: l.get(1).map(|v| v.text()).unwrap_or_default(),
                         x: at.get(1).and_then(|v| v.as_f64()).unwrap_or(0.0),
                         y: at.get(2).and_then(|v| v.as_f64()).unwrap_or(0.0),
                         angle: at.get(3).and_then(|v| v.as_f64()).unwrap_or(0.0) as i32,
-                        length: item.child("length").and_then(|n| n.as_list()).and_then(|n| n[1].as_f64()).unwrap_or(2.54),
+                        length: item
+                            .child("length")
+                            .and_then(|n| n.as_list())
+                            .and_then(|n| n[1].as_f64())
+                            .unwrap_or(2.54),
                         unit,
                         hidden,
                     };
@@ -204,10 +257,20 @@ pub fn parse_symbol_node(node: &Sexp, lib_id: &str) -> SymbolInfo {
                     }
                 }
                 "circle" => {
-                    let c = item.child("center").and_then(|c| c.as_list()).map(|c| c.to_vec()).unwrap_or_default();
-                    let r = item.child("radius").and_then(|c| c.as_list()).and_then(|c| c[1].as_f64()).unwrap_or(0.0);
-                    let (cx, cy) =
-                        (c.get(1).and_then(|v| v.as_f64()).unwrap_or(0.0), c.get(2).and_then(|v| v.as_f64()).unwrap_or(0.0));
+                    let c = item
+                        .child("center")
+                        .and_then(|c| c.as_list())
+                        .map(|c| c.to_vec())
+                        .unwrap_or_default();
+                    let r = item
+                        .child("radius")
+                        .and_then(|c| c.as_list())
+                        .and_then(|c| c[1].as_f64())
+                        .unwrap_or(0.0);
+                    let (cx, cy) = (
+                        c.get(1).and_then(|v| v.as_f64()).unwrap_or(0.0),
+                        c.get(2).and_then(|v| v.as_f64()).unwrap_or(0.0),
+                    );
                     gxs.extend([cx - r, cx + r]);
                     acc.gxs.extend([cx - r, cx + r]);
                     gys.extend([cy - r, cy + r]);
@@ -235,14 +298,20 @@ pub fn parse_symbol_node(node: &Sexp, lib_id: &str) -> SymbolInfo {
     if units > 1 {
         let empty = UnitAcc::default();
         let common = per_unit.get(&0).unwrap_or(&empty);
-        let (cxs, cys, cgxs, cgys) =
-            (common.xs.clone(), common.ys.clone(), common.gxs.clone(), common.gys.clone());
+        let (cxs, cys, cgxs, cgys) = (
+            common.xs.clone(),
+            common.ys.clone(),
+            common.gxs.clone(),
+            common.gys.clone(),
+        );
         for (u, acc) in per_unit.iter() {
             if *u == 0 {
                 continue;
             }
-            let axs: Vec<f64> = [acc.xs.clone(), acc.gxs.clone(), cxs.clone(), cgxs.clone()].concat();
-            let ays: Vec<f64> = [acc.ys.clone(), acc.gys.clone(), cys.clone(), cgys.clone()].concat();
+            let axs: Vec<f64> =
+                [acc.xs.clone(), acc.gxs.clone(), cxs.clone(), cgxs.clone()].concat();
+            let ays: Vec<f64> =
+                [acc.ys.clone(), acc.gys.clone(), cys.clone(), cgys.clone()].concat();
             let bgx: Vec<f64> = [acc.gxs.clone(), cgxs.clone()].concat();
             let bgy: Vec<f64> = [acc.gys.clone(), cgys.clone()].concat();
             if let (Some((x0, x1)), Some((y0, y1))) = (minmax(&axs), minmax(&ays)) {
@@ -360,13 +429,17 @@ impl Library {
         let cache = cache_path(symbol_dir);
         if let Ok(bytes) = std::fs::read(&cache)
             && bytes.starts_with(CACHE_MAGIC)
-            && let Ok((symbols, _)) = bincode::serde::decode_from_slice::<
-                std::collections::BTreeMap<String, Arc<SymbolInfo>>,
-                _,
-            >(&bytes[CACHE_MAGIC.len()..], bincode::config::standard())
+            && let Ok((symbols, _)) =
+                bincode::serde::decode_from_slice::<
+                    std::collections::BTreeMap<String, Arc<SymbolInfo>>,
+                    _,
+                >(&bytes[CACHE_MAGIC.len()..], bincode::config::standard())
             && !symbols.is_empty()
         {
-            let lib = Library { symbols, text_cache: Default::default() };
+            let lib = Library {
+                symbols,
+                text_cache: Default::default(),
+            };
             set_index(lib.clone());
             return Ok(lib);
         }
@@ -374,7 +447,8 @@ impl Library {
         if let Some(dir) = cache.parent() {
             let _ = std::fs::create_dir_all(dir);
         }
-        if let Ok(bytes) = bincode::serde::encode_to_vec(&idx.symbols, bincode::config::standard()) {
+        if let Ok(bytes) = bincode::serde::encode_to_vec(&idx.symbols, bincode::config::standard())
+        {
             let _ = std::fs::write(&cache, [CACHE_MAGIC, &bytes].concat());
         }
         set_index(idx.clone());
@@ -392,7 +466,10 @@ impl Library {
             .collect();
         entries.sort();
         for p in entries {
-            let name = p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+            let name = p
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default();
             if name.ends_with(".kicad_sym") && p.is_file() {
                 units.push((name.trim_end_matches(".kicad_sym").to_string(), vec![p]));
             } else if name.ends_with(".kicad_symdir") && p.is_dir() {
@@ -415,9 +492,13 @@ impl Library {
             .map(|(libname, files)| {
                 let mut out = Vec::new();
                 for fp in files {
-                    let Ok(text) = std::fs::read_to_string(fp) else { continue };
+                    let Ok(text) = std::fs::read_to_string(fp) else {
+                        continue;
+                    };
                     for (name, s, e) in split_library(&text) {
-                        let Some(node) = sexp::loads(&text[s..e]) else { continue };
+                        let Some(node) = sexp::loads(&text[s..e]) else {
+                            continue;
+                        };
                         let lib_id = format!("{libname}:{name}");
                         let mut info = parse_symbol_node(&node, &lib_id);
                         info.file = fp.to_string_lossy().to_string();
@@ -494,7 +575,11 @@ impl Library {
             let pitems = pnode.as_list()?.to_vec();
             let mut props: Vec<(String, Sexp)> = Vec::new();
             let push_prop = |props: &mut Vec<(String, Sexp)>, c: &Sexp| {
-                let name = c.as_list().and_then(|l| l.get(1)).map(|v| v.text()).unwrap_or_default();
+                let name = c
+                    .as_list()
+                    .and_then(|l| l.get(1))
+                    .map(|v| v.text())
+                    .unwrap_or_default();
                 match props.iter_mut().find(|(n, _)| *n == name) {
                     Some(slot) => slot.1 = c.clone(),
                     None => props.push((name, c.clone())),
@@ -510,7 +595,10 @@ impl Library {
                     push_prop(&mut props, c);
                 }
             }
-            let merged: Vec<Sexp> = pitems.into_iter().filter(|c| c.tag() != "property").collect();
+            let merged: Vec<Sexp> = pitems
+                .into_iter()
+                .filter(|c| c.tag() != "property")
+                .collect();
             let (mut head, mut tail): (Vec<Sexp>, Vec<Sexp>) = (Vec::new(), Vec::new());
             for c in merged {
                 if matches!(c.tag(), "symbol" | "embedded_fonts") {
@@ -558,7 +646,9 @@ impl Library {
     /// The pin-table text `symbol_info` returns to the model.
     pub fn info_text(&self, lib_id: &str, unit: Option<u32>) -> Result<String> {
         let info = self.get(lib_id).ok_or_else(|| {
-            anyhow::anyhow!("unknown symbol '{lib_id}' - use search_symbols to find the right lib id")
+            anyhow::anyhow!(
+                "unknown symbol '{lib_id}' - use search_symbols to find the right lib id"
+            )
         })?;
         Ok(describe(&info, unit.map(|u| u as i32)))
     }
@@ -576,7 +666,11 @@ impl Library {
             toks.insert(raw.concat());
         }
         toks.retain(|t| !t.is_empty());
-        let lib_filter = if ql.contains(':') { ql.split(':').next().unwrap().to_string() } else { String::new() };
+        let lib_filter = if ql.contains(':') {
+            ql.split(':').next().unwrap().to_string()
+        } else {
+            String::new()
+        };
 
         let mut scored: Vec<(f64, String)> = Vec::new();
         for (lib_id, info) in &self.symbols {
@@ -585,7 +679,7 @@ impl Library {
                 continue;
             }
             let nl = name.to_lowercase();
-            let squashed = nl.replace('_', "").replace('-', "");
+            let squashed = nl.replace(['_', '-'], "");
             let name_toks: std::collections::BTreeSet<String> = split_toks_keep_empty(&nl);
             let kwl = info.keywords.to_lowercase();
             let kw_toks: std::collections::BTreeSet<String> = split_toks_keep_empty(&kwl);
@@ -643,8 +737,16 @@ impl Library {
                     continue;
                 }
                 for lib_id in self.symbols.keys() {
-                    let nl = lib_id.split_once(':').map(|(_, n)| n).unwrap_or("").to_lowercase();
-                    let n = t.chars().zip(nl.chars()).take_while(|(a, b)| a == b).count();
+                    let nl = lib_id
+                        .split_once(':')
+                        .map(|(_, n)| n)
+                        .unwrap_or("")
+                        .to_lowercase();
+                    let n = t
+                        .chars()
+                        .zip(nl.chars())
+                        .take_while(|(a, b)| a == b)
+                        .count();
                     if n >= 5.max((t.len() as f64 * 0.6) as usize) {
                         scored.push((n as f64 - 0.01 * nl.len() as f64, lib_id.clone()));
                     }
@@ -655,14 +757,20 @@ impl Library {
             }
             sort_desc(&mut scored);
         }
-        scored.iter().take(limit).filter_map(|(_, l)| self.symbols.get(l).cloned()).collect()
+        scored
+            .iter()
+            .take(limit)
+            .filter_map(|(_, l)| self.symbols.get(l).cloned())
+            .collect()
     }
 }
 
 /// Python's `sorted(scored, reverse=True)` on (score, lib_id) tuples.
 fn sort_desc(scored: &mut [(f64, String)]) {
     scored.sort_by(|a, b| {
-        b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal).then_with(|| b.1.cmp(&a.1))
+        b.0.partial_cmp(&a.0)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| b.1.cmp(&a.1))
     });
 }
 
@@ -672,12 +780,17 @@ fn is_tok_char(c: char) -> bool {
 
 /// Python `re.split(r"[^a-z0-9.+]+", s)` with empty pieces dropped.
 fn split_toks(s: &str) -> Vec<String> {
-    s.split(|c: char| !is_tok_char(c)).filter(|t| !t.is_empty()).map(|t| t.to_string()).collect()
+    s.split(|c: char| !is_tok_char(c))
+        .filter(|t| !t.is_empty())
+        .map(|t| t.to_string())
+        .collect()
 }
 
 /// Same split but keeping the empty pieces Python's `set(re.split(...))` retains.
 fn split_toks_keep_empty(s: &str) -> std::collections::BTreeSet<String> {
-    s.split(|c: char| !is_tok_char(c)).map(|t| t.to_string()).collect()
+    s.split(|c: char| !is_tok_char(c))
+        .map(|t| t.to_string())
+        .collect()
 }
 
 static INDEX: OnceLock<Library> = OnceLock::new();
@@ -696,7 +809,11 @@ pub fn index() -> &'static Library {
 /// Python `%g` formatting, used by [`describe`].
 fn g(v: f64) -> String {
     if v == 0.0 {
-        return if v.is_sign_negative() { "-0".into() } else { "0".into() };
+        return if v.is_sign_negative() {
+            "-0".into()
+        } else {
+            "0".into()
+        };
     }
     if !v.is_finite() {
         return format!("{v}");
@@ -705,7 +822,11 @@ fn g(v: f64) -> String {
     if !(-4..6).contains(&exp) {
         let s = format!("{v:.5e}");
         let (m, e) = s.split_once('e').unwrap();
-        let m = if m.contains('.') { m.trim_end_matches('0').trim_end_matches('.') } else { m };
+        let m = if m.contains('.') {
+            m.trim_end_matches('0').trim_end_matches('.')
+        } else {
+            m
+        };
         let ev: i32 = e.parse().unwrap_or(0);
         return format!("{}e{}{:02}", m, if ev < 0 { "-" } else { "+" }, ev.abs());
     }
@@ -748,18 +869,27 @@ pub fn describe(info: &SymbolInfo, unit: Option<i32>) -> String {
         _ => (1..=info.units).collect(),
     };
     for u in us {
-        let mut pins: Vec<&Pin> = info.pins.iter().filter(|p| p.unit == 0 || p.unit == u).collect();
+        let mut pins: Vec<&Pin> = info
+            .pins
+            .iter()
+            .filter(|p| p.unit == 0 || p.unit == u)
+            .collect();
         if info.units > 1 {
             lines.push(format!("  unit {u}:"));
         }
         pins.sort_by(|a, b| {
             let key = |p: &Pin| {
                 let s = p.side();
-                let second = if s == "left" || s == "right" { -p.y } else { p.x };
+                let second = if s == "left" || s == "right" {
+                    -p.y
+                } else {
+                    p.x
+                };
                 (s.to_string(), second)
             };
             let (ka, kb) = (key(a), key(b));
-            ka.0.cmp(&kb.0).then(ka.1.partial_cmp(&kb.1).unwrap_or(std::cmp::Ordering::Equal))
+            ka.0.cmp(&kb.0)
+                .then(ka.1.partial_cmp(&kb.1).unwrap_or(std::cmp::Ordering::Equal))
         });
         for p in pins {
             lines.push(format!(

@@ -87,7 +87,10 @@ fn a_descriptive_query_finds_the_family_it_describes() {
     let idx = SymbolIndex::build(dir.symbol_dir()).unwrap();
     for (query, wanted) in [
         ("barrel jack horizontal", "Connector:Barrel_Jack"),
-        ("audio jack 3.5 switch CUI", "Connector_Audio:AudioJack3_SwitchT"),
+        (
+            "audio jack 3.5 switch CUI",
+            "Connector_Audio:AudioJack3_SwitchT",
+        ),
         ("micro SD card socket det", "Connector:Micro_SD_Card_Det1"),
     ] {
         let hits = idx.search(query, 5);

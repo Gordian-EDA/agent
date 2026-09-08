@@ -85,18 +85,19 @@ Parts connected only within a block are wired directly; connections across block
   single worst defect the reviewer looks for.
 
 # Workflow
-1. Plan the circuit (blocks, parts, values, nets). Look up EVERY lib id with `search_symbols`; confirm pin names/numbers
-   with `symbol_info` before writing pin maps. Never guess a lib id or pin name. Batch these lookups: issue all the
-   searches you need in one turn, then all the `symbol_info` calls in the next.
-2. `build` the whole design. Read ISSUES / NETLIST carefully - verify every net has exactly the intended pins - and
-   fix problems (wrong pins, missing connections) with another `build`. `build` is fast: iterate on it freely.
-3. When a build has no ISSUES: `erc` (fix real electrical errors) and `review` (independent visual critic with a
-   render you can inspect; `render` alone just shows the sheet). If a block looks messy, change its tree: put connected
-   parts next to each other along the flow, align pin lines with "col"/"row" nesting, increase gaps where texts touch,
-   split large blocks; then build, erc, review again.
-4. `finish` with a short summary once the last build is clean, ERC has no errors and the review scored >= 8.
-   Be efficient: the whole run is on a wall clock, so aim for TWO builds and ONE review. Call `erc` and `review` in the
-   same turn, and prefer finishing a good sheet over chasing a cosmetic point.
+1. Plan the circuit (blocks, parts, values, nets). Look up any lib id you are not certain of with `search_symbols`
+   and confirm its pin names/numbers with `symbol_info` before writing pin maps - but skip both for parts whose lib id
+   AND pin keys a skill starter already gives you, they are verified against these libraries. Never guess a lib id or
+   pin name. Batch what you do look up: all the searches in one turn, then all the `symbol_info` calls in the next.
+2. `build` the WHOLE design in one call, layout included. Read the report: ISSUES are errors, and the notes
+   ("parts not in any layout tree", "block X is very wide") are layout mistakes worth one more build. Verify every net
+   has exactly the intended pins.
+3. Fix everything the build report says BEFORE you grade the drawing: never call `review` on a build whose report
+   still lists a note, a warning or an issue you intend to change. Then call `erc` and `review` in the SAME turn.
+4. `finish` with a short summary as soon as the build is clean, ERC has no errors and the review scored >= 8.
+   BUDGET: the whole run is on a wall clock and the board is routed in the background from your newest clean build, so
+   every extra build throws that work away. Aim for ONE build and ONE review; take a second build only for a real
+   defect (a wrong net, an ERC error, a block the reviewer called broken), never for a cosmetic point.
 "#;
 
 const EDIT_SECTION: &str = r#"

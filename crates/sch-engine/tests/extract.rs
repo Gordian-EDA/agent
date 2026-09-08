@@ -24,7 +24,9 @@ fn round_trip_is_byte_for_byte() {
         if got != want {
             let g: Vec<&str> = got.lines().collect();
             let w: Vec<&str> = want.lines().collect();
-            let first = (0..g.len().max(w.len())).find(|i| g.get(*i) != w.get(*i)).unwrap_or(0);
+            let first = (0..g.len().max(w.len()))
+                .find(|i| g.get(*i) != w.get(*i))
+                .unwrap_or(0);
             failures.push(format!(
                 "{name}: first difference at line {}:\n  round-tripped: {:?}\n  original:      {:?}",
                 first + 1,
@@ -41,8 +43,16 @@ fn round_trip_is_byte_for_byte() {
 fn parsed_design_matches_python() {
     let Some(_lib) = library() else { return };
     let mut failures = Vec::new();
-    for Case { name, sheet, extract, .. } in cases() {
-        let (Some(sheet), Some(want)) = (sheet, extract.as_object()) else { continue };
+    for Case {
+        name,
+        sheet,
+        extract,
+        ..
+    } in cases()
+    {
+        let (Some(sheet), Some(want)) = (sheet, extract.as_object()) else {
+            continue;
+        };
         let des = sch_engine::extract::parse(&sheet).unwrap();
         let n = |k: &str| want.get(k).and_then(|v| v.as_u64()).unwrap_or(0) as usize;
         let mut got: Vec<(String, String)> = vec![
@@ -59,9 +69,12 @@ fn parsed_design_matches_python() {
                 failures.push(format!("{name}: {k}: rust {v:?} vs python {w:?}"));
             }
         }
-        for (k, v) in
-            [("n_parts", des.parts.len()), ("n_wires", des.wires.len()), ("n_power", des.power.len()), ("n_labels", des.labels.len())]
-        {
+        for (k, v) in [
+            ("n_parts", des.parts.len()),
+            ("n_wires", des.wires.len()),
+            ("n_power", des.power.len()),
+            ("n_labels", des.labels.len()),
+        ] {
             if want.contains_key(k) && v != n(k) {
                 failures.push(format!("{name}: {k}: rust {v} vs python {}", n(k)));
             }
@@ -78,7 +91,9 @@ fn parsed_design_matches_python() {
                     .map(|p| p.uuid.clone())
                     .unwrap_or_default();
                 if got != u.as_str().unwrap_or("") {
-                    failures.push(format!("{name}: part {key} uuid: rust {got:?} vs python {u:?}"));
+                    failures.push(format!(
+                        "{name}: part {key} uuid: rust {got:?} vs python {u:?}"
+                    ));
                 }
             }
         }
