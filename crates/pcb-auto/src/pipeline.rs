@@ -534,6 +534,11 @@ pub fn auto_layout(
         )),
         Err(e) => run.note(format!("freerouting failed: {}", first_line(&e.to_string()))),
     }
+    // silk last of the geometry passes: it walks around finished copper and finished courtyards
+    let labels = crate::silk::tidy_refs(&mut board);
+    if labels > 0 {
+        run.note(format!("silkscreen: {labels} reference designator(s) reseated"));
+    }
     let (attached, pruned) = crate::tidy::tidy(&mut board);
     if attached + pruned > 0 {
         run.note(format!(

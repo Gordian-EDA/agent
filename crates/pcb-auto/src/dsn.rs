@@ -563,7 +563,9 @@ fn analyse_pour(board: &Board, copper: &[String], islands: &[Island]) -> Pour {
     }
 
     // The net's main copper is the island that feeds the most pins, largest first on a tie;
-    // every other island is a crumb.
+    // every other island is a crumb. Per NET, not per layer: Freerouting reads two planes of one
+    // net as one piece of copper, so naming the pour on both sides lets it "connect" a stranded
+    // pin by touching the other side's plane, and the board comes back nine connections worse.
     let mut by_net: HashMap<&str, Vec<usize>> = HashMap::new();
     for (i, island) in islands.iter().enumerate() {
         by_net.entry(island.net.as_str()).or_default().push(i);
@@ -598,12 +600,21 @@ fn analyse_pour(board: &Board, copper: &[String], islands: &[Island]) -> Pour {
         }
     }
 
-    // One pin per island stays in `(network)`; the rest are already joined by the copper.
+    // A pin is only held out of `(network)` when it sits on the net's MAIN plane, and then only
+    // after the first: the plane is what joins those. A pin on a crumb is NOT connected by the
+    // pour -- the crumb may be adrift -- so it stays in the network and the router has to reach
+    // it. Treating a crumb like the plane is what left ground pads stranded after the fill
+    // fragmented around the routing.
     let mut seen: HashMap<&str, HashSet<usize>> = HashMap::new();
     for (j, (name, _, _, _, key)) in pads.iter().enumerate() {
-        let Some(i) = (0..islands.len()).find(|&i| islands[i].net == *name && on[i].contains(&j)) else {
+        let Some(i) = (0..islands.len())
+            .find(|&i| islands[i].net == *name && on[i].contains(&j))
+        else {
             continue;
         };
+        if !main_of.contains(&i) {
+            continue;
+        }
         if !seen.entry(name.as_str()).or_default().insert(i) {
             pour.covered.entry(name.clone()).or_default().insert(*key);
         }

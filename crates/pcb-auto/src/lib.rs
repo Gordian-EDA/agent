@@ -19,6 +19,7 @@ pub mod rules;
 pub mod schematic;
 pub mod ses;
 pub mod sexp;
+pub mod silk;
 pub mod stitch;
 pub mod tidy;
 
