@@ -15,6 +15,7 @@ pub mod pipeline;
 pub mod place;
 pub mod project;
 pub mod render;
+pub mod repair;
 pub mod rules;
 pub mod schematic;
 pub mod ses;

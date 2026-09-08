@@ -649,6 +649,18 @@ fn stitch(run: &mut Run, board: &mut Board, pcb: &Path, clearance: f64) -> anyho
     if total > 0 {
         run.note(format!("{total} ground stitching via(s)"));
     }
+    // whatever a via could not reach gets a track instead
+    if run.left_s() > 10.0 {
+        match crate::repair::repair_pour(run.kicad, board, pcb, &gnd.name, &board.design_rules()) {
+            Ok(0) => {}
+            Ok(n) => {
+                board.strip_zone_fills();
+                board.save(Some(pcb))?;
+                run.note(format!("{n} stranded pour piece(s) routed back to the plane"));
+            }
+            Err(e) => run.note(format!("pour repair failed: {}", first_line(&e.to_string()))),
+        }
+    }
     Ok(())
 }
 

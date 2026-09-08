@@ -50,12 +50,17 @@ fn main() -> anyhow::Result<()> {
         let n = stitch_pours(&kicad, &mut board, &pcb, "GND", clearance)?;
         board.strip_zone_fills();
         board.save(Some(&pcb))?;
+        let rules = board.design_rules();
+        let mut board = Board::load(&pcb)?;
+        let r2 = pcb_auto::repair::repair_pour(&kicad, &mut board, &pcb, "GND", &rules)?;
+        board.strip_zone_fills();
+        board.save(Some(&pcb))?;
         let c = check(&kicad, &pcb)?;
         println!(
-            "round {r}: {n} via(s) -> unconnected {} completion {:.3} drc errors {}",
+            "round {r}: {n} via(s), {r2} repair(s) -> unconnected {} completion {:.3} drc errors {}",
             c.unconnected, c.completion, c.errors
         );
-        if n == 0 {
+        if n == 0 && r2 == 0 {
             break;
         }
     }

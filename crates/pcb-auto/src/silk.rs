@@ -21,6 +21,8 @@ const RING_TRIES: usize = 6;
 
 /// The size KiCad gives reference text when the footprint states none.
 const DEFAULT_TEXT_MM: f64 = 1.0;
+/// The smaller size a label falls back to when nothing full-size fits; still fab-legible.
+const SMALL_TEXT_MM: f64 = 0.8;
 
 fn text_size(node: &crate::sexp::SList) -> f64 {
     node.find("effects")
@@ -115,15 +117,14 @@ pub fn tidy_refs(board: &mut Board) -> usize {
         if prop.find("hide").is_some() {
             continue;
         }
-        let size = text_size(prop);
+        let full = text_size(prop);
         let court = f.courtyard_bbox();
         if !court.valid() {
             continue;
         }
-        let probe = label_box((0.0, 0.0), &f.ref_, size);
-        let (half_w, half_h) = (probe.w() / 2.0, probe.h() / 2.0);
-        let ring = candidates(&court, half_w, half_h);
-        let fits = |c: Point, strict: bool| {
+        // A label that cannot find a pocket at full size gets one at the small size fab still
+        // reads, before it is allowed to stand on a neighbour: shrinking is tidier than crowding.
+        let fits = |c: Point, size: f64, strict: bool| {
             let bb = label_box(c, &f.ref_, size);
             bb.x0 >= outline.x0
                 && bb.y0 >= outline.y0
@@ -137,22 +138,28 @@ pub fn tidy_refs(board: &mut Board) -> usize {
                         .iter()
                         .any(|(r, c)| *r != f.ref_ && c.valid() && bb.overlaps(c)))
         };
+        let ring_at = |size: f64| {
+            let probe = label_box((0.0, 0.0), &f.ref_, size);
+            candidates(&court, probe.w() / 2.0, probe.h() / 2.0)
+        };
         // A crowded board runs out of clear pockets. Standing over a neighbour's courtyard is
-        // untidy; standing over its pads is a DRC warning, so the fallback gives up the first.
-        let spot = ring
-            .iter()
-            .copied()
-            .find(|&c| fits(c, true))
-            .or_else(|| ring.iter().copied().find(|&c| fits(c, false)));
-        let Some(spot) = spot else { continue };
+        // untidy; standing over its pads is a DRC warning, so the last fallback gives up the first.
+        let mut chosen = None;
+        for (size, strict) in [(full, true), (SMALL_TEXT_MM, true), (SMALL_TEXT_MM, false)] {
+            if let Some(c) = ring_at(size).into_iter().find(|&c| fits(c, size, strict)) {
+                chosen = Some((c, size));
+                break;
+            }
+        }
+        let Some((spot, size)) = chosen else { continue };
         placed.push(label_box(spot, &f.ref_, size));
         // the property's `(at ..)` is local to the footprint, and its angle is absolute
         let local = rotate((spot.0 - f.pos.0, spot.1 - f.pos.1), -f.rot);
-        moves.push((f.index, local, 0.0));
+        moves.push((f.index, local, size));
     }
 
     let mut moved = 0usize;
-    for (index, local, angle) in moves {
+    for (index, local, size) in moves {
         let node = match &mut board.tree.items[index] {
             Node::List(l) => l,
             _ => continue,
@@ -160,10 +167,13 @@ pub fn tidy_refs(board: &mut Board) -> usize {
         for child in node.items.iter_mut() {
             let Node::List(p) = child else { continue };
             if p.is("property") && p.arg_text(0) == Some("Reference") {
-                p.set(
-                    "at",
-                    vec![Node::num(local.0), Node::num(local.1), Node::num(angle)],
-                );
+                p.set("at", vec![Node::num(local.0), Node::num(local.1), Node::num(0.0)]);
+                if (size - DEFAULT_TEXT_MM).abs() > 1e-9
+                    && let Some(font) = p.find_mut("effects").and_then(|e| e.find_mut("font"))
+                {
+                    font.set("size", vec![Node::num(size), Node::num(size)]);
+                    font.set("thickness", vec![Node::num(size * 0.15)]);
+                }
                 // a label buried under the part it names is no better than one on a pad
                 if let Some(layer) = p.find_mut("layer") {
                     let name = layer.arg_text(0).unwrap_or("").to_string();

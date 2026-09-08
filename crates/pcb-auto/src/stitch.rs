@@ -22,11 +22,11 @@ const RIM_SAMPLES: usize = 8;
 const MAX_VIAS: usize = 60;
 
 /// One filled piece of a pour.
-struct Island {
-    index: usize,
-    layer: String,
-    poly: Vec<Point>,
-    bbox: BBox,
+pub(crate) struct Island {
+    pub index: usize,
+    pub layer: String,
+    pub poly: Vec<Point>,
+    pub bbox: BBox,
 }
 
 /// Copper a stitch via has to keep clear of, with the radius it has to keep clear by.
@@ -47,7 +47,7 @@ impl Obstacle {
 }
 
 /// Refill `pcb`'s zones on a scratch copy and read back the ground pour's filled islands.
-fn filled_islands(
+pub(crate) fn filled_islands(
     kicad: &KicadInstallation,
     pcb: &Path,
     net: &str,
