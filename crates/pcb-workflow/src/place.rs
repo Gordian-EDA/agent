@@ -2538,9 +2538,10 @@ pub(crate) fn restrict_to_refs(
     );
 }
 
+/// Same tolerance as [`pcb_place::is_legal`]: touching at the margin is not a collision.
 fn overlaps(a: &Rect, b: &Rect) -> bool {
     let (ox, oy) = a.axis_penetration(b);
-    ox > 0.0 && oy > 0.0
+    ox > 1e-9 && oy > 1e-9
 }
 
 /// How the board's size relates to what it was asked to hold.
@@ -5506,5 +5507,31 @@ mod tests {
             &result,
             &Rect::new(0.0, 0.0, 9.4, 10.0),
         ));
+    }
+}
+
+#[cfg(test)]
+mod bluepill_repro {
+    use super::*;
+    use gordian_runtime::AgentRuntime;
+    use serde_json::json;
+
+    #[test]
+    fn bluepill_places_legally_on_a_small_board() {
+        let Some(ctx) = AgentRuntime::detect_for_test() else {
+            return;
+        };
+        let dir = ctx.project_dir().to_path_buf();
+        for name in ["design.kicad_sch", "design.kicad_pcb", "design.kicad_pro"] {
+            std::fs::copy(
+                concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/bluepill/").to_string() + name,
+                dir.join(name.replace("design", "project")),
+            )
+            .unwrap();
+        }
+        std::fs::remove_file(dir.join("project.kicad_pcb")).ok();
+        let args: Value = serde_json::from_str(include_str!("../tests/fixtures/bluepill/sync_args.json")).unwrap();
+        let out = crate::sync::sync_board(args, &ctx).unwrap();
+        assert_eq!(out["placement"]["legal"], json!(true), "{out:#}");
     }
 }

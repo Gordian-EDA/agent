@@ -9,6 +9,7 @@ description = "Concrete PCB placement algorithms."
 [dependencies]
 circuit-graph = { path = "../circuit-graph" }
 geom = { path = "../geom" }
+tracing = { workspace = true }
 pcb-model = { path = "../pcb-model" }
 
 [dev-dependencies]

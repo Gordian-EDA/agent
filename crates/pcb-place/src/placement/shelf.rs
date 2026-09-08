@@ -4,8 +4,8 @@ use geom::{Point2, Rect};
 use pcb_model::{PlaceReport, PlaceResult, Placement, PlacementView};
 
 use crate::{
-    compute_hpwl_with_rotations, courtyard_margin, derive_nets, is_legal, rotated_copper_bbox,
-    rotated_courtyard_half,
+    compute_hpwl_with_rotations, courtyard_margin, derive_nets, is_legal,
+    part_placement_bounds_envelope, rotated_copper_bbox, rotated_courtyard_half,
 };
 
 /// Pack free parts in rows around locked parts and keepouts, tallest first.
@@ -31,6 +31,20 @@ pub fn shelf_pack(problem: &PlacementView) -> Option<PlaceResult> {
         .collect();
 
     let bounds = problem.bounds;
+    // The slot a part needs, relative to its origin: courtyard plus margin,
+    // widened by whatever copper envelope must also stay inside the board.
+    let slots: Vec<Rect> = (0..problem.parts.len())
+        .map(|i| {
+            let courtyard = Rect::from_center_half(Point2::new(0.0, 0.0), half[i]).inflate(margin);
+            let envelope = part_placement_bounds_envelope(&problem.parts[i], half[i], copper_bbox[i]);
+            Rect::new(
+                courtyard.min_x.min(envelope.min_x),
+                courtyard.min_y.min(envelope.min_y),
+                courtyard.max_x.max(envelope.max_x),
+                courtyard.max_y.max(envelope.max_y),
+            )
+        })
+        .collect();
     let mut pos = vec![bounds.center(); problem.parts.len()];
     let mut obstacles: Vec<Rect> = problem.keepouts.iter().map(|k| k.inflate(margin)).collect();
     let mut free: Vec<usize> = Vec::new();
@@ -43,30 +57,29 @@ pub fn shelf_pack(problem: &PlacementView) -> Option<PlaceResult> {
             None => free.push(i),
         }
     }
-    free.sort_by(|&a, &b| half[b].1.total_cmp(&half[a].1).then(a.cmp(&b)));
+    free.sort_by(|&a, &b| slots[b].height().total_cmp(&slots[a].height()).then(a.cmp(&b)));
 
     let step = 0.5;
-    let mut row_y = bounds.min_y + margin;
+    let mut row_y = bounds.min_y;
     let mut row_h: f64 = 0.0;
-    let mut cursor_x = bounds.min_x + margin;
+    let mut cursor_x = bounds.min_x;
     for i in free {
-        let (hw, hh) = half[i];
-        let (w, h) = (2.0 * hw + margin, 2.0 * hh + margin);
+        let slot = slots[i];
+        let (w, h) = (slot.width(), slot.height());
         loop {
             if cursor_x + w > bounds.max_x + 1e-9 {
                 row_y += row_h + step;
                 row_h = 0.0;
-                cursor_x = bounds.min_x + margin;
+                cursor_x = bounds.min_x;
             }
             if row_y + h > bounds.max_y + 1e-9 {
+                tracing::warn!(
+                    reference = %problem.parts[i].reference,
+                    "shelf packing ran out of board height"
+                );
                 return None;
             }
-            let candidate = Rect {
-                min_x: cursor_x,
-                min_y: row_y,
-                max_x: cursor_x + w,
-                max_y: row_y + h,
-            };
+            let candidate = Rect::new(cursor_x, row_y, cursor_x + w, row_y + h);
             match obstacles.iter().find(|o| {
                 let (ox, oy) = candidate.axis_penetration(o);
                 ox > 1e-9 && oy > 1e-9
@@ -75,13 +88,14 @@ pub fn shelf_pack(problem: &PlacementView) -> Option<PlaceResult> {
                 None => break,
             }
         }
-        pos[i] = Point2 { x: cursor_x + hw + margin / 2.0, y: row_y + hh + margin / 2.0 };
+        pos[i] = Point2::new(cursor_x - slot.min_x, row_y - slot.min_y);
         obstacles.push(Rect::from_center_half(pos[i], half[i]).inflate(margin));
         cursor_x += w + step;
         row_h = row_h.max(h);
     }
 
     if !is_legal(problem, &half, &copper_bbox, margin, &pos) {
+        tracing::warn!("shelf packing produced an illegal layout");
         return None;
     }
     let nets = derive_nets(problem);
