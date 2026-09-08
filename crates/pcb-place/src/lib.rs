@@ -21,7 +21,7 @@ mod api;
 pub mod placement;
 
 pub use api::*;
-pub use placement::place_tuned;
+pub use placement::{place_tuned, shelf_pack};
 
 use pcb_model::{Budget, PcbPlacer, RouteProbe};
 

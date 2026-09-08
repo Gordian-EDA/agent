@@ -52,6 +52,8 @@ mod hints;
 mod legalize;
 mod pairs;
 mod route;
+mod shelf;
+pub use shelf::shelf_pack;
 
 // Placement views and helpers live at the crate root; this module exports the
 // concrete tuned phase.

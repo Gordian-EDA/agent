@@ -3160,6 +3160,14 @@ pub fn place_board(mut input: Value, ctx: &AgentRuntime) -> Result<Value> {
             result = generic;
         }
     }
+    // Any remaining illegal answer is worse than a plain legal row packing: the
+    // search failing to legalize must never turn into a resize-and-retry loop.
+    if !result.legal {
+        if let Some(packed) = pcb_place::shelf_pack(&problem) {
+            tracing::warn!("search placement was illegal; using shelf packing");
+            result = packed;
+        }
+    }
 
     // A subset placement writes ONLY the parts it was asked to place, so every
     // other footprint's pose stays byte-identical — the placer's own answer for

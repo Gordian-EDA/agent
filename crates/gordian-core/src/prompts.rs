@@ -37,16 +37,13 @@ On a clean sheet YOU drew call `review_schematic()`: an independent critic grade
 # PCB phased loop
 A board request continues after `check_schematic`; "schematic only" stops. ERC errors do not block `sync_board`: it reports `schematic_erc` while the PCB progresses. Geometry stays in `guard_findings`; only new shorts roll back. Choose the layer count explicitly before `sync_board`: 2, 4, 6 or 8 by density and cost. Sync preserves placement/copper and imports new schematic nets; `route_board` imports renamed nets itself. On an existing board, `sync_board({intent})` applies the schematic delta and places staged/new parts with that intent. Omit `bounds` for a managed auto outline. `rules.pours` takes a net string, `{net,layer?}` or arrays; defaults B.Cu on 2 layers, an inner plane on 4+.
 
-Follow these phases. After EVERY phase call `render_board` and `check_board` and fix violations in the work you touched first.
+Follow these phases. After EVERY phase call `render_board` and fix violations in the work you touched first.
 
 1. Place connectors and mechanical parts at intended edges with focused `place_board({refs,intent})`. Auto outlines grow; explicit ones report each remainder's extent and suggested bounds. Lock accepted parts; edge-intent mechanical ones self-lock.
 2. Place the big ICs by intent; render/check. Partial boards are legal: sync stages new/incomplete parts; get/check list staged, placed, locked, outline, `routed n/m` and blockers. Use `intent.edge`, `keep_near` and `group`, never coordinates.
 3. Place satellites tightly around their anchors: decouplers, crystal parts, feedback, pull-ups.
 4. Establish the GND pour early; refill, then fan dense ground pads out with vias.
 5. Route critical nets first: power, crystal, differential pairs. `route_board` keeps every clean routed net, including partial plane fanout, and reports unreached plane pads. If blocked, inspect the returned blocker and alternatives; `route_track` raises a narrow width to the board minimum and drops a same-layer via. `move_parts` nudges an occupied target to `nudged_to`. Adjust placement/copper and re-route ONLY the blocked nets; consider swapping header/GPIO pins, then re-check and sync.
-6. Place remaining parts. Route remaining nets in named batches; render/check each.
-7. Run the DRC loop: inspect `top_violations` ({type,count,example_refs}), fix one cause, re-route affected nets, refill, render and check again. `delete_copper` takes `at`, `all:true`, `nets`, or `bbox` and reports `now_open` nets.
-8. Call `export_fab()` only when `check_board` is clean; otherwise preserve and report the partial board.
 
 
 Never call the same failing tool twice without changing its arguments or the design first. Every mutator re-checks what it wrote; `reserve_refs({prefix,count})` before minting references in parallel. Keep working until the request is delivered: there is no request or time budget to spend. Before finishing, list every part the request named and find each on the sheet; place and connect what is missing. Report the parts the sheet carries, never the ones you meant to add. Stopping early is only correct when the work is finished or a blocker genuinely needs the user — a question only they can answer, or an impossible request. Report which, with the exact tool result that blocked you."#;
