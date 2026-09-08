@@ -28,6 +28,7 @@ import mimetypes
 import os
 from pathlib import Path
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -130,56 +131,55 @@ def cargo_target_dir():
     return configured if configured.is_absolute() else ROOT / configured
 
 
-def example(package, name):
-    """Path to a release example, built once per run.
+def facts_binary(name):
+    """Path to one `quality-facts` binary, built once per run.
 
-    Every invocation used to go through `cargo run`, which takes the workspace
-    target-dir lock — so a concurrent `cargo test` elsewhere on the machine
-    could stall a case for as long as that build ran, and land in the timings.
+    Going through `cargo run` would take the workspace target-dir lock, so a
+    concurrent build elsewhere on the machine could stall a case for as long as
+    that build ran, and land in the timings.
     """
+    override = os.environ.get(f"{name.upper()}_BIN")
+    if override:
+        return override
     with BUILD_LOCK:
         if name not in BUILT:
             command(
-                ["cargo", "build", "--release", "-p", package, "--example", name],
-                timeout=1800,
+                ["cargo", "build", "--release", "-p", "quality-facts"], timeout=1800
             )
-            BUILT[name] = str(cargo_target_dir() / "release" / "examples" / name)
+            BUILT[name] = str(cargo_target_dir() / "release" / name)
         return BUILT[name]
 
 
-def tool(project, name, payload=None, *, allow_failed_verdict=False):
-    args = [example("gordian-core", "tool_once"), str(project), name]
-    if payload is not None:
-        args.append(json.dumps(payload, separators=(",", ":")))
-    value = json.loads(command(args).stdout)
-    if value.get("error") or (
-        value.get("ok") is False and not allow_failed_verdict
-    ):
-        raise RuntimeError(f"{name} failed: {json.dumps(value, indent=2)}")
-    return value
+def facts_json(name, *args):
+    """Run a facts binary and read its JSON, or report why it could not."""
+    result = command(
+        [facts_binary(name), *(str(a) for a in args)], check=False
+    )
+    if result.returncode:
+        return {"error": (result.stderr or result.stdout).strip()}
+    try:
+        return json.loads(result.stdout)
+    except json.JSONDecodeError as error:
+        return {"error": f"{name} returned no JSON: {error}"}
 
 
 def prepare_project(case, project):
-    source = case / "input"
-    if source.is_dir():
-        for item in source.iterdir():
-            if item.name in {"seed.place-parts.json", "seed-board"} | REFERENCE_INPUTS:
-                continue
-            target = project / item.name
-            if item.is_dir():
-                shutil.copytree(item, target)
-            else:
-                shutil.copy2(item, target)
+    """Copy the case's starting files into the run directory.
 
-    seed = source / "seed.place-parts.json"
-    if not seed.exists():
+    A case's `input/` is the project as the agent finds it: plain KiCad files.
+    Reference answers are held back — the agent never sees them.
+    """
+    source = case / "input"
+    if not source.is_dir():
         return
-    tool(project, "place_parts", json.loads(seed.read_text(encoding="utf-8")))
-    if (source / "seed-board").exists():
-        tool(project, "sync_board")
-        tool(project, "place_board")
-        tool(project, "route_board")
-        tool(project, "check_board")
+    for item in source.iterdir():
+        if item.name in REFERENCE_INPUTS:
+            continue
+        target = project / item.name
+        if item.is_dir():
+            shutil.copytree(item, target)
+        else:
+            shutil.copy2(item, target)
 
 
 # --- deterministic board facts ---------------------------------------------
@@ -187,12 +187,7 @@ def prepare_project(case, project):
 
 def pcb_facts(project):
     """Where every footprint sits, read from the `.kicad_pcb` itself."""
-    configured = os.environ.get("PCB_FACTS_BIN")
-    binary = configured or example("kicad-board", "pcb_facts")
-    result = command([binary, str(project)], check=False)
-    if result.returncode:
-        return {"error": (result.stderr or result.stdout).strip()}
-    return json.loads(result.stdout)
+    return facts_json("pcb_facts", project)
 
 
 def board_facts(project, before_project):
@@ -238,74 +233,62 @@ def board_facts(project, before_project):
     return facts
 
 
-def total_track_length(tracks):
-    length = 0.0
-    for track in tracks:
-        if not isinstance(track, dict) or not isinstance(track.get("path"), list):
-            raise ValueError("get_board returned a track without a path")
-        path = track["path"]
-        for start, end in zip(path, path[1:]):
-            if not (
-                isinstance(start, list)
-                and isinstance(end, list)
-                and len(start) >= 2
-                and len(end) >= 2
-                and all(isinstance(value, (int, float)) for value in (*start[:2], *end[:2]))
-            ):
-                raise ValueError("get_board returned a malformed track point")
-            length += math.hypot(end[0] - start[0], end[1] - start[1])
-    return round(length, 3)
+# DRC findings that mean copper is wrong, as opposed to a silkscreen or
+# courtyard complaint. `--drc-clean` is handed to the PCB critic on this.
+COPPER_VIOLATIONS = {
+    "clearance", "copper_edge_clearance", "copper_sliver", "shorting_items",
+    "track_dangling", "via_dangling", "starved_thermal", "hole_clearance",
+    "hole_near_hole", "track_width", "annular_width", "drill_out_of_range",
+}
 
 
-def board_quality_facts(project):
-    """DRC diagnostics and cheap copper metrics from the public board tools."""
+def unconnected_pair(finding):
+    """One unrouted connection, named by the two things DRC could not join."""
+    ends = [
+        item.get("description", "?")
+        for item in finding.get("items", [])
+        if isinstance(item, dict)
+    ]
+    return " <-> ".join(ends) if ends else finding.get("description", "unconnected item")
+
+
+def board_quality_facts(board, drc):
+    """DRC diagnostics and cheap copper metrics, measured from the board and
+    KiCad's own DRC report."""
     facts = {}
-    try:
-        with tempfile.TemporaryDirectory(prefix="gordian-quality-board-") as temporary:
-            check_project = Path(temporary) / "project"
-            shutil.copytree(project, check_project)
-            checked = tool(
-                check_project, "check_board", allow_failed_verdict=True
-            )
-            unconnected = checked.get("unconnected")
-            unconnected_count = checked.get("unconnected_items")
-            if not isinstance(unconnected, list) or not isinstance(
-                unconnected_count, int
-            ):
-                raise ValueError("check_board omitted unconnected diagnostics")
-    except Exception as error:
-        facts["board_check_error"] = str(error)
+    if not isinstance(drc, dict) or "error" in drc:
+        facts["board_check_error"] = (
+            drc.get("error") if isinstance(drc, dict) else None
+        ) or "DRC not run"
     else:
+        findings = violations(drc)
+        unconnected = [unconnected_pair(item) for item in drc.get("unconnected_items", [])]
         facts.update(
             {
                 "board_check_error": None,
-                "drc_blocking_findings": checked.get("blocking_findings"),
-                "drc_reported_findings": checked.get("reported_findings"),
-                "drc_copper_violations": checked.get("copper_violations"),
+                "drc_blocking_findings": sum(
+                    f.get("severity") == "error" for f in findings
+                ),
+                "drc_reported_findings": len(findings),
+                "drc_copper_violations": sum(
+                    f.get("severity") == "error"
+                    and f.get("type") in COPPER_VIOLATIONS
+                    for f in findings
+                )
+                + len(unconnected),
+                "unrouted": unconnected,
             }
         )
-        if unconnected_count and not unconnected:
-            unconnected = [
-                f"{unconnected_count} unconnected item(s); pad pairs unavailable"
-            ]
-        facts["unrouted"] = unconnected
 
-    try:
-        board = tool(project, "get_board", {"include_copper": True})
-        copper = board["board"]["copper"]
-        if (
-            not isinstance(copper.get("tracks"), list)
-            or not isinstance(copper.get("via_count"), int)
-        ):
-            raise ValueError("get_board omitted copper metrics")
-    except Exception as error:
-        facts["board_metrics_error"] = str(error)
+    measured = pcb_facts(board)
+    if not measured.get("board"):
+        facts["board_metrics_error"] = measured.get("error", "board not read")
     else:
         facts.update(
             {
                 "board_metrics_error": None,
-                "via_count": copper["via_count"],
-                "total_track_length": total_track_length(copper["tracks"]),
+                "via_count": measured["via_count"],
+                "total_track_length": measured["total_track_length"],
             }
         )
     return facts
@@ -314,19 +297,8 @@ def board_quality_facts(project):
 # --- deterministic schematic facts -----------------------------------------
 
 
-def sch_facts_binary():
-    """The `sch-doc` facts example, built on first use."""
-    configured = os.environ.get("SCH_FACTS_BIN")
-    if configured:
-        return [configured]
-    return [example("sch-doc", "sch_facts")]
-
-
 def sch_facts(*args):
-    result = command(sch_facts_binary() + [str(a) for a in args], check=False)
-    if result.returncode:
-        return {"error": (result.stderr or result.stdout).strip()}
-    return json.loads(result.stdout)
+    return facts_json("sch_facts", *args)
 
 
 def kicad_partition(schematic, out_path):
@@ -749,23 +721,6 @@ def severity_counts(report, prefix):
     }
 
 
-# Board tools whose call the flow is measured in. `get_board` is a pure query
-# and does not count against a flow's budget.
-BOARD_TOOLS = {
-    "sync_board", "place_board", "route_board", "check_board", "export_fab",
-    "move_parts", "route_track", "delete_copper", "set_net_width",
-    "update_board_outline", "render_board",
-}
-
-# The tools that own board geometry. A refusal here is the board contract
-# telling the model no; a refusal from `sync_board` is usually a mis-shaped
-# payload, and one from a review tool is an opinion.
-GEOMETRY_TOOLS = {
-    "place_board", "route_board", "move_parts", "route_track", "delete_copper",
-    "update_board_outline",
-}
-
-
 def transcript_facts(artifacts):
     """What the agent actually did, read from its own event stream.
 
@@ -775,23 +730,22 @@ def transcript_facts(artifacts):
     `tool <-` becomes a fact."""
     path = artifacts / "agent.stderr.txt"
     text = path.read_text(encoding="utf-8", errors="replace") if path.exists() else ""
-    calls = re.findall(r"^\s*tool -> (\S+)", text, re.M)
-    refused = re.findall(r"^\s*tool <- (\S+)(?: \([^\n]*\))?: (?:error|refused)", text, re.M)
     return {
-        "tool_calls": calls,
-        "board_tool_calls": [name for name in calls if name in BOARD_TOOLS],
-        "refused_tools": refused,
-        "refused_board_tools": [name for name in refused if name in BOARD_TOOLS],
-        "refused_geometry_tools": [name for name in refused if name in GEOMETRY_TOOLS],
+        "tool_calls": re.findall(r"^\s*tool -> (\S+)", text, re.M),
+        "refused_tools": re.findall(
+            r"^\s*tool <- (\S+)(?: \([^\n]*\))?: (?:error|refused)", text, re.M
+        ),
     }
 
 
 def deterministic_facts(case, project, before_project, artifacts, agent_result):
     schematic = first_schematic(project)
     board = next(iter(sorted(project.glob("*.kicad_pcb"))), None)
-    board_quality = board_quality_facts(project) if board is not None else {}
     erc = run_check("sch", schematic, artifacts / "erc.json")
     drc = run_check("pcb", board, artifacts / "drc.json")
+    board_quality = (
+        board_quality_facts(board, drc) if board is not None else {}
+    )
     unconnected = drc.get("unconnected_items", []) if isinstance(drc, dict) else []
     fab = (
         sorted(path.name for path in (project / "fab").glob("*"))
@@ -821,29 +775,31 @@ def deterministic_facts(case, project, before_project, artifacts, agent_result):
 VISUAL_FACTS = ("body_overlaps", "text_collisions", "wires_through_bodies")
 
 
-def schematic_visual_facts(renders):
-    """Measured visual defects after the run and input-sheet counts.
+def schematic_visual_facts(project, before_project):
+    """Measured drawing defects after the run, and the input sheet's counts.
 
-    Edit rubrics compare the live list length with the input count. The harness
-    owns that comparison without requiring turn state from the agent."""
-    rendered = renders.get("after", {}).get("schematic", {})
-    visual = rendered.get("visual")
-    if not isinstance(visual, dict):
-        return {"schematic_visual_error": rendered.get("error", "not measured")}
-    before = renders.get("before", {}).get("schematic", {}).get("visual")
-    before = before if isinstance(before, dict) else {}
+    Edit rubrics compare the live list length with the input count, so the
+    harness owns that comparison rather than asking the agent for turn state.
+    Where the measurement failed the facts stay absent, so a rubric line about
+    them fails instead of passing on a sheet nobody read.
+    """
+    after = sch_facts("--visual", project)
+    if "error" in after:
+        return {"schematic_visual_error": after["error"]}
+    before = sch_facts("--visual", before_project)
     measured = {}
     for name in VISUAL_FACTS:
-        if not isinstance(visual.get(name), list):
+        if not isinstance(after.get(name), list):
             continue
-        measured[name] = visual[name]
+        measured[name] = after[name]
         if isinstance(before.get(name), list):
             measured[f"before_{name}"] = len(before[name])
     missing = [name for name in VISUAL_FACTS if name not in measured]
     return {
         "schematic_visual_error": (
-            f"render_schematic omitted: {', '.join(missing)}" if missing else None
+            f"sch_facts --visual omitted: {', '.join(missing)}" if missing else None
         ),
+        "sheet_extent": after.get("sheet_extent"),
         **measured,
     }
 
@@ -1419,21 +1375,6 @@ def clean_render(kind, source, destination):
         return {"path": str(destination), "svg_paths": svg_paths}
 
 
-def capture_render(project, tool_name, destination):
-    try:
-        value = tool(project, tool_name)
-    except Exception as error:
-        return {"error": str(error)}
-    path = value.get("_image_path") or value.get("png_path")
-    if not path or not Path(path).is_file():
-        return {"error": f"{tool_name} returned no image"}
-    shutil.copy2(path, destination)
-    rendered = {"path": str(destination)}
-    if isinstance(value.get("visual"), dict):
-        rendered["visual"] = value["visual"]
-    return rendered
-
-
 def capture_clean_render(project, kind, destination):
     source = (
         first_schematic(project)
@@ -1449,35 +1390,37 @@ def capture_clean_render(project, kind, destination):
 
 
 def render_project(project, artifacts, prefix):
+    """The judge's view of the project: KiCad's own page, exported the same way
+    for a candidate and for a human reference."""
     rendered = {}
-    if next(project.glob("*.kicad_sch"), None):
-        annotated = capture_render(
-            project, "render_schematic", artifacts / f"{prefix}-schematic-agent.png"
-        )
-        clean = capture_clean_render(
-            project, "schematic", artifacts / f"{prefix}-schematic-clean.png"
-        )
-        rendered["schematic"] = {**clean, "agent_render": annotated}
-        if isinstance(annotated.get("visual"), dict):
-            rendered["schematic"]["visual"] = annotated["visual"]
-    if next(project.glob("*.kicad_pcb"), None):
-        annotated = capture_render(
-            project, "render_board", artifacts / f"{prefix}-pcb-agent.png"
-        )
-        clean = capture_clean_render(
-            project, "pcb", artifacts / f"{prefix}-pcb-clean.png"
-        )
-        rendered["pcb"] = {**clean, "agent_render": annotated}
+    for kind, pattern in (("schematic", "*.kicad_sch"), ("pcb", "*.kicad_pcb")):
+        if next(project.glob(pattern), None):
+            rendered[kind] = capture_clean_render(
+                project, kind, artifacts / f"{prefix}-{kind}-clean.png"
+            )
     return rendered
 
 
 def agent_command(project, prompt):
+    """The command one case runs.
+
+    `GORDIAN_AGENT_CMD` replaces the whole invocation, so the harness itself can
+    be exercised against a stand-in that writes a sheet and exits: the words are
+    split like a shell command line and `{project}` / `{prompt}` are filled in.
+    `GORDIAN_BIN` names a prebuilt agent binary and keeps the real argument list.
+    """
+    template = os.environ.get("GORDIAN_AGENT_CMD")
+    if template:
+        return [
+            word.replace("{project}", str(project)).replace("{prompt}", prompt)
+            for word in shlex.split(template)
+        ]
     configured = os.environ.get("GORDIAN_BIN")
     if configured:
-        return [configured, "agent", "--project", str(project), "--no-review", prompt]
+        return [configured, "agent", "--project", str(project), prompt]
     return [
         "cargo", "run", "--release", "--quiet", "-p", "gordian", "--",
-        "agent", "--project", str(project), "--no-review", prompt,
+        "agent", "--project", str(project), prompt,
     ]
 
 
@@ -1661,26 +1604,16 @@ def write_gallery(artifacts, phases):
         images = []
         for kind in ("schematic", "pcb"):
             rendered = phase.get("renders", {}).get(kind, {})
-            pair = []
-            for label, item in (
-                ("Clean judge view", rendered),
-                ("What the agent saw", rendered.get("agent_render", {})),
-            ):
-                if item.get("path"):
-                    relative = Path(item["path"]).relative_to(artifacts)
-                    pair.append(
-                        f'<figure><img src="{html.escape(str(relative))}" '
-                        f'alt="{html.escape(phase["label"])} {kind} {html.escape(label)}">'
-                        f'<figcaption>{html.escape(label)}</figcaption></figure>'
-                    )
-                else:
-                    pair.append(
-                        f'<figure class="missing"><div>No {kind} render</div>'
-                        f'<figcaption>{html.escape(label)}</figcaption></figure>'
-                    )
+            if rendered.get("path"):
+                relative = Path(rendered["path"]).relative_to(artifacts)
+                figure = (
+                    f'<figure><img src="{html.escape(str(relative))}" '
+                    f'alt="{html.escape(phase["label"])} {kind}"></figure>'
+                )
+            else:
+                figure = f'<figure class="missing"><div>No {kind} render</div></figure>'
             images.append(
-                f'<div class="kind"><h3>{html.escape(kind.title())}</h3>'
-                f'<div class="pair">{"".join(pair)}</div></div>'
+                f'<div class="kind"><h3>{html.escape(kind.title())}</h3>{figure}</div>'
             )
         cards.append(
             f'<section><h2>{html.escape(caption)}</h2>'
@@ -1693,9 +1626,8 @@ def write_gallery(artifacts, phases):
 body{font:15px system-ui,sans-serif;margin:24px;background:#17191d;color:#eee}
 section{margin:0 0 32px}h1,h2,h3{font-weight:600}h2{font-size:16px;color:#bbb}
 .kind{margin-top:20px}.kind h3{font-size:15px;text-transform:capitalize}
-.pair{display:grid;grid-template-columns:1fr 1fr;gap:16px}figure{margin:0;background:#fff;padding:8px;color:#222}
+figure{margin:0;background:#fff;padding:8px;color:#222}
 img{display:block;width:100%;height:auto}.missing div{display:grid;min-height:220px;place-items:center;color:#777}
-figcaption{text-align:center;padding-top:6px}@media(max-width:800px){.pair{grid-template-columns:1fr}}
 </style></head><body><h1>Design phases</h1>""" + "".join(cards) + "</body></html>\n"
     (artifacts / "gallery.html").write_text(document, encoding="utf-8")
 
@@ -1795,7 +1727,11 @@ def run_case(case, output_root, attempt=None):
 
     facts, detail = deterministic_facts(case, project, before_project, artifacts, result)
     renders["after"] = phases[-1]["renders"]
-    facts.update(schematic_visual_facts(renders) if first_schematic(project) else {})
+    facts.update(
+        schematic_visual_facts(project, before_project)
+        if first_schematic(project)
+        else {}
+    )
     facts.update(turn_facts)
     facts["elapsed_seconds"] = round(time.time() - started, 1)
     report = {

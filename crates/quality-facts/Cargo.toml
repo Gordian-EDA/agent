@@ -1,0 +1,17 @@
+[package]
+name = "quality-facts"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+serde_json.workspace = true
+
+[[bin]]
+name = "sch_facts"
+path = "src/bin/sch_facts.rs"
+
+[[bin]]
+name = "pcb_facts"
+path = "src/bin/pcb_facts.rs"
