@@ -18,10 +18,10 @@ triggers: ["blue pill", "bluepill", "stm32f103", "stm32f103c8t6", "stm32f1", "st
 | Y1 | `Device:Crystal` | `Crystal:Crystal_SMD_3225-4Pin_3.2x2.5mm` | 8 MHz HSE |
 | Y2 | `Device:Crystal` | `Crystal:Crystal_SMD_3215-2Pin_3.2x1.5mm` | 32.768 kHz LSE |
 | SW1 | `Switch:SW_Push` | `Button_Switch_SMD:SW_SPST_TL3342` | reset |
-| JP1, JP2 | `Jumper:Jumper_2_Bridged` | `Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical` | BOOT0 / BOOT1 select |
+| JP1, JP2 | `Connector_Generic:Conn_01x03` | `Connector_PinHeader_2.54mm:PinHeader_1x03_P2.54mm_Vertical` | BOOT0 / BOOT1 3-pin strap (+3V3 / signal / GND) |
 | D1, D2 | `Device:LED` | `LED_SMD:LED_0603_1608Metric` | PC13 user, power |
 | R1 | `Device:R` | `Resistor_SMD:R_0603_1608Metric` | 10k NRST pull-up |
-| R2, R3 | `Device:R` | `Resistor_SMD:R_0603_1608Metric` | 100k BOOT0 / BOOT1 pull-down |
+| R2, R3 | `Device:R` | `Resistor_SMD:R_0603_1608Metric` | 10k BOOT0 / BOOT1 pull-down |
 | R4, R5 | `Device:R` | `Resistor_SMD:R_0603_1608Metric` | 1k LED series |
 | R6 | `Device:R` | `Resistor_SMD:R_0603_1608Metric` | 1k5 USB D+ pull-up |
 | R7, R8 | `Device:R` | `Resistor_SMD:R_0603_1608Metric` | 22R USB series |
@@ -29,26 +29,27 @@ triggers: ["blue pill", "bluepill", "stm32f103", "stm32f103c8t6", "stm32f1", "st
 | C10, C11 | `Device:C` | `Capacitor_SMD:C_0603_1608Metric` | 12 pF LSE load |
 | C3 | `Device:C` | `Capacitor_SMD:C_0805_2012Metric` | 4.7 uF +5V bulk |
 | C4 | `Device:C` | `Capacitor_SMD:C_0805_2012Metric` | 10 uF +3V3 bulk |
-| C5-C8, C12 | `Device:C` | `Capacitor_SMD:C_0603_1608Metric` | 100 nF per VDD / VDDA / VBAT |
-| C9 | `Device:C` | `Capacitor_SMD:C_0603_1608Metric` | 100 nF NRST |
+| C5-C8 | `Device:C` | `Capacitor_SMD:C_0603_1608Metric` | 100 nF per VDD / VDDA pin |
+| C9 | `Device:C` | `Capacitor_SMD:C_0603_1608Metric` | 100 nF on VBAT, at the header pin |
+| C12 | `Device:C` | `Capacitor_SMD:C_0603_1608Metric` | 100 nF NRST |
 
 Pin-key notes verified against the installed libraries: `STM32F103C8Tx` has stacked `VSS` pins
 23/35/47 and `VDD` pins 24/36/48, so the name keys `"VSS"`/`"VDD"` cover all of them at once;
 it has **no BOOT1 pin** - BOOT1 is PB2 (pin 20). `Connector:USB_B_Micro` pins are
-`VBUS D- D+ ID GND SH`. `Jumper:Jumper_2_Bridged` pins are `A`/`B`. `Switch:SW_Push` pins are
+`VBUS D- D+ ID GND SH`. `Switch:SW_Push` pins are
 `1`/`2`. `AMS1117-3.3` pins are `GND`/`VO`/`VI`.
 
 ## Pin map
 
 ```
-+3V3: U1.VBAT, U1.VDD, U1.VDDA, U2.VO, R6.1, C4.1, C5.1, C6.1, C7.1, C8.1, C12.1, R4.1, R5.1, R1.1, JP1.B, JP2.B, J4.1, J1.20, J2.16, J2.18
++3V3: U1.VDD, U1.VDDA, U2.VO, R6.1, C4.1, C5.1, C6.1, C7.1, C8.1, R4.1, R5.1, R1.1, JP1.1, JP2.1, J4.1, J1.20, J2.18
 +5V: U2.VI, F1.2, J3.1, C3.1, J1.18
-BOOT0: U1.BOOT0, JP1.A, R2.1
-BOOT1: U1.PB2, JP2.A, R3.1
-GND: U1.VSS, U1.VSSA, U2.GND, J5.GND, J5.SH, J3.2, C3.2, C4.2, C5.2, C6.2, C7.2, C8.2, C12.2, D2.2, C1.2, C2.2, C10.2, C11.2, C9.2, SW1.2, R2.2, R3.2, J4.3, J4.5, J4.9, J1.19, J2.19, J2.20
+BOOT0: U1.BOOT0, JP1.2, R2.1
+BOOT1: U1.PB2, JP2.2, R3.1
+GND: U1.VSS, U1.VSSA, U2.GND, J5.GND, J5.SH, J3.2, C3.2, C4.2, C5.2, C6.2, C7.2, C8.2, C9.2, D2.2, C1.2, C2.2, C10.2, C11.2, C12.2, SW1.2, JP1.3, R2.2, JP2.3, R3.2, J4.3, J4.5, J4.9, J1.19, J2.19, J2.20
 LED_A: R4.2, D1.1
 LED_K: U1.PC13, D1.2, J2.15
-NRST: U1.NRST, R1.2, C9.1, SW1.1, J4.10, J2.17
+NRST: U1.NRST, R1.2, C12.1, SW1.1, J4.10, J2.17
 OSC32_IN: U1.PC14, Y2.1, C10.1, J2.14
 OSC32_OUT: U1.PC15, Y2.2, C11.1, J2.13
 OSC_IN: U1.PD0, Y1.1, C1.1
@@ -87,6 +88,7 @@ USB_DM: U1.PA11, R7.2, J1.8
 USB_DM_CON: J5.D-, R7.1
 USB_DP: U1.PA12, R8.2, R6.2, J1.9
 USB_DP_CON: J5.D+, R8.1
+VBAT: U1.VBAT, C9.1, J2.16
 VBUS: J5.VBUS, F1.1
 ```
 
@@ -114,7 +116,7 @@ request:
    "value": "STM32F103C8T6",
    "footprint": "Package_QFP:LQFP-48_7x7mm_P0.5mm",
    "pins": {
-    "VBAT": "+3V3",
+    "VBAT": "VBAT",
     "VDD": "+3V3",
     "VDDA": "+3V3",
     "VSS": "GND",
@@ -296,12 +298,12 @@ request:
    }
   },
   {
-   "id": "C12",
+   "id": "C9",
    "lib": "Device:C",
    "value": "100nF",
    "footprint": "Capacitor_SMD:C_0603_1608Metric",
    "pins": {
-    "1": "+3V3",
+    "1": "VBAT",
     "2": "GND"
    }
   },
@@ -416,7 +418,7 @@ request:
    }
   },
   {
-   "id": "C9",
+   "id": "C12",
    "lib": "Device:C",
    "value": "100nF",
    "footprint": "Capacitor_SMD:C_0603_1608Metric",
@@ -437,18 +439,19 @@ request:
   },
   {
    "id": "JP1",
-   "lib": "Jumper:Jumper_2_Bridged",
-   "value": "BOOT0 SEL",
-   "footprint": "Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical",
+   "lib": "Connector_Generic:Conn_01x03",
+   "value": "BOOT0 STRAP",
+   "footprint": "Connector_PinHeader_2.54mm:PinHeader_1x03_P2.54mm_Vertical",
    "pins": {
-    "A": "BOOT0",
-    "B": "+3V3"
+    "1": "+3V3",
+    "2": "BOOT0",
+    "3": "GND"
    }
   },
   {
    "id": "R2",
    "lib": "Device:R",
-   "value": "100k",
+   "value": "10k",
    "footprint": "Resistor_SMD:R_0603_1608Metric",
    "pins": {
     "1": "BOOT0",
@@ -457,18 +460,19 @@ request:
   },
   {
    "id": "JP2",
-   "lib": "Jumper:Jumper_2_Bridged",
-   "value": "BOOT1 SEL",
-   "footprint": "Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical",
+   "lib": "Connector_Generic:Conn_01x03",
+   "value": "BOOT1 STRAP",
+   "footprint": "Connector_PinHeader_2.54mm:PinHeader_1x03_P2.54mm_Vertical",
    "pins": {
-    "A": "BOOT1",
-    "B": "+3V3"
+    "1": "+3V3",
+    "2": "BOOT1",
+    "3": "GND"
    }
   },
   {
    "id": "R3",
    "lib": "Device:R",
-   "value": "100k",
+   "value": "10k",
    "footprint": "Resistor_SMD:R_0603_1608Metric",
    "pins": {
     "1": "BOOT1",
@@ -542,7 +546,7 @@ request:
     "13": "OSC32_OUT",
     "14": "OSC32_IN",
     "15": "LED_K",
-    "16": "+3V3",
+    "16": "VBAT",
     "17": "NRST",
     "18": "+3V3",
     "19": "GND",
@@ -551,12 +555,14 @@ request:
   }
  ],
  "flags": [
-  "+5V"
+  "+5V",
+  "VBAT"
  ],
  "notes": [
   "USB VBUS is fused to +5V and regulated to 3.3 V by the AMS1117.",
   "R6 (1k5) on D+ signals a full-speed USB device; R7/R8 are 22R series terminations.",
-  "BOOT0 and PB2/BOOT1 idle low through 100k; the jumpers strap them to 3.3 V."
+  "JP1/JP2 are 3-pin straps: BOOT0/BOOT1 idle low through 10k, jumper to 3.3 V to boot the loader.",
+  "VBAT is brought out on J2-16 with its own 100nF so the LSE/RTC can run on backup power."
  ],
  "layout": [
   {
@@ -568,10 +574,10 @@ request:
       "part": "J3"
      },
      {
+      "part": "F1"
+     },
+     {
       "col": [
-       {
-        "part": "F1"
-       },
        {
         "part": "C3"
        }
@@ -582,10 +588,15 @@ request:
       "part": "U2"
      },
      {
-      "part": "C4"
+      "col": [
+       {
+        "part": "C4"
+       }
+      ],
+      "gap": 4
      },
      {
-      "col": [
+      "row": [
        {
         "part": "R5"
        },
@@ -596,7 +607,8 @@ request:
       "gap": 4
      }
     ],
-    "gap": 5
+    "gap": 4,
+    "wrap": 400
    }
   },
   {
@@ -610,39 +622,31 @@ request:
      {
       "col": [
        {
-        "row": [
-         {
-          "part": "R7"
-         }
-        ],
-        "gap": 4
+        "part": "R7",
+        "rot": 270
        },
        {
-        "row": [
-         {
-          "part": "R8"
-         },
-         {
-          "col": [
-           {
-            "part": "R6"
-           }
-          ],
-          "gap": 4
-         }
-        ],
-        "gap": 4
+        "part": "R8",
+        "rot": 270
        }
       ],
-      "gap": 6
+      "gap": 2
+     },
+     {
+      "col": [
+       {
+        "part": "R6"
+       }
+      ],
+      "gap": 3
      }
     ],
-    "gap": 5
+    "gap": 4
    }
   },
   {
    "title": "MCU CORE",
-   "note": "One 100nF per VDD pin plus VDDA and VBAT; PC13 sinks the user LED",
+   "note": "One 100nF per VDD pin plus VDDA; the PC13 LED sits on U1's PC13 side",
    "tree": {
     "col": [
      {
@@ -658,9 +662,6 @@ request:
        },
        {
         "part": "C8"
-       },
-       {
-        "part": "C12"
        }
       ],
       "gap": 4
@@ -668,12 +669,9 @@ request:
      {
       "row": [
        {
-        "part": "U1"
-       },
-       {
         "col": [
          {
-          "row": [
+          "col": [
            {
             "part": "R4"
            },
@@ -685,12 +683,16 @@ request:
          }
         ],
         "gap": 4
+       },
+       {
+        "part": "U1"
        }
       ],
-      "gap": 5
+      "gap": 4,
+      "wrap": 400
      }
     ],
-    "gap": 5
+    "gap": 4
    }
   },
   {
@@ -732,7 +734,7 @@ request:
   },
   {
    "title": "RESET AND BOOT",
-   "note": "10k/100nF reset network; both boot pins default low",
+   "note": "10k/100nF reset; 3-pin straps with 10k pulldowns idle both boot pins low",
    "tree": {
     "row": [
      {
@@ -746,7 +748,7 @@ request:
           "part": "SW1"
          },
          {
-          "part": "C9"
+          "part": "C12"
          }
         ],
         "gap": 4
@@ -755,34 +757,39 @@ request:
       "gap": 4
      },
      {
-      "col": [
+      "row": [
        {
-        "part": "JP1"
+        "col": [
+         {
+          "part": "JP1"
+         },
+         {
+          "part": "R2"
+         }
+        ],
+        "gap": 4
        },
        {
-        "part": "R2"
+        "col": [
+         {
+          "part": "JP2"
+         },
+         {
+          "part": "R3"
+         }
+        ],
+        "gap": 4
        }
       ],
-      "gap": 4
-     },
-     {
-      "col": [
-       {
-        "part": "JP2"
-       },
-       {
-        "part": "R3"
-       }
-      ],
-      "gap": 4
+      "gap": 5
      }
     ],
-    "gap": 6
+    "gap": 5
    }
   },
   {
    "title": "HEADERS AND DEBUG",
-   "note": "Two 20-pin GPIO headers and the 10-pin Cortex SWD connector",
+   "note": "Two 20-pin GPIO headers, the VBAT backup pin and the 10-pin Cortex SWD connector",
    "tree": {
     "col": [
      {
@@ -792,6 +799,14 @@ request:
        },
        {
         "part": "J2"
+       },
+       {
+        "col": [
+         {
+          "part": "C9"
+         }
+        ],
+        "gap": 4
        }
       ],
       "gap": 12
@@ -803,6 +818,9 @@ request:
     "gap": 8
    }
   }
+ ],
+ "power": [
+  "VBAT"
  ]
 }
 ```
@@ -815,21 +833,27 @@ request:
 - 8 MHz HSE on PD0/PD1 (`OSC_IN`/`OSC_OUT`) with 22 pF loads; 32.768 kHz LSE on PC14/PC15
   (`OSC32_IN`/`OSC32_OUT`) with 12 pF loads. Never put 22 pF on the watch crystal.
 - NRST: 10 k pull-up to +3V3, 100 nF to GND, push button to GND, and NRST on the SWD header.
-- BOOT0 (44) and BOOT1/PB2 (20) each idle low through 100 k with a 2-pin jumper to +3V3.
-  Fit both jumpers even when only the default boot mode is wanted (instantiate every strap,
-  never branch the topology).
+- BOOT0 (44) and BOOT1/PB2 (20) each idle low through 10 k and sit on the centre pin of a
+  3-pin strap (+3V3 / signal / GND), as on the real board. Instantiate both straps even when
+  only the default boot mode is wanted - never branch the topology.
 - USB: 22 R in series with PA11 (D-) and PA12 (D+); the 1k5 pull-up goes from +3V3 to D+ on the
   **MCU side** of the series resistor. Shield and pin 5 to GND, `ID` marked `nc`.
-- Fuse VBUS with a 500 mA polyfuse ahead of the LDO, and declare `"flags": ["+5V"]` - the +5V
-  net is only driven through passive parts, so ERC needs the PWR_FLAG.
+- Fuse VBUS with a 500 mA polyfuse ahead of the LDO, and declare `"flags": ["+5V", "VBAT"]` -
+  both nets reach the board only through passive parts, so ERC needs a PWR_FLAG on each. Do NOT
+  flag GND: J5's shield/GND pins already drive it and a second driver is an ERC error.
+- VBAT (pin 1) is its own net, not a stub of +3V3: it carries its own 100 nF and comes out on a
+  header pin, so the LSE/RTC can run on backup power. Place that cap next to the header pin -
+  the PWR_FLAG needs a wire on the net to attach to.
 - Power symbols: `+3V3`/`+5V` point up, `GND` points down. The engine does this automatically
   for the names `GND`, `+3V3`, `+5V`, `VBUS`.
 - Every MCU pin carries a net: GPIOs go to the header nets `PA0..PB15`, SWD to `SWDIO`/`SWCLK`,
   PC13 to the user LED. Only USB `ID` and SWD header pins 7/8 are `nc`.
 - PC13 sinks the user LED (anode through 1 k to +3V3), as on the real board.
-- Paper A3: at 35 parts the six blocks pack onto A3 only if the MCU decoupling is a 3+2 column
-  beside U1 rather than one wide row of five. A wide MCU block pushes the sheet to A2 and the
-  critic then penalises the empty half-page.
+- Paper A3: at 35 parts the six blocks pack onto A3 only while MCU CORE stays about 120 mm
+  tall. Pulling the clock and reset networks into MCU CORE so they wire straight to their pins
+  makes that block ~180 mm tall, which forces A2 and a half-empty sheet - keep CLOCK and
+  RESET AND BOOT as their own blocks. Set `"wrap": 400` on any row you mean to stay one row:
+  the engine silently wraps rows wider than 150 units and drops the tail beside the tall part.
 
 ## Common mistakes
 
@@ -838,7 +862,9 @@ request:
 - Breaking PA13/PA14 out on a GPIO header: SWDIO/SWCLK belong on the debug connector only.
 - One 100 nF for the whole MCU - the rubric counts decoupling per supply pin.
 - Tying the 1k5 pull-up to VBUS, or to the connector side of the 22 R resistors.
-- Omitting `"flags"`, which leaves ERC reporting that +5V has no driver.
+- Omitting `"flags"`, which leaves ERC reporting that +5V or VBAT has no driver - or adding
+  GND to it, which trips `pin_to_pin: Power output and Power output are connected`.
+- Tying VBAT to +3V3, which defeats the RTC backup domain.
 - Naming a header net differently from the MCU net (`PA_0` vs `PA0`): read the NETLIST in the
   build report - a net with one pin is always a mistake.
 - Putting each connector in its own block. J1, J2 and J4 belong in one HEADERS block; a block
