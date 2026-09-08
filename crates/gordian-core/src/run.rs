@@ -102,10 +102,7 @@ pub async fn run(
             .map(critic::defect_lines)
             .unwrap_or_default();
         let out_dir = agent.work_dir().join("compose");
-        // The pass budgets its own rounds, but a single round can overrun its
-        // estimate; the wall clock is the promise, so it is also enforced here.
-        let left = deadline.saturating_duration_since(Instant::now());
-        let pass = compose::compose(
+        let composed = compose::compose(
             client,
             compose::Pass {
                 lib: agent.library(),
@@ -117,14 +114,8 @@ pub async fn run(
                 rounds: options.compose_rounds,
                 deadline,
             },
-        );
-        let composed = match tokio::time::timeout(left, pass).await {
-            Ok(composed) => composed?,
-            Err(_) => {
-                event("compose: abandoned at the wall clock");
-                compose::Composed::default()
-            }
-        };
+        )
+        .await?;
         compose_seconds = composed.seconds;
         if let Some(better) = composed.sheet {
             std::fs::copy(&better, agent.out_sch())
@@ -237,6 +228,10 @@ fn publish_board(outcome: &mut BoardOutcome, stem: &Path, project_dir: &Path) {
     }
 }
 
+/// What the run keeps back from the router so the finished board, the renders and
+/// `report.json` all land inside the promised wall clock.
+const DELIVERY_RESERVE: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// The board stage, started from whichever build first came out clean.
 ///
 /// A later build, or the polish pass, may change the drawing; only a change of
@@ -261,12 +256,21 @@ impl EarlyBoard {
             return;
         }
         let mut slot = self.started.lock().expect("board task lock");
+        // A rebuild is usually a re-drawing, not a new board: an aborted router
+        // leaves its solver running, so it is restarted only when the netlist or
+        // the footprints actually moved.
+        if let Some((source, _)) = slot.as_mut()
+            && self.same_board(source, sheet)
+        {
+            *source = sheet.to_path_buf();
+            return;
+        }
         let mut attempts = self.attempts.lock().expect("board attempt lock");
         *attempts += 1;
         let name = format!("board-{attempts}");
         if let Some(task) = self.attempt(sheet, &name) {
             if let Some((_, previous)) = slot.take() {
-                event("board: a newer clean build arrived, restarting the router on it");
+                event("board: a newer clean build changed the netlist, restarting the router on it");
                 previous.abort();
             }
             *slot = Some((sheet.to_path_buf(), task));
@@ -312,7 +316,7 @@ impl EarlyBoard {
             _ => false,
         };
         if same {
-            event("board: the delivered sheet re-draws the same netlist, keeping the routed board");
+            event("board: that sheet re-draws the same netlist, keeping the routed board");
         }
         same
     }
@@ -335,9 +339,12 @@ impl EarlyBoard {
             sch: snapshot,
             pcb: dir.join("design.kicad_pcb"),
             render_png: dir.join("board-front.png"),
+            // The last seconds of the budget belong to delivery: publishing the
+            // board, re-rendering the sheet and writing the report.
             timeout_s: self
                 .deadline
                 .saturating_duration_since(Instant::now())
+                .saturating_sub(DELIVERY_RESERVE)
                 .as_secs()
                 .max(20),
         };

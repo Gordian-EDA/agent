@@ -21,17 +21,19 @@ use crate::render;
 const COMPOSER: &str = r#"You are a senior electronics engineer re-composing a KiCad schematic. You get the netlist (parts and pin nets),
 the current LAYOUT (each block is a CSS-flexbox-like tree of "row"/"col" containers with "gap"/"align"; leaves are
 {"part": id} with optional "rot"/"mirror"; parts of multi-unit symbols use {"part": id, "unit": n}), the current
-render with a coordinate grid, and a reviewer's defect list. Output ONLY a JSON object {"layout": [...]} - a complete
-new layout for ALL parts (every part exactly once), fixing the defects. Rules: a row is one signal path (consecutive
-parts share a net); shunts hang in a col under the part they attach to; ICs sit between a col of input-side parts and a
-col of output-side parts; decoupling caps in a row next to the IC; symmetric halves are mirrored cols side by side;
-blocks of 3-12 parts; compact gaps (4-6 passives, 6-8 around ICs); balanced blocks (wider than tall, never a long
-column); unused units of an IC in a row beside that IC's power unit; titles for blocks. Do not change part ids or nets."#;
+render with a coordinate grid, and a reviewer's defect list. Output ONLY a JSON object {"layout": [...]}: the SAME
+layout with the smallest change that fixes the listed defects. The current layout already scores well - keep every
+block, title, note, order and gap that the reviewer did not complain about, and touch only the parts named in the
+defects. Rules to respect while you do: a row is one signal path (consecutive parts share a net); shunts hang in a col
+under the part they attach to; ICs sit between a col of input-side parts and a col of output-side parts; decoupling
+caps in a row next to the IC; symmetric halves are mirrored cols side by side; blocks of 3-12 parts; compact gaps
+(4-6 passives, 6-8 around ICs); balanced blocks (wider than tall, never a long column). Every part appears exactly
+once. Do not change part ids or nets."#;
 
-/// Layouts asked for per round. They are drawn and graded concurrently, so two
-/// candidates cost one candidate's wall time and roughly double the chance that
-/// a round beats the score it started from.
-const CANDIDATES: usize = 2;
+/// Layouts asked for per round. They are drawn and graded concurrently, so the
+/// round costs one candidate's wall time whatever this is, and the best of three
+/// draws is what lifts the floor of a run rather than its ceiling.
+const CANDIDATES: usize = 3;
 
 /// What a polish pass produced.
 #[derive(Default)]
@@ -62,6 +64,10 @@ pub struct Pass<'a> {
 
 /// Re-compose the layout trees for at most `rounds` rounds, or until the
 /// deadline runs out. Returns the best version that beat the baseline.
+///
+/// The deadline is enforced here rather than by the caller, so a round that
+/// cannot finish costs only itself: whatever an earlier round won is still
+/// returned.
 pub async fn compose(client: &dyn Provider, pass: Pass<'_>) -> Result<Composed> {
     let Pass {
         lib,
@@ -80,64 +86,33 @@ pub async fn compose(client: &dyn Provider, pass: Pass<'_>) -> Result<Composed> 
     let mut critique = defects.to_string();
     let mut done = 0usize;
 
-    for round in 0..rounds {
-        if Instant::now() + round_cost(started, done) > deadline {
+    for index in 0..rounds {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if round_cost(started, done) > left {
             event(format!(
                 "compose: stopping after {done} round(s) — not enough budget for another"
             ));
             break;
         }
-        // The two model calls and every grade of the round run concurrently, so a
-        // round explores CANDIDATES layouts for the wall time of one.
-        let grid = latest_grid(out_dir, round);
-        let layouts = futures::future::join_all(
-            (0..CANDIDATES).map(|_| ask(client, &current, &critique, grid.clone())),
+        let graded = match tokio::time::timeout(
+            left,
+            round(client, lib, kicad_cli, out_dir, index, &current, &critique),
         )
-        .await;
-        done += 1;
-
-        let mut built = Vec::new();
-        for (k, layout) in layouts.into_iter().enumerate() {
-            let Some(layout) = layout? else { continue };
-            let mut candidate = current.clone();
-            candidate["layout"] = layout;
-            let sheet = out_dir.join(format!("c{round}_{k}.kicad_sch"));
-            let report = match sch::build(lib, &candidate, &sheet) {
-                Ok(report) => report,
-                Err(error) => {
-                    event(format!("compose {round}.{k}: build failed: {error:#}"));
-                    continue;
-                }
-            };
-            if !report.issues.is_empty() {
-                event(format!(
-                    "compose {round}.{k}: {} issue(s), discarded",
-                    report.issues.len()
-                ));
-                continue;
+        .await
+        {
+            Ok(graded) => graded?,
+            Err(_) => {
+                event("compose: the round ran into the wall clock and was dropped");
+                break;
             }
-            let clean = sheet.with_extension("png");
-            let grid = out_dir.join(format!("c{round}_{k}_grid.png"));
-            let rendered = render::sheet(kicad_cli, &sheet, &clean, &grid)?;
-            let summary = part_summary(&report.raw);
-            built.push((k, sheet, candidate, rendered, summary, report.warnings.is_empty()));
-        }
-        if built.is_empty() {
+        };
+        done += 1;
+        if graded.is_empty() {
             break;
         }
-        let graded = futures::future::join_all(
-            built
-                .iter()
-                .map(|(_, _, _, rendered, summary, clean)| {
-                    critic::review(client, &rendered.clean, summary, *clean)
-                }),
-        )
-        .await;
 
         let mut round_best: Option<(f64, Value, Review)> = None;
-        for ((k, sheet, candidate, ..), review) in built.into_iter().zip(graded) {
-            let Some(review) = review? else { continue };
-            event(format!("compose {round}.{k}: {}", review.event()));
+        for (sheet, candidate, review) in graded {
             let beaten = best.as_ref().map_or(baseline, |(score, _, _, _)| *score);
             if review.mean > beaten {
                 best = Some((review.mean, sheet, candidate.clone(), review.clone()));
@@ -146,7 +121,7 @@ pub async fn compose(client: &dyn Provider, pass: Pass<'_>) -> Result<Composed> 
                 round_best = Some((review.mean, candidate, review));
             }
         }
-        // The next round works from the round's best layout and its defects.
+        // The next round works from this round's best layout and its defects.
         if let Some((_, candidate, review)) = round_best {
             current = candidate;
             critique = critic::defect_lines(&review);
@@ -166,15 +141,81 @@ pub async fn compose(client: &dyn Provider, pass: Pass<'_>) -> Result<Composed> 
     })
 }
 
-/// What one more round is expected to cost: the mean of the rounds already run,
-/// and a conservative guess before the first one has finished.
+/// One round: [`CANDIDATES`] layouts asked for, drawn and graded concurrently,
+/// so a round explores several compositions for the wall time of one.
+async fn round(
+    client: &dyn Provider,
+    lib: &sch::Library,
+    kicad_cli: &Path,
+    out_dir: &Path,
+    index: usize,
+    current: &Value,
+    critique: &str,
+) -> Result<Vec<(PathBuf, Value, Review)>> {
+    let grid = latest_grid(out_dir, index);
+    let layouts = futures::future::join_all(
+        (0..CANDIDATES).map(|_| ask(client, current, critique, grid.clone())),
+    )
+    .await;
+
+    let mut built = Vec::new();
+    for (k, layout) in layouts.into_iter().enumerate() {
+        let Some(layout) = layout? else { continue };
+        let mut candidate = current.clone();
+        candidate["layout"] = layout;
+        let sheet = out_dir.join(format!("c{index}_{k}.kicad_sch"));
+        let report = match sch::build(lib, &candidate, &sheet) {
+            Ok(report) => report,
+            Err(error) => {
+                event(format!("compose {index}.{k}: build failed: {error:#}"));
+                continue;
+            }
+        };
+        if !report.issues.is_empty() {
+            event(format!(
+                "compose {index}.{k}: {} issue(s), discarded",
+                report.issues.len()
+            ));
+            continue;
+        }
+        let rendered = render::sheet(
+            kicad_cli,
+            &sheet,
+            &sheet.with_extension("png"),
+            &out_dir.join(format!("c{index}_{k}_grid.png")),
+        )?;
+        let summary = part_summary(&report.raw);
+        built.push((k, sheet, candidate, rendered, summary, report.warnings.is_empty()));
+    }
+
+    let graded = futures::future::join_all(built.iter().map(
+        |(_, _, _, rendered, summary, clean)| {
+            critic::review(client, &rendered.clean, summary, *clean)
+        },
+    ))
+    .await;
+
+    let mut out = Vec::new();
+    for ((k, sheet, candidate, ..), review) in built.into_iter().zip(graded) {
+        let Some(review) = review? else { continue };
+        event(format!("compose {index}.{k}: {}", review.event()));
+        out.push((sheet, candidate, review));
+    }
+    Ok(out)
+}
+
+/// What one more round is expected to cost: the rounds already run, measured and
+/// taken with a margin, and a conservative guess before the first one finishes.
+///
+/// A round that runs into the wall clock is wasted whole, and its model calls are
+/// the least predictable part of the run — measured rounds ranged from 40 s to
+/// 75 s — so the measurement is taken with a wide margin.
 fn round_cost(started: Instant, done: usize) -> Duration {
-    if done == 0 {
-        // A round is two model calls plus a seven-read grade of each candidate;
-        // measured at 70-75 s, and a round that cannot finish is wasted entirely.
-        Duration::from_secs(75)
-    } else {
-        started.elapsed() / done as u32
+    match done {
+        // A round is two model calls plus a seven-read grade of each candidate,
+        // measured at 50-75 s.
+        0 => Duration::from_secs(75),
+        done => started.elapsed().mul_f64(1.6) / done as u32,
     }
 }
 
@@ -236,6 +277,6 @@ mod tests {
     fn the_first_round_is_costed_conservatively_and_then_by_measurement() {
         let started = Instant::now() - Duration::from_secs(60);
         assert_eq!(round_cost(started, 0), Duration::from_secs(75));
-        assert!(round_cost(started, 2) >= Duration::from_secs(29));
+        assert!(round_cost(started, 2) >= Duration::from_secs(48));
     }
 }

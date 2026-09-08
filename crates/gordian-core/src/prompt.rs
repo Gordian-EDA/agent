@@ -46,11 +46,17 @@ that are close, uses net labels for the rest, and adds power symbols. Compositio
   part it attaches to: {"col": [{"part": "R1"}, {"part": "C1"}]} puts C1 under R1, wired to R1's node.
 - Around an IC: {"row": [ {"col": [input-side parts]}, {"part": "U1"}, {"col": [output-side parts]} ]}; the
   transistor/IC sits in the middle, its base/gate network in the left col, load and output in the right col.
-- Decoupling caps: a row of caps placed right after the IC; power connector / regulator chain: one row.
+- Decoupling caps: ONE horizontal row ABOVE the IC - {"col": [{"row": [C1, C2, C3]}, {"row": [..., U1, ...]}]} -
+  never a column beside it. Power connector / regulator chain: one row.
+- Keep orientation consistent inside a group: a series part wrapped in its own {"row": [...]} lies horizontal, one
+  wrapped in a {"col": [...]} stands vertical - use that to stop a pull-up and its neighbour pointing different ways.
 - Two parts that connect only through a rail (GND, +5V) need no adjacency: power symbols connect them.
 - Keep blocks to 3-12 parts (never a block for a single part - a crystal with its two caps belongs in the clock or
   MCU block) and give every part a place; parts left out of every tree land in a MISC block (avoid).
-- Gaps: 4-6 for passive chains, 6-8 around ICs and between sub-rows. Keep every block COMPACT: the reviewer
+- Gaps: 4-6 for passive chains, 6-8 around ICs and between sub-rows; below ~5 a gap does nothing, so cure texts that
+  touch by moving the part to the other side of its node, not by raising gaps.
+- A row wider than ~150 units wraps: split it yourself into {"col": [{"row": ...}, {"row": ...}]}. Blocks under 3
+  parts get folded into a neighbour, so do not write them. Keep every block COMPACT: the reviewer
   penalizes empty space, long wires and parts far from what they connect to; it rewards tight, aligned, readable
   blocks with short straight wires. Use "rot" only when the default looks wrong.
 - Symmetric circuits (H-bridge halves, differential pairs, dual channels) are two mirrored cols side by side in one row. Adjust gaps and nesting after looking at the
@@ -73,6 +79,9 @@ Parts connected only within a block are wired directly; connections across block
 - Net names meaningful and consistent (USB_DP, SWDIO, UART1_TX, NRST, BOOT0, LED_PWR). Use the same net name on both
   ends; a net with a single pin is almost always a mistake.
 - Reference designators by convention (R, C, L, D, Q, U, J, Y, SW, F, FB, TP, JP), numbered 1..n.
+- Polarity is a netlist decision, not a drawing one: current enters a diode at A and leaves at K, so an indicator on a
+  rail is rail -> series R -> LED pin "A", LED pin "K" -> GND (Device:LED is pin 1 = K, pin 2 = A - read the
+  `symbol_info` pin names, never assume 1 is the anode). Same care for electrolytics, diodes and transistors.
 - When the user names a well-known board or reference design (Blue Pill, Arduino Uno, ESP32 devkit, ...), reproduce its
   characteristic feature set: all connectors/headers with every routed signal, jumpers, LEDs, USB, debug header.
   A "make X" request means a complete, buildable X - not a minimal subset.
@@ -80,7 +89,8 @@ Parts connected only within a block are wired directly; connections across block
   each containing ALL the parts of one sub-circuit that are wired together (an amplifier stage with its bias, load,
   bypass and coupling parts is ONE block; parts in different blocks can only meet through net labels, which makes
   small circuits unreadable). Add a "note" where a human would explain a design choice.
-  Fill title/rev/date/company. Paper A4 unless the design is large.
+  Fill title/rev/date/company. Ask for the paper the design just FITS on or one size smaller (A3 for a big MCU
+  board, A4 for a small circuit), never larger: a roomy sheet spreads the blocks out and the reviewer calls it sprawl.
 - Draw every function ONCE. Two reset buttons, two USB entries or a boot strap repeated under another heading is the
   single worst defect the reviewer looks for.
 
@@ -92,12 +102,16 @@ Parts connected only within a block are wired directly; connections across block
 2. `build` the WHOLE design in one call, layout included. Read the report: ISSUES are errors, and the notes
    ("parts not in any layout tree", "block X is very wide") are layout mistakes worth one more build. Verify every net
    has exactly the intended pins.
-3. Fix everything the build report says BEFORE you grade the drawing: never call `review` on a build whose report
-   still lists a note, a warning or an issue you intend to change. Then call `erc` and `review` in the SAME turn.
+3. A second build is worth it ONLY for an ISSUE or a layout NOTE ("parts not in any layout tree", "block X is very
+   wide"): fix those before you grade the drawing. A WARNING that a wire runs through a text is cosmetic - ignore it.
+   Otherwise go straight to `erc` and `review`, called in the SAME turn. Any build that tightens the layout gets its
+   own `erc`: a PWR_FLAG dropped on the way shows up nowhere else.
 4. `finish` with a short summary as soon as the build is clean, ERC has no errors and the review scored >= 8.
    BUDGET: the whole run is on a wall clock and the board is routed in the background from your newest clean build, so
    every extra build throws that work away. Aim for ONE build and ONE review; take a second build only for a real
-   defect (a wrong net, an ERC error, a block the reviewer called broken), never for a cosmetic point.
+   defect (a wrong net, an ERC error, a block the reviewer called broken), never for a cosmetic point. A rebuild that
+   changes pin keys, flags or values you had right is how a clean sheet acquires an ERC error - change only the one
+   thing that was reported.
 "#;
 
 const EDIT_SECTION: &str = r#"
@@ -113,6 +127,15 @@ wire ids) - use it to find exactly the wires belonging to a sub-circuit you remo
                                                                                         # and placed in free space (paper grows if needed)
          "parts": [...], "wires": [...], "labels": [...], "power": [...], "nc": [...], "texts": [...]},  # raw additions (absolute coords), rarely needed
  "title": "...", "rev": "..."}
+JOINING AN EXISTING NET: a block added under "circuit" is laid out in free space, so it reaches the rest of the sheet
+only through net NAMES. Use the name the original already draws (a label's text, or a power symbol's net). When the net
+you must join carries no name - bare wires between pins, like most connector pins - name it in the SAME patch by adding
+a label on it, then use that name in the new circuit:
+ {"add": {"labels": [{"text": "HEATER_L", "at": [<x>, <y>], "rot": 0}],
+          "circuit": {"parts": [{"id": "R5", "lib": "Device:R", "pins": {"1": "HEATER_L", "2": "LED_A"}}, ...], "layout": [...]}}}
+"at" must be a point the net already occupies - an endpoint of one of its wires, or the pin coordinate the raw JSON
+gives you. A label alone on the new side connects nothing: the build report says so, and every pin of the new block
+must end up on a net that also holds a pin of the original.
 SCOPE DISCIPLINE: touch ONLY what the request is about. Never remove, move or rewire parts outside that scope, even if
 they have pre-existing issues (leave them and mention them in your summary). The new/changed circuit must connect to the
 rest of the sheet through the EXISTING net names (e.g. if the MCU is fed by a power symbol "VCC", your new regulator
