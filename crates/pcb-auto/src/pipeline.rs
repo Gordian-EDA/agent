@@ -39,7 +39,7 @@ const ROUTE_RESERVE_S: f64 = 22.0;
 /// already set by the longest header, so this is the one that decides whether the board looks
 /// like a strip or a slab: a Blue Pill is 23 mm across, not 33, and a tighter board also gives
 /// the placer less empty space to scatter into.
-const RECLAIM_DENSITY: f64 = 0.7;
+const RECLAIM_DENSITY: f64 = 0.62;
 /// How far in from the corner a mounting hole sits, and how much of a side its courtyard eats.
 const HOLE_INSET: f64 = 4.0;
 const HOLE_COURTYARD_MM: f64 = 6.4;
@@ -47,7 +47,7 @@ const HOLE_COURTYARD_MM: f64 = 6.4;
 /// ladder so it fits in what is left of the budget instead of being killed mid-session.
 const REPAIR_PASSES: u32 = 6;
 /// A touch-up asks the router for a handful of named nets on a board that is otherwise finished.
-const TOUCH_UP_PASSES: u32 = 4;
+const TOUCH_UP_PASSES: u32 = 8;
 /// Completion above which the whole-board reroute is skipped in favour of the touch-up. Set so
 /// the reroute still runs on a nearly-finished board: measured, it is worth about a connection,
 /// and batching the pour refills bought back the time it costs.
@@ -732,7 +732,26 @@ pub fn auto_layout(
     // One more short pass on just the nets DRC still names. The fanout is already in place, so
     // this costs a few seconds, and a handful of signals is a job the router can finish.
     if report.unconnected > 0 && !report.unrouted_nets.is_empty() && run.left_s() > 12.0 {
-        let left = report.unrouted_nets.clone();
+        run.note(format!("touch-up: {:.0}s left", run.left_s()));
+        // A poured net is never a touch-up target: `only_nets` rips a net's copper before
+        // re-exporting, and ripping GND hands the router a board with no ground tracks and a
+        // pour that says the pins are already connected -- it lays nothing back and the other
+        // nets are re-routed around the damage. The pour's own islands are the mend's job.
+        let poured: BTreeSet<String> = board
+            .zones()
+            .into_iter()
+            .filter(|z| z.keepout.is_none() && !z.net_name.is_empty())
+            .map(|z| z.net_name)
+            .collect();
+        let left: Vec<String> = report
+            .unrouted_nets
+            .iter()
+            .filter(|n| !poured.contains(*n))
+            .cloned()
+            .collect();
+        if left.is_empty() {
+            return Ok(finish(run, report));
+        }
         let before = std::fs::read(pcb)?;
         let mut last = Board::load(pcb)?;
         let budget = (run.left_s() - 6.0).max(5.0) as u64;
@@ -764,6 +783,11 @@ pub fn auto_layout(
                     report = after;
                 } else {
                     std::fs::write(pcb, &before)?;
+                    run.note(format!(
+                        "touch-up on {:?} closed nothing ({} still open)",
+                        &left[..left.len().min(4)],
+                        after.unconnected
+                    ));
                 }
             }
             Err(e) => {
