@@ -290,9 +290,47 @@ pub fn plan_once(board: &Board, fps: &[Footprint], opts: &PlanOptions, seed: u64
             }
         }
         if let Some((_, _, parent)) = best {
+            // Aim at the PIN, not just the part. A crystal, its load caps, a series resistor or an
+            // LED all hang off one or two specific pins of the hub; targeting the hub's centre
+            // leaves the crystal on the far side of a 48-pin package from its oscillator pins,
+            // which is exactly what a reviewer calls out. The target is the centroid of the hub's
+            // pads on the nets the two actually share, preferring signal nets over rails --
+            // a rail reaches the whole package and says nothing about where the part belongs.
+            let shared: Vec<i64> = {
+                let hub = parts.get(&parent).unwrap();
+                let hub_nets: Vec<i64> = hub.pads.iter().map(|(_, n, _)| *n).collect();
+                let mine: Vec<i64> = parts.list[i].pads.iter().map(|(_, n, _)| *n).collect();
+                let signal: Vec<i64> = mine
+                    .iter()
+                    .copied()
+                    .filter(|n| hub_nets.contains(n) && !power.contains(n))
+                    .collect();
+                if signal.is_empty() {
+                    mine.iter().copied().filter(|n| hub_nets.contains(n)).collect()
+                } else {
+                    signal
+                }
+            };
+            let target = {
+                let hub = parts.get(&parent).unwrap();
+                let hits: Vec<Point> = hub
+                    .pad_positions()
+                    .into_iter()
+                    .filter(|(n, _)| shared.contains(n))
+                    .map(|(_, pos)| pos)
+                    .collect();
+                (!hits.is_empty()).then(|| {
+                    let n = hits.len() as f64;
+                    (
+                        hits.iter().map(|q| q.0).sum::<f64>() / n,
+                        hits.iter().map(|q| q.1).sum::<f64>() / n,
+                    )
+                })
+            };
             let p = &mut parts.list[i];
             p.role = Role::Satellite;
             p.parent = Some(parent);
+            p.target = target;
         }
     }
     let satellites: Vec<String> = parts

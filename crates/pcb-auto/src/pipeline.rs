@@ -35,6 +35,11 @@ const ROUTER_PASSES: u32 = 14;
 /// that overruns is killed and its whole session is lost, so the budget it is given must be one
 /// it can actually finish inside.
 const ROUTE_RESERVE_S: f64 = 22.0;
+/// How tightly the dimension NO connector pins is fitted to the content. The other dimension is
+/// already set by the longest header, so this is the one that decides whether the board looks
+/// like a strip or a slab: a Blue Pill is 23 mm across, not 33, and a tighter board also gives
+/// the placer less empty space to scatter into.
+const RECLAIM_DENSITY: f64 = 0.7;
 /// A repair only has to finish the handful of nets the whole-board route left; it gets a short
 /// ladder so it fits in what is left of the budget instead of being killed mid-session.
 const REPAIR_PASSES: u32 = 8;
@@ -238,6 +243,7 @@ fn suggest_outline_for_edges(
         .unwrap_or(0.0)
         .max(per_side.get("bottom").copied().unwrap_or(0.0));
     let inner = courtyard_area / density.max(0.05);
+    let tight = courtyard_area / RECLAIM_DENSITY;
     let h0 = (inner / aspect).sqrt();
     let w0 = inner / h0;
     let floor_w = need_w.max(big_free);
@@ -250,9 +256,9 @@ fn suggest_outline_for_edges(
     }
     // give the area back on whichever dimension a connector did not pin
     if h > h0 && w > floor_w {
-        w = floor_w.max(inner / h).min(w);
+        w = floor_w.max(tight / h).min(w);
     } else if w > w0 && h > floor_h {
-        h = floor_h.max(inner / w).min(h);
+        h = floor_h.max(tight / w).min(h);
     }
     (
         ((w + 2.0 * margin) * 10.0).round() / 10.0,

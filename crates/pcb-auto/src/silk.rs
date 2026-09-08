@@ -122,18 +122,28 @@ pub fn tidy_refs(board: &mut Board) -> usize {
         }
         let probe = label_box((0.0, 0.0), &f.ref_, size);
         let (half_w, half_h) = (probe.w() / 2.0, probe.h() / 2.0);
-        let spot = candidates(&court, half_w, half_h).into_iter().find(|&c| {
+        let ring = candidates(&court, half_w, half_h);
+        let fits = |c: Point, strict: bool| {
             let bb = label_box(c, &f.ref_, size);
             bb.x0 >= outline.x0
                 && bb.y0 >= outline.y0
                 && bb.x1 <= outline.x1
                 && bb.y1 <= outline.y1
+                // never on copper: that is the one thing a fab check will not forgive
                 && !pads.iter().any(|p| bb.overlaps(p))
-                && !courtyards
-                    .iter()
-                    .any(|(r, c)| *r != f.ref_ && c.valid() && bb.overlaps(c))
                 && !placed.iter().any(|p| bb.overlaps(p))
-        });
+                && (!strict
+                    || !courtyards
+                        .iter()
+                        .any(|(r, c)| *r != f.ref_ && c.valid() && bb.overlaps(c)))
+        };
+        // A crowded board runs out of clear pockets. Standing over a neighbour's courtyard is
+        // untidy; standing over its pads is a DRC warning, so the fallback gives up the first.
+        let spot = ring
+            .iter()
+            .copied()
+            .find(|&c| fits(c, true))
+            .or_else(|| ring.iter().copied().find(|&c| fits(c, false)));
         let Some(spot) = spot else { continue };
         placed.push(label_box(spot, &f.ref_, size));
         // the property's `(at ..)` is local to the footprint, and its angle is absolute
