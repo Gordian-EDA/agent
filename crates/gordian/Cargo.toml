@@ -22,4 +22,6 @@ libc.workspace = true
 ratatui.workspace = true
 crossterm.workspace = true
 futures.workspace = true
-png.workspace = true
+pulldown-cmark.workspace = true
+open = "5.4.2"
+directories.workspace = true

@@ -9,8 +9,7 @@
 //! prompt is typed into a composer, the run streams into a live transcript and
 //! its renders appear inline.
 
-mod config;
-mod tui;
+use gordian::{config, tui, wants_board};
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -187,17 +186,6 @@ fn run_tui(args: &[String]) -> Result<()> {
     runtime.block_on(tui::run(project_dir, loaded))
 }
 
-/// A request that asks only for the schematic ("render the schematic") skips the board;
-/// any mention of the board, layout, routing or fabrication — or no mention of the
-/// schematic at all — gets both.
-pub(crate) fn wants_board(prompt: &str) -> bool {
-    let lower = prompt.to_ascii_lowercase();
-    let board_words = ["pcb", "board", "layout", "rout", "fabricat", "gerber"];
-    if board_words.iter().any(|w| lower.contains(w)) {
-        return true;
-    }
-    !lower.contains("schematic")
-}
 
 fn run_agent(args: &[String]) -> Result<ExitCode> {
     let Invocation {
@@ -300,9 +288,9 @@ fn run_agent(args: &[String]) -> Result<ExitCode> {
 mod tests {
     #[test]
     fn schematic_only_requests_skip_the_board() {
-        assert!(!super::wants_board("Design a 555 blinker. Render the schematic."));
-        assert!(super::wants_board("Design a Blue Pill schematic and PCB, route it"));
-        assert!(super::wants_board("make a stm32 bluepill"));
+        assert!(!wants_board("Design a 555 blinker. Render the schematic."));
+        assert!(wants_board("Design a Blue Pill schematic and PCB, route it"));
+        assert!(wants_board("make a stm32 bluepill"));
     }
 
     use super::*;
