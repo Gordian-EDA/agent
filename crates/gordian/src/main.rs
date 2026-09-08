@@ -122,6 +122,7 @@ fn parse(args: &[String]) -> Result<Invocation> {
         (None, 2) => (PathBuf::from(positional.remove(0)), positional.remove(0)),
         (None, _) => bail!("missing prompt"),
     };
+    let board = board && wants_board(&prompt);
     Ok(Invocation {
         project_dir,
         prompt,
@@ -130,6 +131,18 @@ fn parse(args: &[String]) -> Result<Invocation> {
         polish,
         board,
     })
+}
+
+/// A request that asks only for the schematic ("render the schematic") skips the board;
+/// any mention of the board, layout, routing or fabrication — or no mention of the
+/// schematic at all — gets both.
+fn wants_board(prompt: &str) -> bool {
+    let lower = prompt.to_ascii_lowercase();
+    let board_words = ["pcb", "board", "layout", "rout", "fabricat", "gerber"];
+    if board_words.iter().any(|w| lower.contains(w)) {
+        return true;
+    }
+    !lower.contains("schematic")
 }
 
 fn run_agent(args: &[String]) -> Result<ExitCode> {
@@ -231,6 +244,13 @@ fn run_agent(args: &[String]) -> Result<ExitCode> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn schematic_only_requests_skip_the_board() {
+        assert!(!super::wants_board("Design a 555 blinker. Render the schematic."));
+        assert!(super::wants_board("Design a Blue Pill schematic and PCB, route it"));
+        assert!(super::wants_board("make a stm32 bluepill"));
+    }
+
     use super::*;
 
     #[test]
