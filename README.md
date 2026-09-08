@@ -3,219 +3,147 @@
 [![CI](https://github.com/Gordian-EDA/agent/actions/workflows/ci.yml/badge.svg)](https://github.com/Gordian-EDA/agent/actions/workflows/ci.yml)
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 
-An LLM agent that designs **KiCAD schematics and PCBs** from a natural-language prompt.
+An LLM agent that designs **KiCad schematics and PCBs** from a natural-language prompt.
 
-You describe a circuit — *"a USB-C powered temperature logger with an ESP32-S3, a 3.3 V LDO,
-and an I²C sensor"* — and the agent produces a real `.kicad_sch` schematic and a routed
-`.kicad_pcb` board, validated against KiCAD's own ERC/DRC.
+You describe a circuit and the agent produces a real `.kicad_sch` schematic and, when asked, a
+routed `.kicad_pcb` board — validated against KiCad's own ERC/DRC.
 
 ## The idea
 
-The LLM never emits coordinates or copper. It works *around* a set of **deterministic engines**,
-calling them through a small tool surface:
+The model never emits coordinates or copper. It describes the circuit as a **netlist** (parts,
+values, footprints, and the net every pin connects to) plus **layout trees** — a CSS-flexbox-like
+`row`/`col` tree of parts per functional block. A deterministic engine turns that into an exact
+drawing: it places parts, routes wires, adds labels and power symbols, compiles a real
+`.kicad_sch`, and reports connectivity/geometry issues back to the model. The same split carries
+through to the board: schematic accepted -> deterministic placement + Freerouting + KiCad DRC
+produce the `.kicad_pcb`, with no further model involvement.
 
-- it chooses parts, footprints, nets, and design rules;
-- the engines do the spatial work — schematic floorplanning, component placement, and copper
-  routing — reproducibly;
-- every result is gated by an **oracle** (an in-house DRC lint plus `kicad-cli`'s ERC/DRC), so the
-  agent self-repairs off structured diagnostics and never ships a board that lies about
-  connectivity or clearance.
+This keeps the drawing reproducible and correct while the model handles the open-ended part of
+design: part selection, pin mapping, and composing a block that looks like a human drew it.
 
-This split keeps the layout reproducible and correct while letting the model handle the open-ended
-part of design — intent, part selection, and triage.
+### The seven tools
 
-### Tool surface
+The design loop (`crates/gordian-core/src/tools.rs`) drives exactly seven tools:
 
-| Area | Tools |
-|------|-------|
-| Project and discovery | `project_info`, `reserve_refs`, `search_symbols`, `get_symbol_info`, `search_footprints`, `get_footprint_info` |
-| Schematic inspection | `read_schematic`, `get_symbol`, `get_net`, `check_schematic`, `render_schematic` |
-| Schematic editing | `place_parts`, `arrange`, `rewire`, `add_symbols`, `remove_symbols`, `move_symbols`, `set_fields`, `assign_footprints`, `set_flags`, `swap_symbol`, `connect`, `label`, `no_connect`, `add_power`, `delete_wires` |
-| PCB workflow | `sync_board`, `get_board`, `place_board`, `move_parts`, `lock_parts`, `unlock_parts`, `route_board`, `route_track`, `delete_copper`, `set_net_width`, `update_board_outline`, `refill_zones`, `check_board`, `render_board`, `export_fab` |
+| Tool | Purpose |
+|------|---------|
+| `search_symbols` | Search KiCad's stock symbol libraries by part number, function, or lib prefix |
+| `symbol_info` | Pin table (number, name, electrical type, side) of a symbol, per unit |
+| `build` | Lay out + compile the netlist and layout trees into `.kicad_sch`; fast, no KiCad, no image |
+| `erc` | Run KiCad ERC on the last build |
+| `render` | Render the last build with a coordinate grid, for the model to inspect |
+| `review` | Independent visual critic: score 1-10 against a reference sheet, plus a defect list |
+| `finish` | Deliver the last build, gated on a clean build, ERC with no errors, and a review >= 8 |
+
+Editing an existing sheet swaps `build`'s argument for a **patch** (`remove`/`update`/`add`)
+against the live design instead of a whole new one; the model gets the current design as JSON with
+stable ids on every element so it can scope a change precisely.
+
+Once a build is accepted, the composition polish pass (`compose`) may revise only the layout trees
+against the critic's defects — the netlist is frozen, so a round can only improve the drawing.
+
+## Skills
+
+`skills/<name>/SKILL.md` files hold a verified parts list, pin map, and ready-to-build design JSON
+for one well-known circuit family (e.g. a Blue Pill). `gordian-skills` selects up to two skills
+against the prompt — a deterministic trigger-keyword pass, then `fuzzy-matcher`'s `SkimMatcherV2`
+ranking of the prompt against each skill's triggers and name — and rides the match with the
+opening message, framed as a starting point the model should adapt rather than a fixed answer.
+
+## The PCB stage
+
+Once the schematic is accepted, `pcb-auto` builds the board deterministically from the same
+netlist: it sizes an outline at human courtyard density, seats connectors on the edges, places the
+rest by connectivity, pours a ground zone, routes with a headless **Freerouting** (bundled at
+`vendor/freerouting.jar`, driven as a subprocess), and gates the result on KiCad's own DRC. Nothing
+here calls the model; it runs concurrently with the schematic's composition polish pass and starts
+as soon as the first clean build exists, since a change of *drawing* is not necessarily a change of
+*netlist*.
 
 ## Quick start
 
-Requires a recent **Rust** toolchain (edition 2024, rustc ≥ 1.85) and **KiCAD 10 or newer**
-(for its symbol/footprint libraries and `kicad-cli`). The engines auto-detect KiCAD's
-libraries (e.g. `/usr/share/kicad/symbols`).
+Requires:
 
-Auto-detection uses the single KiCAD installation selected by the current
-environment. On machines with multiple majors installed, configure one coherent
-installation explicitly:
-
-```toml
-[kicad]
-symbolDir = "/opt/kicad10/share/kicad/symbols"
-footprintDir = "/opt/kicad10/share/kicad/footprints"
-cliPath = "/opt/kicad10/bin/kicad-cli"
-```
-
-Gordian reads and atomically writes `.kicad_sch` and `.kicad_pcb` files and uses
-KiCAD 10's CLI for ERC, DRC, zone refill, rendering, and fabrication exports.
-Reload an open design in KiCAD after Gordian changes it.
+- A recent **Rust** toolchain (edition 2024, rustc >= 1.85).
+- **KiCad 10** (only KiCad 10 or newer is supported) — for its symbol/footprint libraries and
+  `kicad-cli` (ERC, DRC, render, fabrication export).
+- **Java 25** on `PATH` — Freerouting is a JVM router, invoked headless by `pcb-auto`.
 
 ```sh
-# Build
 cargo build --release
 
-# First run creates a platform config file, e.g. ~/.config/gordian/config.toml.
-# Set llm.model and llm.apiKey there before running the agent.
+# First run creates the platform config file, e.g. ~/.config/gordian/config.toml,
+# from config.example.toml. Set llm.model and llm.apiKey there.
 
-# Run one headless design turn:
+# Design a schematic and route its board:
 cargo run --release -p gordian -- agent --project ./my_board "a 3.3V buck converter from 12V, 2A"
 
-# Or the interactive copilot (chat + live transcript):
-cargo run --release -p gordian -- tui --project ./my_board
+# Schematic only:
+cargo run --release -p gordian -- agent --project ./my_board --no-pcb "..."
 ```
 
-PCB physical design exposes independently invokable tuned placement and routing
-phases, with the saved board as their shared state. Schematic layout has no
-search to select: the model composes each block as a row/col tree and the
-typesetter measures it.
+`gordian agent --help` lists the rest: `--budget <seconds>` (wall clock for the whole run),
+`--max-builds <n>` (ceiling on `build` calls), `--no-review` (skip the composition polish pass).
+Editing an existing project re-runs the same command against a directory that already holds a
+schematic; the model receives it as a patch target instead of starting from a blank sheet.
+
+## Configuration
+
+Gordian reads/writes `~/.config/gordian/config.toml` (`gordian-runtime::platform::config_path`).
+`config.example.toml` documents every key the config model
+(`crates/gordian-runtime/src/config.rs`) actually reads: `[llm]` (adapter, model, apiKey,
+endpoint, maxTokens, ephemeralCache, reasoningEffort, captureReasoning, visionCapable), `[kicad]`
+(optional symbolDir/footprintDir/cliPath overrides — auto-detected otherwise), `[project]`
+(schematicFilename), and `[agent]` (budgetSeconds, maxBuilds; overridden by the matching CLI
+flags).
 
 ## Architecture
 
-A Rust workspace; the LLM orchestrates the deterministic crates:
-
 | Crate | Role |
 |-------|------|
-| `gordian` | CLI + ratatui copilot TUI — the entry point |
-| `gordian-core` / `gordian-llm` / `gordian-runtime` | Agent loop and prompts, provider abstraction, configuration, project context, and the tool-result contract |
-| `gordian-tools-sch` | Live `.kicad_sch` queries, guarded mutators, bulk placement, rewiring, and authoritative checks |
-| `pcb-workflow` | Application workflows that coordinate PCB creation, placement, routing, validation, rendering, and fabrication export |
-| `kicad-board` | KiCad PCB persistence boundary: saved-board parsing and atomic file edits |
-| `sch-check` | The kernel circuit model (`Design`), its semantic lints and deterministic ERC, and the `place_parts` tool input |
-| `circuit-graph` | Attributed circuit graph + a declarative idiom matcher |
-| `sch-doc` | Lossless editable `.kicad_sch` document and pure-Rust connectivity extractor |
-| `sch-model` | The schematic layout MODEL: the layout tree, the layout IR, placeable items, and the leaf contracts (`SchRouter`, `TextSolver`) |
-| `sch-floorplan` | Composition root: infer → typeset → wire → write, the elbow router, the text solver, and live editing |
-| `sch-flex` | The schematic TYPESETTER: a block's row/col tree measured into coordinates — `sch-model` + `geom` only |
-| `kicad-symbol` / `kicad-footprint` | KiCAD library discovery, metadata, and geometry |
-| `pcb-model` | Shared geometry and contracts for independently invoked PCB placement and routing phases |
-| `pcb-engine` | Production policy facade for tuned placement and routing |
-| `pcb-place` | Concrete placement algorithms |
-| `pcb-route-grid` | Grid/A\* primitives for the tuned routing phase |
-| `pcb-route-mesh` | Tuned routing pipeline and lower-level mesh diagnostics |
-| `pcb-drc` | Extensible PCB geometry and connectivity DRC |
-| `kicad` | KiCAD 10 discovery and typed CLI driver |
-| `geom` | Shared geometry primitives |
+| `gordian` | CLI entry point (`gordian agent ...`) |
+| `gordian-core` | The agent: system prompt, the seven tools, the design loop, the visual critic, the composition pass, and the PCB stage glue |
+| `gordian-llm` | The `Provider` seam and the `genai`-backed production LLM client |
+| `gordian-runtime` | `GordianConfig`, its platform path, and process tracing |
+| `gordian-skills` | `skills/<name>/SKILL.md` loading and fuzzy selection against a prompt |
+| `sch-engine` | The deterministic schematic engine: netlist + layout trees -> laid out, compiled `.kicad_sch`, checked |
+| `pcb-auto` | Deterministic PCB auto-layout: outline, placement, Freerouting, ground pour, KiCad DRC |
+| `kicad` | KiCad installation discovery and typed `kicad-cli` operations (ERC/DRC, render, netlist, fab export) |
+| `kicad-symbol` | `.kicad_sym` library reader, pin metadata, symbol drawing geometry, search |
+| `kicad-footprint` | `.pretty` footprint library reader, pad/courtyard geometry, search |
+| `geom` | Leaf math shared across the schematic and PCB stacks (2-D shapes, grid snapping, deterministic ids) |
+| `quality-facts` | `sch_facts`/`pcb_facts` binaries: deterministic facts about a `.kicad_sch`/`.kicad_pcb` for the quality harness |
 
 ## Testing
 
 ```sh
-cargo test --workspace --quiet  # unit + integration tests
+cargo test --workspace --quiet
 cargo clippy --workspace --all-targets -- -D warnings
-                               # lints for libs, bins, examples, tests, and doctests
-cargo run -p pcb-workflow --example validate_pcb_corpus --quiet
-                               # PCB smoke: real KiCAD footprints, place + route + DRC lint
-cargo run -p pcb-workflow --example validate_pcb_corpus --quiet -- --required
-                               # Required PCB gate: smoke boards plus power, LED, and dense BGA
-cargo run -p pcb-workflow --example validate_pcb_corpus --quiet -- power-buck led-array
-                               # Named ad-hoc real-board checks
-cargo run -p pcb-workflow --example validate_pcb_corpus --quiet -- bga25-route
-                               # Dense BGA auto-router qualification check
-cargo run -p pcb-workflow --example validate_pcb_corpus --quiet -- --router sequential -v bga25-route
-                               # Explicit non-A* sequential-grid diagnostic route
-cargo run -p pcb-workflow --example validate_pcb_corpus --quiet -- --router astar -v bga25-route
-                               # Explicit grid A* baseline diagnostic route
-cargo run -p pcb-workflow --example validate_pcb_corpus --quiet -- --router mesh-global -v bga25-route
-                               # Capacity-mesh global-routing isolation for heavy failures
-cargo run -p pcb-workflow --example validate_pcb_corpus --quiet -- --router mesh-assign -v bga25-route
-                               # Capacity-mesh crossing/via assignment isolation
-cargo run -p pcb-workflow --example validate_pcb_corpus --quiet -- --router mesh-detail -v bga25-route
-                               # Raw detailed cell-routing isolation; production rescue is intentionally disabled
-cargo run -p pcb-workflow --example validate_pcb_corpus --quiet -- --router mesh --inspect-net S1,S2 -v bga25-route
-                               # Bounded endpoint/copper inspection for failed or recently repaired nets
-cargo run -p pcb-workflow --example validate_pcb_corpus --quiet -- --router mesh-detail --inspect-failed-nets -v bga25-route
-                               # Automatically inspect every failed raw-detail net
-cargo run -p pcb-workflow --example validate_pcb_corpus --quiet -- --router mesh-assign --inspect-detail-jobs --inspect-net S4,VCC bga25-route
-                               # Detailed crossing/cell-job inspection for dense-placement routing pressure
+cargo fmt --all -- --check
 ```
 
-Live product quality is evaluated separately from correctness tests. The small
-VLM-judged suite under `quality/` runs natural-language create/edit/replace cases:
+### Quality harness
+
+`quality/run.py` runs end-to-end create/edit prompts through the real agent and scores the result:
+deterministic facts first (`quality-facts`, KiCad ERC/DRC), then a VLM judge second. A failed
+deterministic check caps the score regardless of what the judge thought.
 
 ```sh
 python3 quality/run.py --list
-python3 quality/run.py --question "is the board production-ready?" create-hard-pcb
 python3 quality/run.py --suite schematic --jobs 2 --output quality/runs/schematic
+python3 quality/run.py --question "is the board production-ready?" create-hard-pcb
 ```
 
-Suites: `schematic` (`dataset-*` + `prompt-*`, the schematic benchmark below),
-`campaign` (end-to-end schematic+PCB), `live-edit` (`sch-*` tool cases), `pcb`,
-`all`. `--jobs N` runs N cases at a time.
+Suites: `schematic` (`dataset-*` + `prompt-*`), `campaign` (end-to-end schematic+PCB), `pcb`, `all`.
+`--jobs N` runs N cases at a time; `--repeat N` runs each case N times and reports the median (a
+single VLM read has real run-to-run variance).
 
-### The schematic benchmark (`--suite schematic`)
-
-Fourteen schematic-only cases, scored on the drawing the agent delivers.
-
-* `dataset-*` (8): a human-drawn sheet from `~/kicad-scraper/dataset` — single
-  sheet, stock-library symbols only, 20-60 parts, two per size band — reduced to
-  its netlist by `tools/sch_netlist.py`. The prompt carries that netlist — every part
-  with its lib id and value, every pin's net — and the sheet title, nothing else.
-  `netlist_matches_reference` compares KiCAD's netlist of the delivered sheet with
-  KiCAD's netlist of the human original, pin set for pin set; the human sheet and
-  its render stay out of the agent's project.
-* `prompt-*` (6): generic circuit prompts (Sallen-Key filter + gain, 555 blinker +
-  LDO, BJT preamp, H-bridge, Arduino-style board, Blue Pill) with a part-count floor.
-
-Every schematic critic score is calibrated against a human sheet rated 9 — equal
-to it is a 9, better a 10 — read three times with the modal score kept
-(`tools/schematic_critic.py --anchor ... --samples 3`). A `dataset-*` case anchors
-on its own human original (recorded as `critic_vs_reference`); everything else on
-`quality/anchor/schematic-9.png`. The anchor used is recorded as `critic_anchor`
-in `result.json`.
-
-Regenerate the dataset cases (deterministic) with:
-
-```sh
-python3 tools/sch_netlist.py cases
-python3 tools/sch_netlist.py extract SHEET.kicad_sch -o netlist.json
-```
-
-The runner uses the same `llm.endpoint`, `llm.apiKey`, and `llm.model` from the
-platform Gordian config as normal agent runs; it does not maintain separate
-quality credentials. KiCad checks and reference renders use only `KICAD_CLI` or
-`kicad.cliPath` from `~/.config/gordian/config.toml`, and reject anything other
-than KiCad 10.
-
-Cases are graded on their final files, not speed. Create cases require the
-requested part count and clean ERC; PCB create and campaign cases additionally
-require clean DRC, zero unconnected items, fabrication files, schematic and PCB
-critic scores of at least 8, and human-look scores of at least 8. `agent_seconds`
-and total `elapsed_seconds` remain recorded facts. Edit and replacement cases
-keep their exact moved/lost/added and connectivity checks. Rubric assertions use
-`expect: fact OP JSON` or `expect: len(fact) OP JSON`.
-
-One case is one prompt and one agent run, carried to completion: the agent loop
-has no per-turn time or request budget, so the harness never asks it to continue.
-The run records `agent_seconds`, provider requests, tool calls, refusals, loop
-smells, the agent's own final reply, its transcript, and a self-diagnosis in
-`result.json`. A user who wants a ceiling anyway sets `--max-requests <n>` on
-`gordian agent` or `agent.maxRequests` in the config; stopping there is reported
-as the user's cap, never as a partial state.
-
-The run produces `artifacts/phase-1-schematic.png` and/or
-`artifacts/phase-1-pcb.png` beside the `before` renders. `artifacts/gallery.html`
-shows them side by side with tool-call and ERC/DRC captions, and `findings.md`
-links the gallery.
-The final human-look judge compares each available render with the closest-size
-human-authored KiCad demo, rendered by KiCad 10 and cached under
-`quality/references/`.
-
-PCB changes should be exercised through the same schematic-derived and current-board tools the
-agent uses; avoid privileged JSON-only board construction paths in tests.
-The schematic validation corpus under `docs/validation` is optional in this checkout; tests that
-need it skip cleanly when the corpus is absent.
-
-## Status
-
-Active development (`0.1.0`). The PCB and schematic engines route/layout real KiCAD boards through
-the corpus smoke checks, with additional slower real-board checks for power, LED, and dense BGA
-examples. The required PCB gate is `validate_pcb_corpus --required`; it is intentionally smaller
-than `--all`, which includes scale/stress fixtures. Dense multilayer/BGA production routing is
-qualified through the `mesh` portfolio (detailed routing plus adaptive rescue); `mesh-detail` is a
-raw diagnostic isolation mode for tightening the per-cell detailed stage.
+The runner uses `llm.endpoint`/`llm.apiKey`/`llm.model` from the platform config, same as a normal
+agent run, and KiCad checks/reference renders use `KICAD_CLI` or `kicad.cliPath` from it — only
+KiCad 10 is accepted. `tools/schematic_critic.py` and `tools/pcb_critic.py` are the two VLM
+critics `quality/run.py` shells out to for the judge pass; `gordian-core::critic` embeds the same
+rubric text (`tools/schematic_critic_*.txt`) so the agent's own in-loop `review` tool grades a
+sheet by the identical standard.
 
 ## License
 

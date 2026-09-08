@@ -1,5 +1,6 @@
-# Gordian config. The CLI/TUI persist the real file at the platform config path,
-# e.g. ~/.config/gordian/config.toml on Linux.
+# Gordian config. The CLI reads/writes the real file at the platform config
+# path, e.g. ~/.config/gordian/config.toml on Linux (first `gordian agent` run
+# creates it from these defaults).
 
 schemaVersion = 1
 
@@ -12,6 +13,7 @@ maxTokens = 16384
 ephemeralCache = true
 # reasoningEffort = "medium" # none|minimal|low|medium|high|xhigh|max|<token budget>
 # captureReasoning = false
+# visionCapable = true
 
 [kicad]
 # Gordian requires KiCad 10 or newer and uses only kicad-cli and saved files.
@@ -23,17 +25,5 @@ ephemeralCache = true
 schematicFilename = "design.kicad_sch"
 
 [agent]
-postCommitReview = true
-reviewFixRounds = 1
-# Optional ceiling on model requests per turn. Absent means no cap: a turn runs
-# until the model stops calling tools.
-# maxRequests = 200
-
-[review]
-retryJson = false
-ensemble = false
-
-[tools]
-defaultSearchLimit = 8
-renderMaxPx = 1600
-
+budgetSeconds = 180
+maxBuilds = 6

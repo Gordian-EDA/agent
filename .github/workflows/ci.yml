@@ -10,26 +10,29 @@ env:
 
 jobs:
   test:
-    name: build · test · KiCAD 10
+    name: build · test · KiCad 10
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      # The engines and many tests resolve real KiCAD symbol/footprint libraries; install KiCAD.
+      # The engines and many tests resolve real KiCad symbol/footprint libraries; install KiCad.
       # Tests that need a model provider (the LLM agent loop) skip gracefully without API keys.
-      - name: Install KiCAD 10
+      - name: Install KiCad 10
         run: |
           sudo add-apt-repository --yes ppa:kicad/kicad-10.0-releases
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends kicad
+      - name: Install Java 25 (Freerouting)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "25"
       - name: Build
         run: cargo build --workspace --all-targets
       - name: Test
         run: cargo test --workspace
-      - name: Required PCB corpus (real KiCAD DRC)
-        run: cargo run -p pcb-workflow --example validate_pcb_corpus -- --required
 
   lint:
     name: clippy
