@@ -98,34 +98,40 @@ pub async fn run(
         && let Some(current) = design.clone()
         && current.get("layout").is_some_and(Value::is_array)
     {
-        let baseline = agent.best_score().unwrap_or(0.0);
-        let defects = review
-            .as_ref()
-            .map(critic::defect_lines)
-            .unwrap_or_default();
-        let out_dir = agent.work_dir().join("compose");
-        let composed = compose::compose(
-            client,
-            compose::Pass {
-                lib: agent.library(),
-                kicad_cli: kicad.cli_path(),
-                out_dir: &out_dir,
-                design: &current,
-                defects: &defects,
-                baseline,
-                rounds: options.compose_rounds,
-                deadline,
-            },
-        )
-        .await?;
-        compose_seconds = composed.seconds;
-        if let Some(better) = composed.sheet {
-            std::fs::copy(&better, agent.out_sch())
-                .with_context(|| format!("delivering {}", agent.out_sch().display()))?;
-            schematic = Some(agent.out_sch().to_path_buf());
-            design = composed.design;
-            review = composed.review;
-            event("compose: the polished layout was delivered");
+        if skip_compose(review.as_ref()) {
+            event("compose skipped: review already 9");
+        } else {
+            let baseline = agent.best_score().unwrap_or(0.0);
+            let defects = review
+                .as_ref()
+                .map(critic::defect_lines)
+                .unwrap_or_default();
+            let out_dir = agent.work_dir().join("compose");
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            let compose_deadline = Instant::now() + compose_cap(remaining);
+            let composed = compose::compose(
+                client,
+                compose::Pass {
+                    lib: agent.library(),
+                    kicad_cli: kicad.cli_path(),
+                    out_dir: &out_dir,
+                    design: &current,
+                    defects: &defects,
+                    baseline,
+                    rounds: options.compose_rounds,
+                    deadline: compose_deadline,
+                },
+            )
+            .await?;
+            compose_seconds = composed.seconds;
+            if let Some(better) = composed.sheet {
+                std::fs::copy(&better, agent.out_sch())
+                    .with_context(|| format!("delivering {}", agent.out_sch().display()))?;
+                schematic = Some(agent.out_sch().to_path_buf());
+                design = composed.design;
+                review = composed.review;
+                event("compose: the polished layout was delivered");
+            }
         }
     }
 
@@ -214,6 +220,29 @@ fn final_renders(
 
 fn round1(seconds: f64) -> f64 {
     (seconds * 10.0).round() / 10.0
+}
+
+/// A review already this close to the critic's ceiling has nothing worth
+/// polishing; the compose pass is skipped outright rather than spend the wall
+/// clock chasing a fraction of a point.
+const COMPOSE_SKIP_REVIEW: f64 = 8.9;
+
+/// The compose pass's own wall-clock cap: never worth more than a minute, and
+/// never so much that it eats into the reserve the PCB stage needs to finish
+/// publishing after both stages join.
+const COMPOSE_MAX: Duration = Duration::from_secs(60);
+
+/// Whether the accepted build is already good enough that polishing it is not
+/// worth the wall clock.
+fn skip_compose(review: Option<&critic::Review>) -> bool {
+    review.is_some_and(|r| r.mean >= COMPOSE_SKIP_REVIEW)
+}
+
+/// The compose pass's wall-clock budget: at most [`COMPOSE_MAX`], and never
+/// more than what is left once the PCB stage's own delivery reserve is set
+/// aside, so a long compose pass cannot itself blow the run's deadline.
+fn compose_cap(remaining: Duration) -> Duration {
+    COMPOSE_MAX.min(remaining.saturating_sub(DELIVERY_RESERVE))
 }
 
 /// Move a finished board out of its attempt directory and next to the design.
@@ -404,6 +433,56 @@ impl EarlyBoard {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn review(mean: f64) -> critic::Review {
+        critic::Review {
+            score: mean,
+            mean,
+            samples: vec![mean],
+            verdict: Value::Null,
+        }
+    }
+
+    /// A build already at or past the skip threshold has nothing worth
+    /// polishing.
+    #[test]
+    fn compose_is_skipped_once_the_review_is_already_near_perfect() {
+        assert!(skip_compose(Some(&review(8.9))));
+        assert!(skip_compose(Some(&review(9.0))));
+    }
+
+    /// Below the threshold, or with no review at all, the pass still runs.
+    #[test]
+    fn compose_runs_below_the_threshold_or_with_no_review() {
+        assert!(!skip_compose(Some(&review(8.89))));
+        assert!(!skip_compose(Some(&review(6.0))));
+        assert!(!skip_compose(None));
+    }
+
+    /// A generous remaining budget still caps the pass at a minute.
+    #[test]
+    fn compose_cap_never_exceeds_a_minute() {
+        assert_eq!(compose_cap(Duration::from_secs(600)), COMPOSE_MAX);
+    }
+
+    /// A tight remaining budget shrinks the cap by the PCB delivery reserve,
+    /// rather than let the pass eat into it.
+    #[test]
+    fn compose_cap_yields_to_the_delivery_reserve() {
+        let remaining = Duration::from_secs(40);
+        assert_eq!(compose_cap(remaining), remaining - DELIVERY_RESERVE);
+    }
+
+    /// Once there is less budget left than the delivery reserve needs, the
+    /// cap collapses to zero rather than go negative — the pass is not
+    /// started at all.
+    #[test]
+    fn compose_cap_collapses_to_zero_when_the_reserve_does_not_fit() {
+        assert_eq!(
+            compose_cap(Duration::from_secs(5)),
+            Duration::ZERO
+        );
+    }
 
     /// A finished board is copied out of its attempt directory next to the
     /// design — the `.kicad_pro` with it — and the outcome names where it landed.

@@ -181,7 +181,7 @@ fn drawn_texts(doc: &Schematic) -> Vec<Text> {
             owner: None,
             what: "text".into(),
             text: text.text.clone(),
-            bbox: text_box(text.at, text.rot, text.size, &text.text, Justify::Center),
+            bbox: text_box(text.at, text.rot, text.size, &text.text, text.justify),
             is_label: false,
         });
     }
@@ -201,8 +201,10 @@ fn shown(field: &Field) -> bool {
 /// at the justified edge and the text runs along its own rotation: 0 to the
 /// right, 90 upwards, 180 to the left, 270 downwards.
 fn text_box(at: Point, rot: f64, size: f64, text: &str, justify: Justify) -> Rect {
-    let width = text.chars().count() as f64 * size * 0.8;
-    let height = size * 1.2;
+    let lines: Vec<&str> = text.split('\n').collect();
+    let longest = lines.iter().map(|l| l.chars().count()).max().unwrap_or(0);
+    let width = longest as f64 * size * 0.8;
+    let height = lines.len() as f64 * size * 1.2;
     let (sin, cos) = rot.rem_euclid(360.0).to_radians().sin_cos();
     let along = Point::new(cos, -sin);
     let across = Point::new(-sin, -cos);

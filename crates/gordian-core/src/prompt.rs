@@ -32,7 +32,7 @@ KiCad ERC, renders a PNG and gets an independent visual review that you will see
              {"title": "POWER", "tree": {"row": [{"part": "J1"}, {"part": "C3"}, {"part": "U2"}, {"part": "C4"}], "gap": 10}} ],
  "flags": ["VIN", "GND"],          # nets that get a PWR_FLAG (supply nets only driven by connectors/regulator outputs; GND from a connector)
  "power": ["VREF"],                # optional: extra net names to treat as power rails (drawn with power symbols)
- "notes": ["free text notes"]
+ "notes": ["one short line"]      # a sheet-level NOTES text block seated like any other block: keep to 0-2 short lines
 }
 LAYOUT (the part you are best at): every block is a tree of "row"/"col" containers - exactly like CSS flexbox - whose
 leaves are parts: {"part": "R1"} (multi-unit: {"part": "U1", "unit": 2}; optional "rot": 0|90|180|270, "mirror": "y"; default orientation: series passives
@@ -55,7 +55,8 @@ that are close, uses net labels for the rest, and adds power symbols. Compositio
   MCU block) and give every part a place; parts left out of every tree land in a MISC block (avoid).
 - Gaps: 4-6 for passive chains, 6-8 around ICs and between sub-rows; below ~5 a gap does nothing, so cure texts that
   touch by moving the part to the other side of its node, not by raising gaps.
-- A row wider than ~150 units wraps: split it yourself into {"col": [{"row": ...}, {"row": ...}]}. Blocks under 3
+- A row wider than ~150 units wraps silently into several rows: either split it yourself into {"col": [{"row": ...},
+  {"row": ...}]}, or, for one deliberately long single path (a power chain), give that row "wrap": 400. Blocks under 3
   parts get folded into a neighbour, so do not write them. Keep every block COMPACT: the reviewer
   penalizes empty space, long wires and parts far from what they connect to; it rewards tight, aligned, readable
   blocks with short straight wires. Use "rot" only when the default looks wrong.
@@ -75,7 +76,9 @@ Parts connected only within a block are wired directly; connections across block
 - PWR_FLAG (via "flags") on supply nets only driven by connectors or regulator outputs, and on GND when ground only
   comes from a connector - one per net. NEVER flag a net that already has a pin of type "power_out" (many connectors
   and regulators declare GND or their output that way): two power outputs on one net is a KiCad ERC error, so check
-  the `symbol_info` electrical types before adding a flag.
+  the `symbol_info` electrical types before adding a flag; in particular do not flag GND when a connector already
+  drives it. A flag only attaches where the net is WIRED inside a block, so put the flagged net's part next to the
+  connector that feeds it (the bulk cap on VBAT beside the battery connector, not off in a cap bank).
 - Net names meaningful and consistent (USB_DP, SWDIO, UART1_TX, NRST, BOOT0, LED_PWR). Use the same net name on both
   ends; a net with a single pin is almost always a mistake.
 - Reference designators by convention (R, C, L, D, Q, U, J, Y, SW, F, FB, TP, JP), numbered 1..n.
@@ -88,7 +91,8 @@ Parts connected only within a block are wired directly; connections across block
 - Blocks: 2-6 functional blocks (POWER, MCU, USB, CLOCK, DEBUG, CONNECTORS, LEDS, SENSORS, INPUT STAGE, OUTPUT ...),
   each containing ALL the parts of one sub-circuit that are wired together (an amplifier stage with its bias, load,
   bypass and coupling parts is ONE block; parts in different blocks can only meet through net labels, which makes
-  small circuits unreadable). Add a "note" where a human would explain a design choice.
+  small circuits unreadable). Add a short "note" where a human would explain a design choice - one line, since the
+  block note prints under the block and a long one pushes its neighbours away.
   Fill title/rev/date/company. Ask for the paper the design just FITS on or one size smaller (A3 for a big MCU
   board, A4 for a small circuit), never larger: a roomy sheet spreads the blocks out and the reviewer calls it sprawl.
 - Draw every function ONCE. Two reset buttons, two USB entries or a boot strap repeated under another heading is the

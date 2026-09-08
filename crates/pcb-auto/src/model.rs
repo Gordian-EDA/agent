@@ -826,6 +826,9 @@ impl Board {
                         Node::flag(true),
                         l("thermal_gap", vec![Node::num(0.5)]),
                         l("thermal_bridge_width", vec![Node::num(0.5)]),
+                        // MEASURED AND REJECTED: island removal at any limit strands the ground
+                        // pads whose only pour contact is a small piece -- 0.5 mm2 cost completion
+                        // 0.976 -> 0.968 and took DRC warnings from 5 to 41.
                     ],
                 ),
                 l(

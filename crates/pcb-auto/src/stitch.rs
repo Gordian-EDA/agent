@@ -164,18 +164,10 @@ pub fn stitch_islands(
             uf.join(w[0], w[1]);
         }
     }
-    for t in board.tracks() {
-        if t.net_id != gnd.id {
-            continue;
-        }
-        // ON ITS OWN LAYER: a back-side track running over a front-side island joins nothing,
-        // and treating it as a join is what left islands looking connected and unstitched.
-        let mut h = hits(t.start, Some(&t.layer));
-        h.extend(hits(t.end, Some(&t.layer)));
-        for w in h.windows(2) {
-            uf.join(w[0], w[1]);
-        }
-    }
+    // Only a via or a plated through-hole is taken as a join. A ground track that grazes two
+    // islands may or may not be metal-to-metal with both, and believing it is left islands
+    // looking connected that KiCad reports as open; being wrong the other way only costs a via,
+    // and every via this places is clearance-checked before it goes in.
     // the component holding the largest island is the plane; everything else has to reach it
     let main = (0..islands.len())
         .max_by(|a, b| {

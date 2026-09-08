@@ -103,6 +103,7 @@ pub struct FreeText {
     pub rot: f64,
     pub text: String,
     pub size: f64,
+    pub justify: Justify,
 }
 
 #[derive(Debug, Clone)]
@@ -198,6 +199,7 @@ impl Schematic {
                             .unwrap_or("")
                             .into(),
                         size: font_size(item),
+                        justify: justify(item),
                     });
                 }
                 Some("sheet") => doc.sheets.push(read_sheet(item)),

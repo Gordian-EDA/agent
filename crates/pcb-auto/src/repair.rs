@@ -293,16 +293,7 @@ fn components(board: &Board, islands: &[Island], gnd: i64) -> (Vec<usize>, Optio
             uf.join(w[0], w[1]);
         }
     }
-    for t in board.tracks() {
-        if t.net_id != gnd {
-            continue;
-        }
-        let mut h = hits(t.start, Some(&t.layer));
-        h.extend(hits(t.end, Some(&t.layer)));
-        for w in h.windows(2) {
-            uf.join(w[0], w[1]);
-        }
-    }
+    // see the note in `stitch`: only a via or a plated through-hole counts as a join
     let main = (0..islands.len())
         .max_by(|a, b| {
             polygon_area(&islands[*a].poly)

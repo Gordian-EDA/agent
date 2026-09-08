@@ -209,12 +209,15 @@ async fn round(
 ///
 /// A round that runs into the wall clock is wasted whole, and its model calls are
 /// the least predictable part of the run — measured rounds ranged from 40 s to
-/// 75 s — so the measurement is taken with a wide margin.
+/// 75 s. The caller's deadline is itself capped at 60 s (see
+/// `run::COMPOSE_MAX`), so the first-round guess is pinned to that same ceiling:
+/// any looser and a fully-budgeted first round would never even start; any
+/// tighter and it would risk starting one it cannot finish. The hard cap still
+/// comes from the `tokio::time::timeout` around the round itself, so a guess
+/// that turns out optimistic costs only that round, never the deadline.
 fn round_cost(started: Instant, done: usize) -> Duration {
     match done {
-        // A round is two model calls plus a seven-read grade of each candidate,
-        // measured at 50-75 s.
-        0 => Duration::from_secs(75),
+        0 => Duration::from_secs(60),
         done => started.elapsed().mul_f64(1.6) / done as u32,
     }
 }
@@ -276,7 +279,14 @@ mod tests {
     #[test]
     fn the_first_round_is_costed_conservatively_and_then_by_measurement() {
         let started = Instant::now() - Duration::from_secs(60);
-        assert_eq!(round_cost(started, 0), Duration::from_secs(75));
+        assert_eq!(round_cost(started, 0), Duration::from_secs(60));
         assert!(round_cost(started, 2) >= Duration::from_secs(48));
+    }
+
+    /// The first-round guess matches the compose pass's own wall-clock cap
+    /// (`run::COMPOSE_MAX`): a fully-budgeted cap must still let a round start.
+    #[test]
+    fn the_first_round_guess_fits_inside_the_compose_cap() {
+        assert_eq!(round_cost(Instant::now(), 0), Duration::from_secs(60));
     }
 }
