@@ -19,6 +19,7 @@ fn main() -> anyhow::Result<()> {
     let mut board: Option<PathBuf> = None;
     let mut out = PathBuf::from("target/bluepill");
     let mut timeout = 90u64;
+    let mut holes = 4u32;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
@@ -26,6 +27,7 @@ fn main() -> anyhow::Result<()> {
             "--board" => board = args.next().map(PathBuf::from),
             "--out" => out = args.next().map(PathBuf::from).unwrap_or(out),
             "--timeout" => timeout = args.next().and_then(|v| v.parse().ok()).unwrap_or(timeout),
+            "--holes" => holes = args.next().and_then(|v| v.parse().ok()).unwrap_or(holes),
             other => anyhow::bail!("unknown argument {other}"),
         }
     }
@@ -48,15 +50,12 @@ fn main() -> anyhow::Result<()> {
         anyhow::bail!("pass --sch <schematic> or --board <staging board>");
     }
 
+    // exactly what the agent asks for: no edge assignments, four mounting holes
     let opts = AutoOptions {
         outline: Outline::Suggest,
-        holes: 0,
+        holes,
         layers: 2,
-        edge_for: BTreeMap::from([
-            ("J2".into(), "left".into()),
-            ("J3".into(), "right".into()),
-            ("J1".into(), "top".into()),
-        ]),
+        edge_for: BTreeMap::new(),
         gnd_zone: true,
         timeout_s: timeout,
     };

@@ -191,12 +191,20 @@ pub fn stitch_pours(
     }
     for f in board.footprints() {
         for p in &f.pads {
+            if let Some(d) = p.drill.filter(|d| *d > 0.0) {
+                obstacles.push(Obstacle::Disc(p.pos, d / 2.0 + rules.hole_clearance));
+            }
+        }
+    }
+    for f in board.footprints() {
+        for p in &f.pads {
             if p.net_id != gnd.id || p.is_through() {
                 obstacles.push(Obstacle::Box(p.bbox(), 0.0));
             }
         }
     }
-    let need = r + clearance;
+    // the barrel owes copper its clearance and every other hole its hole-to-hole gap
+    let need = r + clearance.max(rules.hole_clearance);
     // a stitch via is copper like any other: it owes the board edge its edge clearance
     let edge_keep = r + rules.edge_clearance;
     let outline = board.outline_polygon().unwrap_or_default();

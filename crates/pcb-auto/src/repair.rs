@@ -30,6 +30,9 @@ struct Grid {
     layers: Vec<String>,
     /// `blocked[layer][y * nx + x]`: another net's copper, or too near the board edge.
     blocked: Vec<Vec<bool>>,
+    /// Cells where a via of the board's barrel cannot sit: it needs more room than a track, and
+    /// its drill owes every other hole a hole-to-hole gap.
+    via_blocked: Vec<bool>,
 }
 
 impl Grid {
@@ -65,6 +68,7 @@ fn build_grid(board: &Board, gnd: i64, rules: &Rules, width: f64) -> Option<Grid
         nx,
         ny,
         blocked: vec![vec![false; nx * ny]; layers.len()],
+        via_blocked: vec![false; nx * ny],
         layers,
     };
     // the board edge owes the track its edge clearance, measured from the track's own flank
@@ -80,6 +84,7 @@ fn build_grid(board: &Board, gnd: i64, rules: &Rules, width: f64) -> Option<Grid
         }
     }
     let keep = rules.clearance + width / 2.0;
+    /// `layers` empty means "the via plane", which spans the whole stack anyway.
     fn block(grid: &mut Grid, area: BBox, layers: &[usize], hit: &dyn Fn(Point) -> bool) {
         let Some((x0, y0)) = grid.cell((area.x0, area.y0)) else {
             return;
@@ -91,6 +96,9 @@ fn build_grid(board: &Board, gnd: i64, rules: &Rules, width: f64) -> Option<Grid
             for x in x0..=x1.min(grid.nx - 1) {
                 if hit(grid.point(x, y)) {
                     let i = grid.idx(x, y);
+                    if layers.is_empty() {
+                        grid.via_blocked[i] = true;
+                    }
                     for &l in layers {
                         grid.blocked[l][i] = true;
                     }
@@ -139,6 +147,46 @@ fn build_grid(board: &Board, gnd: i64, rules: &Rules, width: f64) -> Option<Grid
                 continue;
             }
             block(&mut grid, bx, &lays, &move |p| bx.contains(p));
+        }
+    }
+    // A via needs more room than a track and drills a hole: mark where one may not go, so a
+    // layer change is only ever offered somewhere the barrel is actually legal.
+    let via_keep = rules.clearance.max(rules.hole_clearance) + rules.via_size / 2.0;
+    let hole_keep = rules.hole_clearance + rules.via_drill / 2.0;
+    for y in 0..grid.ny {
+        for x in 0..grid.nx {
+            let i = grid.idx(x, y);
+            if grid.blocked.iter().any(|l| l[i]) {
+                grid.via_blocked[i] = true;
+            }
+        }
+    }
+    for t in board.tracks() {
+        if t.net_id == gnd {
+            continue;
+        }
+        let r = via_keep + t.width / 2.0;
+        let (a, b) = (t.start, t.end);
+        block(&mut grid, BBox::of_points([a, b]).inflate(r), &[], &move |p| {
+            crate::geom::seg_point_dist(a, b, p) <= r
+        });
+    }
+    for v in board.vias() {
+        let c = v.pos;
+        let r = (via_keep + v.size / 2.0).max(hole_keep + v.drill / 2.0);
+        block(&mut grid, BBox::new(c.0, c.1, c.0, c.1).inflate(r), &[], &move |p| {
+            crate::geom::dist(c, p) <= r
+        });
+    }
+    for f in board.footprints() {
+        for pad in &f.pads {
+            let drill = pad.drill.unwrap_or(0.0);
+            if pad.net_id == gnd && drill <= 0.0 {
+                continue;
+            }
+            let r = if pad.net_id == gnd { hole_keep + drill / 2.0 } else { via_keep };
+            let bx = pad.bbox().inflate(r);
+            block(&mut grid, bx, &[], &move |p| bx.contains(p));
         }
     }
     Some(grid)
@@ -207,7 +255,7 @@ fn search(grid: &Grid, sources: &[usize], targets: &[bool]) -> Option<Vec<usize>
             relax(grid.node(l, x, y + 1), 10, &mut heap, &mut cost, &mut from);
         }
         for other in 0..grid.layers.len() {
-            if other != l {
+            if other != l && !grid.via_blocked[cell] {
                 relax(grid.node(other, x, y), VIA_COST * 10, &mut heap, &mut cost, &mut from);
             }
         }

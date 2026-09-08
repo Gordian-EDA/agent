@@ -30,7 +30,7 @@ const LAYOUT_DENSITY: f64 = 0.6;
 const CLEARANCE_MARGIN_MM: f64 = 0.02;
 /// Router effort. Measured on a placed Blue Pill: the auto-routing stage stops improving around
 /// pass 15, and every pass past that is a no-op that still costs two seconds of wall clock.
-const ROUTER_PASSES: u32 = 14;
+const ROUTER_PASSES: u32 = 13;
 /// Seconds held back from the router for the DRC run and the renders that follow it. A router
 /// that overruns is killed and its whole session is lost, so the budget it is given must be one
 /// it can actually finish inside.
@@ -40,9 +40,12 @@ const ROUTE_RESERVE_S: f64 = 22.0;
 /// like a strip or a slab: a Blue Pill is 23 mm across, not 33, and a tighter board also gives
 /// the placer less empty space to scatter into.
 const RECLAIM_DENSITY: f64 = 0.7;
+/// How far in from the corner a mounting hole sits, and how much of a side its courtyard eats.
+const HOLE_INSET: f64 = 4.0;
+const HOLE_COURTYARD_MM: f64 = 6.4;
 /// A repair only has to finish the handful of nets the whole-board route left; it gets a short
 /// ladder so it fits in what is left of the budget instead of being killed mid-session.
-const REPAIR_PASSES: u32 = 8;
+const REPAIR_PASSES: u32 = 6;
 /// A stitching pass changes the fill it just measured, so it is worth repeating — but a board
 /// that still fragments after this many rounds has a placement problem, not a stitching one.
 const STITCH_ROUNDS: usize = 4;
@@ -97,6 +100,8 @@ pub struct AutoReport {
 struct Run<'a> {
     kicad: &'a KicadInstallation,
     opts: &'a AutoOptions,
+    /// `opts.edge_for` when the caller gave one, else what [`auto_edge_for`] worked out.
+    edge_for: BTreeMap<String, String>,
     notes: Vec<String>,
     started: Instant,
 }
@@ -181,6 +186,47 @@ fn ground_net(board: &Board) -> Option<crate::model::Net> {
         .find(|n| n.id != 0 && rules::is_ground_name(&n.name))
 }
 
+/// A pair of connectors is "the same header" when their seated lengths agree this closely.
+const TWIN_TOLERANCE: f64 = 0.05;
+/// Below this a connector is a jumper or a debug header, not something that defines an edge.
+const LONG_CONNECTOR_MM: f64 = 12.0;
+
+/// Where the connectors go when the caller did not say.
+///
+/// A board's shape is decided by its longest connectors, so they are decided first: two headers of
+/// the same length are a breakout pair and belong on opposite long edges, which is what makes a
+/// board come out as a strip with the parts down the middle. Everything else asks for `any` edge,
+/// which lets the seater try each side in turn and fall back — an unassigned connector is offered
+/// exactly one side and no fallback, and a 1x20 header offered the short side is the
+/// "courtyard larger than region" failure.
+pub fn auto_edge_for(board: &Board) -> BTreeMap<String, String> {
+    let mut conns: Vec<(String, f64)> = board
+        .footprints()
+        .iter()
+        .filter(|f| place::is_connector(f) && !f.locked && !f.is_dnp() && !is_mounting_hole(f))
+        .map(|f| (f.ref_.clone(), side_extent(f)))
+        .collect();
+    conns.sort_by(|a, b| {
+        b.1.partial_cmp(&a.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(a.0.cmp(&b.0))
+    });
+    let mut out: BTreeMap<String, String> = BTreeMap::new();
+    let mut rest = conns.as_slice();
+    if let [(a, la), (b, lb), ..] = conns.as_slice()
+        && *la >= LONG_CONNECTOR_MM
+        && (la - lb).abs() <= la * TWIN_TOLERANCE
+    {
+        out.insert(a.clone(), "left".into());
+        out.insert(b.clone(), "right".into());
+        rest = &conns[2..];
+    }
+    for (r, _) in rest {
+        out.insert(r.clone(), "any".into());
+    }
+    out
+}
+
 /// How much of a board side a part eats when it is seated on one, courtyard plus a hair.
 fn side_extent(f: &crate::model::Footprint) -> f64 {
     let b = f.courtyard_bbox();
@@ -198,6 +244,7 @@ fn side_extent(f: &crate::model::Footprint) -> f64 {
 fn suggest_outline_for_edges(
     board: &Board,
     edge_for: &BTreeMap<String, String>,
+    holes: u32,
     density: f64,
     margin: f64,
     aspect: f64,
@@ -211,7 +258,9 @@ fn suggest_outline_for_edges(
         place::is_connector(f) && !f.locked && !seated.contains_key(f.ref_.as_str())
     };
     let mut per_side: BTreeMap<&str, f64> = BTreeMap::new();
-    let mut need_any = 0.0f64;
+    let mut need_any: f64 = 0.0;
+    // depth the seated connectors take out of the dimension ACROSS their edge
+    let (mut across_w, mut across_h) = (0.0f64, 0.0f64);
     let mut big_free = 0.0f64;
     let mut courtyard_area = 0.0f64;
     for f in &fps {
@@ -222,6 +271,17 @@ fn suggest_outline_for_edges(
         match seated.get(f.ref_.as_str()) {
             Some(&edge) if ["left", "right", "top", "bottom"].contains(&edge) => {
                 *per_side.entry(edge).or_default() += side_extent(f) + margin;
+                let depth = {
+                    let b = f.courtyard_bbox();
+                    if b.valid() { b.w().min(b.h()) } else { 0.0 }
+                };
+                // a part seated on a side also eats ACROSS it, and the cloud has to fit between
+                let across = if edge == "left" || edge == "right" {
+                    &mut across_w
+                } else {
+                    &mut across_h
+                };
+                *across += depth + margin;
             }
             // A connector nobody assigned an edge to will be seated on whichever side has room.
             // It pins ONE dimension, not both: charging it to width and height alike is what
@@ -231,6 +291,20 @@ fn suggest_outline_for_edges(
             }
             _ => big_free = big_free.max(b.w().max(b.h())),
         }
+    }
+    // Mounting holes sit at the corners, so both ends of every side are spoken for and a header
+    // has only the middle of its edge to stand in. Sizing without this is why a 51 mm header did
+    // not fit a 55 mm board that also carried four holes.
+    let corner = if holes >= 2 {
+        2.0 * (HOLE_INSET + HOLE_COURTYARD_MM / 2.0 + margin)
+    } else {
+        0.0
+    };
+    for v in per_side.values_mut() {
+        *v += corner;
+    }
+    if need_any > 0.0 {
+        need_any += corner;
     }
     let need_h = per_side
         .get("left")
@@ -246,8 +320,9 @@ fn suggest_outline_for_edges(
     let tight = courtyard_area / RECLAIM_DENSITY;
     let h0 = (inner / aspect).sqrt();
     let w0 = inner / h0;
-    let floor_w = need_w.max(big_free);
-    let floor_h = need_h.max(big_free);
+    // the cloud must still fit between whatever is seated on the two facing edges
+    let floor_w = need_w.max(big_free + across_w);
+    let floor_h = need_h.max(big_free + across_h);
     let mut w = w0.max(floor_w);
     let mut h = h0.max(floor_h);
     // an unassigned connector needs a side long enough for it, on the long dimension
@@ -255,10 +330,16 @@ fn suggest_outline_for_edges(
         if h >= w { h = need_any } else { w = need_any }
     }
     // give the area back on whichever dimension a connector did not pin
+    // Reclaim against the room the content can actually use: the corner allowance is dead space
+    // at the ends of a side, so dividing the area by the grown length would starve the other
+    // dimension -- which is how a board that grew for its mounting holes came out too narrow to
+    // place in.
+    let usable_h = (h - corner).max(1.0);
+    let usable_w = (w - corner).max(1.0);
     if h > h0 && w > floor_w {
-        w = floor_w.max(tight / h).min(w);
+        w = floor_w.max(tight / usable_h).min(w);
     } else if w > w0 && h > floor_h {
-        h = floor_h.max(tight / w).min(h);
+        h = floor_h.max(tight / usable_w).min(h);
     }
     (
         ((w + 2.0 * margin) * 10.0).round() / 10.0,
@@ -272,11 +353,11 @@ fn step_outline(run: &mut Run, board: &mut Board) {
         Outline::Keep if board.outline_polygon().is_some() => return,
         Outline::Keep => {
             run.note("outline='keep' but the board has no closed outline; sized one");
-            suggest_outline_for_edges(board, &run.opts.edge_for, LAYOUT_DENSITY, 1.0, 1.5)
+            suggest_outline_for_edges(board, &run.edge_for, run.opts.holes, LAYOUT_DENSITY, 1.0, 1.5)
         }
         Outline::Rect { w, h, .. } => (*w, *h),
         Outline::Suggest => {
-            suggest_outline_for_edges(board, &run.opts.edge_for, LAYOUT_DENSITY, 1.0, 1.5)
+            suggest_outline_for_edges(board, &run.edge_for, run.opts.holes, LAYOUT_DENSITY, 1.0, 1.5)
         }
     };
     let radius = match &run.opts.outline {
@@ -325,7 +406,7 @@ fn step_holes(run: &mut Run, board: &mut Board) {
     };
     // A hole's courtyard is wider than its drill, so the inset has to clear the courtyard, not
     // the hole: too small an inset hangs it over the edge.
-    let inset = 4.0f64;
+    let inset = HOLE_INSET;
     let pos = hole_positions(&bb, run.opts.holes, inset);
     if pos.is_empty() {
         run.note(format!(
@@ -382,7 +463,7 @@ fn spread_for(board: &Board) -> f64 {
 
 fn step_placement(run: &mut Run, board: &mut Board, seed: u64) -> place::PlacementPlan {
     let mut opts = PlanOptions {
-        edge_for: run.opts.edge_for.clone(),
+        edge_for: run.edge_for.clone(),
         seat_connectors: true,
         spread: spread_for(board),
         seed,
@@ -482,13 +563,22 @@ pub fn auto_layout(
     opts: &AutoOptions,
 ) -> anyhow::Result<AutoReport> {
     let started = Instant::now();
+    let mut board = Board::load(pcb)?;
     let mut run = Run {
         kicad,
         opts,
+        edge_for: if opts.edge_for.is_empty() {
+            auto_edge_for(&board)
+        } else {
+            opts.edge_for.clone()
+        },
         notes: Vec::new(),
         started,
     };
-    let mut board = Board::load(pcb)?;
+    if opts.edge_for.is_empty() && !run.edge_for.is_empty() {
+        let seats: Vec<String> = run.edge_for.iter().map(|(r, e)| format!("{r}:{e}")).collect();
+        run.note(format!("edge seating chosen automatically: {}", seats.join(" ")));
+    }
     board.with_copper_layers(opts.layers.max(2) as usize);
 
     step_outline(&mut run, &mut board);
