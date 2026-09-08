@@ -1,0 +1,10 @@
+{
+ "issues": [
+  "layout block 'AMPLIFIER OUTPUT': part 'Q1' appears twice"
+ ],
+ "layout_failed": true,
+ "netlist": {},
+ "notes": [],
+ "paper": "A4",
+ "warnings": []
+}

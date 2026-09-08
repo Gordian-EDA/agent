@@ -1,0 +1,753 @@
+{
+ "symbols": [
+  {
+   "lib": "Device:R",
+   "unit": 1,
+   "rot": 0,
+   "mirror": "",
+   "rot_body": [
+    1.016,
+    2.54
+   ],
+   "two_pin_axis": "v",
+   "connector_text_slot": "right",
+   "body": [
+    -1.016,
+    -2.54,
+    1.016,
+    2.54
+   ],
+   "bbox": [
+    -1.016,
+    -3.81,
+    1.016,
+    3.81
+   ],
+   "npins": 2
+  },
+  {
+   "lib": "Device:R",
+   "unit": 1,
+   "rot": 90,
+   "mirror": "",
+   "rot_body": [
+    2.54,
+    1.016
+   ],
+   "two_pin_axis": "h",
+   "connector_text_slot": "above",
+   "body": [
+    -1.016,
+    -2.54,
+    1.016,
+    2.54
+   ],
+   "bbox": [
+    -1.016,
+    -3.81,
+    1.016,
+    3.81
+   ],
+   "npins": 2
+  },
+  {
+   "lib": "Device:C",
+   "unit": 1,
+   "rot": 0,
+   "mirror": "",
+   "rot_body": [
+    2.032,
+    0.762
+   ],
+   "two_pin_axis": "v",
+   "connector_text_slot": "right",
+   "body": [
+    -2.032,
+    -0.762,
+    2.032,
+    0.762
+   ],
+   "bbox": [
+    -2.032,
+    -3.81,
+    2.032,
+    3.81
+   ],
+   "npins": 2
+  },
+  {
+   "lib": "Device:C",
+   "unit": 1,
+   "rot": 90,
+   "mirror": "",
+   "rot_body": [
+    0.762,
+    2.032
+   ],
+   "two_pin_axis": "h",
+   "connector_text_slot": "above",
+   "body": [
+    -2.032,
+    -0.762,
+    2.032,
+    0.762
+   ],
+   "bbox": [
+    -2.032,
+    -3.81,
+    2.032,
+    3.81
+   ],
+   "npins": 2
+  },
+  {
+   "lib": "Device:LED",
+   "unit": 1,
+   "rot": 0,
+   "mirror": "",
+   "rot_body": [
+    4.572,
+    2.286
+   ],
+   "two_pin_axis": "h",
+   "connector_text_slot": "above",
+   "body": [
+    -4.572,
+    -2.286,
+    1.27,
+    1.27
+   ],
+   "bbox": [
+    -4.572,
+    -2.286,
+    3.81,
+    1.27
+   ],
+   "npins": 2
+  },
+  {
+   "lib": "Device:LED",
+   "unit": 1,
+   "rot": 90,
+   "mirror": "y",
+   "rot_body": [
+    2.286,
+    4.572
+   ],
+   "two_pin_axis": "v",
+   "connector_text_slot": "right",
+   "body": [
+    -4.572,
+    -2.286,
+    1.27,
+    1.27
+   ],
+   "bbox": [
+    -4.572,
+    -2.286,
+    3.81,
+    1.27
+   ],
+   "npins": 2
+  },
+  {
+   "lib": "Device:D",
+   "unit": 1,
+   "rot": 180,
+   "mirror": "",
+   "rot_body": [
+    1.27,
+    1.27
+   ],
+   "two_pin_axis": "h",
+   "connector_text_slot": "above",
+   "body": [
+    -1.27,
+    -1.27,
+    1.27,
+    1.27
+   ],
+   "bbox": [
+    -3.81,
+    -1.27,
+    3.81,
+    1.27
+   ],
+   "npins": 2
+  },
+  {
+   "lib": "Device:Crystal",
+   "unit": 1,
+   "rot": 0,
+   "mirror": "",
+   "rot_body": [
+    2.54,
+    2.54
+   ],
+   "two_pin_axis": "h",
+   "connector_text_slot": "above",
+   "body": [
+    -2.54,
+    -2.54,
+    2.54,
+    2.54
+   ],
+   "bbox": [
+    -3.81,
+    -2.54,
+    3.81,
+    2.54
+   ],
+   "npins": 2
+  },
+  {
+   "lib": "Amplifier_Operational:LM358",
+   "unit": 1,
+   "rot": 0,
+   "mirror": "",
+   "rot_body": [
+    5.08,
+    5.08
+   ],
+   "two_pin_axis": "v",
+   "connector_text_slot": "above",
+   "body": [
+    -5.08,
+    -5.08,
+    5.08,
+    5.08
+   ],
+   "bbox": [
+    -7.62,
+    -5.08,
+    7.62,
+    5.08
+   ],
+   "npins": 3
+  },
+  {
+   "lib": "Amplifier_Operational:LM358",
+   "unit": 3,
+   "rot": 0,
+   "mirror": "",
+   "rot_body": [
+    2.54,
+    7.62
+   ],
+   "two_pin_axis": "v",
+   "connector_text_slot": "right",
+   "body": [
+    -2.540000000000001,
+    -7.62,
+    -2.5399999999999996,
+    7.62
+   ],
+   "bbox": [
+    -2.540000000000001,
+    -7.62,
+    -2.5399999999999996,
+    7.62
+   ],
+   "npins": 2
+  },
+  {
+   "lib": "MCU_ST_STM32F1:STM32F103C8Tx",
+   "unit": 1,
+   "rot": 0,
+   "mirror": "",
+   "rot_body": [
+    15.24,
+    38.1
+   ],
+   "two_pin_axis": "v",
+   "connector_text_slot": "above",
+   "body": [
+    -15.24,
+    -38.1,
+    15.24,
+    38.1
+   ],
+   "bbox": [
+    -17.78,
+    -40.64,
+    17.78,
+    40.64
+   ],
+   "npins": 48
+  },
+  {
+   "lib": "Connector_Generic:Conn_01x04",
+   "unit": 1,
+   "rot": 0,
+   "mirror": "",
+   "rot_body": [
+    1.27,
+    6.35
+   ],
+   "two_pin_axis": "v",
+   "connector_text_slot": "right",
+   "body": [
+    -1.27,
+    -6.35,
+    1.27,
+    3.81
+   ],
+   "bbox": [
+    -5.08,
+    -6.35,
+    1.27,
+    3.81
+   ],
+   "npins": 4
+  },
+  {
+   "lib": "Connector_Generic:Conn_01x04",
+   "unit": 1,
+   "rot": 180,
+   "mirror": "",
+   "rot_body": [
+    1.27,
+    6.35
+   ],
+   "two_pin_axis": "v",
+   "connector_text_slot": "left",
+   "body": [
+    -1.27,
+    -6.35,
+    1.27,
+    3.81
+   ],
+   "bbox": [
+    -5.08,
+    -6.35,
+    1.27,
+    3.81
+   ],
+   "npins": 4
+  },
+  {
+   "lib": "Connector_Generic:Conn_02x05_Odd_Even",
+   "unit": 1,
+   "rot": 0,
+   "mirror": "",
+   "rot_body": [
+    3.81,
+    6.35
+   ],
+   "two_pin_axis": "v",
+   "connector_text_slot": "above",
+   "body": [
+    -1.27,
+    -6.35,
+    3.81,
+    6.35
+   ],
+   "bbox": [
+    -5.08,
+    -6.35,
+    7.62,
+    6.35
+   ],
+   "npins": 10
+  },
+  {
+   "lib": "Transistor_BJT:BC547",
+   "unit": 1,
+   "rot": 0,
+   "mirror": "",
+   "rot_body": [
+    4.0894,
+    2.8194
+   ],
+   "two_pin_axis": "v",
+   "connector_text_slot": "right",
+   "body": [
+    -2.54,
+    -2.8194,
+    4.0893999999999995,
+    2.8194
+   ],
+   "bbox": [
+    -5.08,
+    -5.08,
+    4.0893999999999995,
+    5.08
+   ],
+   "npins": 3
+  },
+  {
+   "lib": "Transistor_BJT:BC547",
+   "unit": 1,
+   "rot": 90,
+   "mirror": "y",
+   "rot_body": [
+    2.8194,
+    4.0894
+   ],
+   "two_pin_axis": "v",
+   "connector_text_slot": "above",
+   "body": [
+    -2.54,
+    -2.8194,
+    4.0893999999999995,
+    2.8194
+   ],
+   "bbox": [
+    -5.08,
+    -5.08,
+    4.0893999999999995,
+    5.08
+   ],
+   "npins": 3
+  },
+  {
+   "lib": "Regulator_Linear:AMS1117-3.3",
+   "unit": 1,
+   "rot": 0,
+   "mirror": "",
+   "rot_body": [
+    5.08,
+    5.08
+   ],
+   "two_pin_axis": "v",
+   "connector_text_slot": "above",
+   "body": [
+    -5.08,
+    -5.08,
+    5.08,
+    1.905
+   ],
+   "bbox": [
+    -7.62,
+    -7.62,
+    7.62,
+    1.905
+   ],
+   "npins": 3
+  },
+  {
+   "lib": "Timer:NE555P",
+   "unit": 1,
+   "rot": 0,
+   "mirror": "",
+   "rot_body": [
+    7.62,
+    7.62
+   ],
+   "two_pin_axis": "v",
+   "connector_text_slot": "above",
+   "body": [
+    -7.62,
+    -7.62,
+    7.62,
+    7.62
+   ],
+   "bbox": [
+    -10.16,
+    -10.16,
+    10.16,
+    10.16
+   ],
+   "npins": 8
+  },
+  {
+   "lib": "Switch:SW_Push",
+   "unit": 1,
+   "rot": 0,
+   "mirror": "",
+   "rot_body": [
+    2.54,
+    3.048
+   ],
+   "two_pin_axis": "h",
+   "connector_text_slot": "above",
+   "body": [
+    -2.54,
+    -0.508,
+    2.54,
+    3.048
+   ],
+   "bbox": [
+    -5.08,
+    -0.508,
+    5.08,
+    3.048
+   ],
+   "npins": 2
+  },
+  {
+   "lib": "Device:R_Small",
+   "unit": 1,
+   "rot": 270,
+   "mirror": "x",
+   "rot_body": [
+    1.778,
+    0.762
+   ],
+   "two_pin_axis": "h",
+   "connector_text_slot": "above",
+   "body": [
+    -0.762,
+    -1.778,
+    0.762,
+    1.778
+   ],
+   "bbox": [
+    -0.762,
+    -2.54,
+    0.762,
+    2.54
+   ],
+   "npins": 2
+  }
+ ],
+ "is_power_net": {
+  "GND": [
+   true,
+   true
+  ],
+  "GNDA": [
+   true,
+   true
+  ],
+  "AGND": [
+   true,
+   true
+  ],
+  "VSS": [
+   true,
+   true
+  ],
+  "+3V3": [
+   true,
+   true
+  ],
+  "3V3": [
+   true,
+   true
+  ],
+  "+5V": [
+   true,
+   true
+  ],
+  "-12V": [
+   true,
+   true
+  ],
+  "5V0": [
+   true,
+   true
+  ],
+  "VCC": [
+   true,
+   true
+  ],
+  "VDD": [
+   true,
+   true
+  ],
+  "VBUS": [
+   true,
+   true
+  ],
+  "SDA": [
+   false,
+   false
+  ],
+  "N$1": [
+   false,
+   false
+  ],
+  "PWR_FLAG": [
+   true,
+   true
+  ],
+  "VDDA": [
+   true,
+   true
+  ],
+  "+3.3V": [
+   true,
+   true
+  ],
+  "LED": [
+   false,
+   false
+  ],
+  "VOUT": [
+   true,
+   true
+  ],
+  "EARTH": [
+   true,
+   true
+  ],
+  "0V": [
+   true,
+   true
+  ],
+  "12V": [
+   true,
+   true
+  ],
+  "VMOT": [
+   false,
+   true
+  ],
+  "1V8A": [
+   true,
+   true
+  ]
+ },
+ "covers": [
+  {
+   "a": [
+    0,
+    0
+   ],
+   "b": [
+    10,
+    0
+   ],
+   "p": [
+    2,
+    0
+   ],
+   "q": [
+    5,
+    0
+   ],
+   "covers": true
+  },
+  {
+   "a": [
+    0,
+    0
+   ],
+   "b": [
+    10,
+    0
+   ],
+   "p": [
+    2,
+    0
+   ],
+   "q": [
+    12,
+    0
+   ],
+   "covers": false
+  },
+  {
+   "a": [
+    0,
+    0
+   ],
+   "b": [
+    0,
+    10
+   ],
+   "p": [
+    0,
+    3
+   ],
+   "q": [
+    0,
+    3
+   ],
+   "covers": true
+  },
+  {
+   "a": [
+    0,
+    0
+   ],
+   "b": [
+    10,
+    0
+   ],
+   "p": [
+    2,
+    1
+   ],
+   "q": [
+    5,
+    1
+   ],
+   "covers": false
+  },
+  {
+   "a": [
+    5,
+    5
+   ],
+   "b": [
+    5,
+    1
+   ],
+   "p": [
+    5,
+    2
+   ],
+   "q": [
+    5,
+    4
+   ],
+   "covers": true
+  },
+  {
+   "a": [
+    0,
+    0
+   ],
+   "b": [
+    10,
+    10
+   ],
+   "p": [
+    1,
+    1
+   ],
+   "q": [
+    2,
+    2
+   ],
+   "covers": false
+  }
+ ],
+ "strip_power_parts": {
+  "notes": [
+   "note: #FLG1 (PWR_FLAG) is not a part - moved to flags: ['+5V']",
+   "note: #PWR1 (power:GND) is a power symbol, not a part - dropped (nets get power symbols automatically)"
+  ],
+  "design": {
+   "parts": [
+    {
+     "id": "U1",
+     "lib": "Timer:NE555P",
+     "pins": {
+      "1": "GND"
+     }
+    }
+   ],
+   "layout": [
+    {
+     "title": "T",
+     "tree": {
+      "row": [
+       {
+        "part": "U1"
+       },
+       {
+        "col": []
+       }
+      ]
+     }
+    }
+   ],
+   "flags": [
+    "+5V"
+   ]
+  }
+ }
+}

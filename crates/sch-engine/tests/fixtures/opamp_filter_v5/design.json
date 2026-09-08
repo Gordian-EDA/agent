@@ -1,0 +1,401 @@
+{
+ "title": "1 kHz Sallen-Key Low-Pass and Gain 10",
+ "rev": "1.0",
+ "date": "2026-09-02",
+ "company": "OpenAI Engineering",
+ "comments": [
+  "Single 9 V battery supply with buffered virtual ground",
+  "Unity-gain Sallen-Key filter followed by non-inverting gain of 10",
+  "Mono 3.5 mm TS input and output jacks"
+ ],
+ "paper": "A4",
+ "parts": [
+  {
+   "id": "J1",
+   "lib": "Connector:Barrel_Jack",
+   "value": "9V BATTERY",
+   "footprint": "Connector_BarrelJack:BarrelJack_Horizontal",
+   "pins": {
+    "1": "+9V",
+    "2": "GND"
+   }
+  },
+  {
+   "id": "R1",
+   "lib": "Device:R",
+   "value": "100k",
+   "footprint": "Resistor_SMD:R_0603_1608Metric",
+   "pins": {
+    "1": "+9V",
+    "2": "VREF"
+   }
+  },
+  {
+   "id": "R2",
+   "lib": "Device:R",
+   "value": "100k",
+   "footprint": "Resistor_SMD:R_0603_1608Metric",
+   "pins": {
+    "1": "VREF",
+    "2": "GND"
+   }
+  },
+  {
+   "id": "C1",
+   "lib": "Device:C_Polarized",
+   "value": "10uF",
+   "footprint": "Capacitor_SMD:C_0603_1608Metric",
+   "pins": {
+    "1": "VREF",
+    "2": "GND"
+   }
+  },
+  {
+   "id": "C6",
+   "lib": "Device:C",
+   "value": "100nF",
+   "footprint": "Capacitor_SMD:C_0603_1608Metric",
+   "pins": {
+    "1": "+9V",
+    "2": "GND"
+   }
+  },
+  {
+   "id": "U1",
+   "lib": "Amplifier_Operational:LM358",
+   "unit": 1,
+   "value": "LM358",
+   "footprint": "Package_DIP:DIP-8_W7.62mm",
+   "pins": {
+    "2": "SK_OUT",
+    "3": "SK_B",
+    "1": "SK_OUT"
+   }
+  },
+  {
+   "id": "U1",
+   "lib": "Amplifier_Operational:LM358",
+   "unit": 2,
+   "value": "LM358",
+   "footprint": "Package_DIP:DIP-8_W7.62mm",
+   "pins": {
+    "6": "nc",
+    "5": "nc",
+    "7": "nc"
+   }
+  },
+  {
+   "id": "U1",
+   "lib": "Amplifier_Operational:LM358",
+   "unit": 3,
+   "value": "LM358",
+   "footprint": "Package_DIP:DIP-8_W7.62mm",
+   "pins": {
+    "8": "+9V",
+    "4": "GND"
+   }
+  },
+  {
+   "id": "U2",
+   "lib": "Amplifier_Operational:LM358",
+   "unit": 1,
+   "value": "LM358",
+   "footprint": "Package_DIP:DIP-8_W7.62mm",
+   "pins": {
+    "2": "nc",
+    "3": "nc",
+    "1": "nc"
+   }
+  },
+  {
+   "id": "U2",
+   "lib": "Amplifier_Operational:LM358",
+   "unit": 2,
+   "value": "LM358",
+   "footprint": "Package_DIP:DIP-8_W7.62mm",
+   "pins": {
+    "6": "GAIN_FB",
+    "5": "SK_OUT",
+    "7": "AMP_OUT"
+   }
+  },
+  {
+   "id": "U2",
+   "lib": "Amplifier_Operational:LM358",
+   "unit": 3,
+   "value": "LM358",
+   "footprint": "Package_DIP:DIP-8_W7.62mm",
+   "pins": {
+    "8": "+9V",
+    "4": "GND"
+   }
+  },
+  {
+   "id": "J2",
+   "lib": "Connector_Audio:AudioJack2_Ground",
+   "value": "INPUT 3.5mm",
+   "footprint": "Connector_Audio:Jack_3.5mm_CUI_SJ-43514-SMT",
+   "pins": {
+    "T": "INPUT",
+    "S": "GND",
+    "G": "GND"
+   }
+  },
+  {
+   "id": "C2",
+   "lib": "Device:C",
+   "value": "1uF",
+   "footprint": "Capacitor_SMD:C_0603_1608Metric",
+   "pins": {
+    "1": "INPUT",
+    "2": "FILTER_IN"
+   }
+  },
+  {
+   "id": "R3",
+   "lib": "Device:R",
+   "value": "1M",
+   "footprint": "Resistor_SMD:R_0603_1608Metric",
+   "pins": {
+    "1": "FILTER_IN",
+    "2": "VREF"
+   }
+  },
+  {
+   "id": "R4",
+   "lib": "Device:R",
+   "value": "15.8k",
+   "footprint": "Resistor_SMD:R_0603_1608Metric",
+   "pins": {
+    "1": "FILTER_IN",
+    "2": "SK_A"
+   }
+  },
+  {
+   "id": "R5",
+   "lib": "Device:R",
+   "value": "15.8k",
+   "footprint": "Resistor_SMD:R_0603_1608Metric",
+   "pins": {
+    "1": "SK_A",
+    "2": "SK_B"
+   }
+  },
+  {
+   "id": "C3",
+   "lib": "Device:C",
+   "value": "10nF",
+   "footprint": "Capacitor_SMD:C_0603_1608Metric",
+   "pins": {
+    "1": "SK_A",
+    "2": "SK_OUT"
+   }
+  },
+  {
+   "id": "C4",
+   "lib": "Device:C",
+   "value": "10nF",
+   "footprint": "Capacitor_SMD:C_0603_1608Metric",
+   "pins": {
+    "1": "SK_B",
+    "2": "VREF"
+   }
+  },
+  {
+   "id": "R6",
+   "lib": "Device:R",
+   "value": "10k",
+   "footprint": "Resistor_SMD:R_0603_1608Metric",
+   "pins": {
+    "1": "GAIN_FB",
+    "2": "VREF"
+   }
+  },
+  {
+   "id": "R7",
+   "lib": "Device:R",
+   "value": "90k",
+   "footprint": "Resistor_SMD:R_0603_1608Metric",
+   "pins": {
+    "1": "AMP_OUT",
+    "2": "GAIN_FB"
+   }
+  },
+  {
+   "id": "C5",
+   "lib": "Device:C_Polarized",
+   "value": "10uF",
+   "footprint": "Capacitor_SMD:C_0603_1608Metric",
+   "pins": {
+    "1": "AMP_OUT",
+    "2": "OUTPUT"
+   }
+  },
+  {
+   "id": "R8",
+   "lib": "Device:R",
+   "value": "100k",
+   "footprint": "Resistor_SMD:R_0603_1608Metric",
+   "pins": {
+    "1": "OUTPUT",
+    "2": "VREF"
+   }
+  },
+  {
+   "id": "J3",
+   "lib": "Connector_Audio:AudioJack2_Ground",
+   "value": "OUTPUT 3.5mm",
+   "footprint": "Connector_Audio:Jack_3.5mm_CUI_SJ-43514-SMT",
+   "pins": {
+    "T": "OUTPUT",
+    "S": "GND",
+    "G": "GND"
+   }
+  }
+ ],
+ "flags": [
+  "+9V",
+  "GND"
+ ],
+ "power": [],
+ "layout": [
+  {
+   "title": "POWER / VIRTUAL GROUND",
+   "note": "R1/R2 create the 4.5 V reference; C1 provides low-impedance AC ground.",
+   "tree": {
+    "row": [
+     {
+      "part": "J1"
+     },
+     {
+      "col": [
+       {
+        "part": "R1"
+       },
+       {
+        "part": "R2"
+       },
+       {
+        "part": "C1"
+       }
+      ],
+      "gap": 4
+     },
+     {
+      "col": [
+       {
+        "part": "C6"
+       },
+       {
+        "part": "U1",
+        "unit": 3
+       },
+       {
+        "part": "U1",
+        "unit": 2
+       }
+      ],
+      "gap": 5
+     },
+     {
+      "col": [
+       {
+        "part": "U2",
+        "unit": 3
+       },
+       {
+        "part": "U2",
+        "unit": 1
+       }
+      ],
+      "gap": 5
+     }
+    ],
+    "gap": 7
+   }
+  },
+  {
+   "title": "INPUT / 1 kHz LOW-PASS",
+   "note": "Equal 15.8 kOhm and 10 nF values set approximately 1 kHz cutoff.",
+   "tree": {
+    "row": [
+     {
+      "part": "J2"
+     },
+     {
+      "part": "C2"
+     },
+     {
+      "col": [
+       {
+        "part": "R3"
+       },
+       {
+        "part": "R4"
+       }
+      ],
+      "gap": 5
+     },
+     {
+      "part": "R5"
+     },
+     {
+      "col": [
+       {
+        "part": "C3"
+       },
+       {
+        "part": "C4"
+       }
+      ],
+      "gap": 5
+     },
+     {
+      "part": "U1",
+      "unit": 1
+     }
+    ],
+    "gap": 5
+   }
+  },
+  {
+   "title": "GAIN 10 / OUTPUT",
+   "note": "R7/R6 set 1 + 90k/10k = 10; C5 blocks the DC bias at the output jack.",
+   "tree": {
+    "row": [
+     {
+      "part": "U2",
+      "unit": 2
+     },
+     {
+      "col": [
+       {
+        "part": "R7"
+       },
+       {
+        "part": "R6"
+       }
+      ],
+      "gap": 4
+     },
+     {
+      "col": [
+       {
+        "part": "C5"
+       },
+       {
+        "part": "R8"
+       }
+      ],
+      "gap": 4
+     },
+     {
+      "part": "J3",
+      "rot": 90
+     }
+    ],
+    "gap": 8
+   }
+  }
+ ]
+}

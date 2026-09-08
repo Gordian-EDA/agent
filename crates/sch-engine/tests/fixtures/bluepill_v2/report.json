@@ -1,0 +1,274 @@
+{
+ "issues": [],
+ "netlist": {
+  "+3V3": [
+   "C3.1",
+   "C4.1",
+   "J1.1",
+   "J1.21",
+   "J1.35",
+   "J2.31",
+   "J3.1",
+   "JP1.2",
+   "R1.1",
+   "R3.1",
+   "R4.1",
+   "U1.1",
+   "U1.24",
+   "U1.36",
+   "U1.48",
+   "U1.9",
+   "U2.2"
+  ],
+  "+5V": [
+   "C1.1",
+   "C2.1",
+   "J4.1",
+   "U2.3"
+  ],
+  "BOOT0": [
+   "J2.29",
+   "JP1.1",
+   "R2.1",
+   "U1.44"
+  ],
+  "GND": [
+   "C1.2",
+   "C2.2",
+   "C3.2",
+   "C4.2",
+   "C5.2",
+   "C6.2",
+   "D1.2",
+   "J1.2",
+   "J1.22",
+   "J1.36",
+   "J2.30",
+   "J2.32",
+   "J2.40",
+   "J3.3",
+   "J3.5",
+   "J4.5",
+   "J4.SH",
+   "R2.2",
+   "SW1.3",
+   "U1.23",
+   "U1.8",
+   "U2.1"
+  ],
+  "LED_K": [
+   "D1.1",
+   "J1.30",
+   "R4.2",
+   "U1.2"
+  ],
+  "NRST": [
+   "J2.28",
+   "J3.6",
+   "R1.2",
+   "SW1.1",
+   "U1.7"
+  ],
+  "OSC_IN": [
+   "C5.1",
+   "J1.33",
+   "U1.5",
+   "Y1.1"
+  ],
+  "OSC_OUT": [
+   "C6.1",
+   "J1.34",
+   "U1.6",
+   "Y1.2"
+  ],
+  "PA0": [
+   "J1.3",
+   "J2.3",
+   "U1.10"
+  ],
+  "PA1": [
+   "J1.4",
+   "J2.4",
+   "U1.11"
+  ],
+  "PA10": [
+   "J1.25",
+   "J2.23",
+   "U1.31"
+  ],
+  "PA13": [
+   "J1.27"
+  ],
+  "PA14": [
+   "J1.28"
+  ],
+  "PA15": [
+   "J1.29",
+   "U1.38"
+  ],
+  "PA2": [
+   "J1.5",
+   "J2.5",
+   "U1.12"
+  ],
+  "PA3": [
+   "J1.6",
+   "J2.6",
+   "U1.13"
+  ],
+  "PA4": [
+   "J1.7",
+   "J2.7",
+   "U1.14"
+  ],
+  "PA5": [
+   "J1.8",
+   "J2.8",
+   "U1.15"
+  ],
+  "PA6": [
+   "J1.9",
+   "J2.9",
+   "U1.16"
+  ],
+  "PA7": [
+   "J1.10",
+   "J2.10",
+   "U1.17"
+  ],
+  "PA8": [
+   "J1.23",
+   "J2.21",
+   "U1.29"
+  ],
+  "PA9": [
+   "J1.24",
+   "J2.22",
+   "U1.30"
+  ],
+  "PB0": [
+   "J1.11",
+   "J2.11",
+   "U1.18"
+  ],
+  "PB1": [
+   "J1.12",
+   "J2.12",
+   "U1.19"
+  ],
+  "PB10": [
+   "J1.37",
+   "J2.33",
+   "U1.21"
+  ],
+  "PB11": [
+   "J1.38",
+   "J2.34",
+   "U1.22"
+  ],
+  "PB12": [
+   "J1.39",
+   "J2.35",
+   "U1.25"
+  ],
+  "PB13": [
+   "J1.40",
+   "J2.36",
+   "U1.26"
+  ],
+  "PB14": [
+   "J2.1",
+   "J2.37",
+   "U1.27"
+  ],
+  "PB15": [
+   "J2.2",
+   "J2.38",
+   "U1.28"
+  ],
+  "PB2": [
+   "J1.13",
+   "J2.13",
+   "U1.20"
+  ],
+  "PB3": [
+   "J1.14",
+   "J2.14",
+   "U1.39"
+  ],
+  "PB4": [
+   "J1.15",
+   "J2.15",
+   "U1.40"
+  ],
+  "PB5": [
+   "J1.16",
+   "J2.16",
+   "U1.41"
+  ],
+  "PB6": [
+   "J1.17",
+   "J2.17",
+   "U1.42"
+  ],
+  "PB7": [
+   "J1.18",
+   "J2.18",
+   "U1.43"
+  ],
+  "PB8": [
+   "J1.19",
+   "J2.19",
+   "U1.45"
+  ],
+  "PB9": [
+   "J1.20",
+   "J2.20",
+   "U1.46"
+  ],
+  "PC13": [
+   "J2.39"
+  ],
+  "PC14": [
+   "J1.31",
+   "U1.3"
+  ],
+  "PC15": [
+   "J1.32",
+   "U1.4"
+  ],
+  "SWCLK": [
+   "J2.27",
+   "J3.4",
+   "U1.37"
+  ],
+  "SWDIO": [
+   "J2.26",
+   "J3.2",
+   "U1.34"
+  ],
+  "USB_DM": [
+   "J1.26",
+   "J2.24",
+   "J4.2",
+   "U1.32"
+  ],
+  "USB_DP": [
+   "J2.25",
+   "J4.3",
+   "R3.2",
+   "U1.33"
+  ]
+ },
+ "notes": [
+  "note: block 'DEBUG' (2 parts) was folded into 'MCU + CLOCK'; define it inside that block's tree yourself next time",
+  "note: content did not fit on A4; paper changed to A3"
+ ],
+ "paper": "A3",
+ "warnings": [
+  "wire (102,66)-(102,62) runs through value text 'AMS1117-3.3' of U2 at (92,63.5)",
+  "net label 'PA13' appears only once - if it is meant to connect elsewhere, add the matching label; if it is a port/net name for documentation, that's fine",
+  "net label 'PA14' appears only once - if it is meant to connect elsewhere, add the matching label; if it is a port/net name for documentation, that's fine",
+  "net label 'PC13' appears only once - if it is meant to connect elsewhere, add the matching label; if it is a port/net name for documentation, that's fine"
+ ]
+}

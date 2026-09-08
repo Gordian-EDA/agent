@@ -1,0 +1,14 @@
+{
+ "issues": [
+  "layout block 'CONTROL': unknown part 'col'",
+  "layout block 'HEADERS': part 'U1' appears twice"
+ ],
+ "layout_failed": true,
+ "netlist": {},
+ "notes": [
+  "note: block 'DEBUG' (2 parts) was folded into 'MCU + CLOCK'; define it inside that block's tree yourself next time",
+  "note: parts not mentioned in any layout tree were put in a MISC block: R2, JP1"
+ ],
+ "paper": "A4",
+ "warnings": []
+}

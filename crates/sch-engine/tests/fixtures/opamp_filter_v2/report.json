@@ -1,0 +1,12 @@
+{
+ "issues": [
+  "layout block 'GAIN 10 / OUTPUT': unknown part 'col1'"
+ ],
+ "layout_failed": true,
+ "netlist": {},
+ "notes": [
+  "note: parts not mentioned in any layout tree were put in a MISC block: R6, R7"
+ ],
+ "paper": "A4",
+ "warnings": []
+}

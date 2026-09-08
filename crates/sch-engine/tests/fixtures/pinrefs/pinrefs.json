@@ -1,0 +1,872 @@
+{
+ "design": {
+  "title": "pin reference resolution",
+  "paper": "A4",
+  "parts": [
+   {
+    "id": "R1",
+    "lib": "Device:R",
+    "at": [
+     40,
+     30
+    ],
+    "rot": 90,
+    "value": "1k"
+   },
+   {
+    "id": "C1",
+    "lib": "Device:C",
+    "at": [
+     60,
+     30
+    ],
+    "rot": 0,
+    "value": "100nF"
+   },
+   {
+    "id": "U1",
+    "lib": "Timer:NE555P",
+    "at": [
+     90,
+     40
+    ],
+    "value": "NE555",
+    "pins": {
+     "GND": "GND",
+     "VCC": "+5V",
+     "OUT": "OUT",
+     "TRIG": "TRIG",
+     "THRES": "TRIG",
+     "DISCH": "nc"
+    }
+   }
+  ],
+  "wires": [
+   [
+    "R1.2",
+    "C1.1"
+   ],
+   [
+    [
+     40,
+     30
+    ],
+    "U1.TRIG"
+   ],
+   [
+    "R1.1"
+   ],
+   [
+    "Z9.1",
+    [
+     1,
+     1
+    ]
+   ],
+   [
+    "C1.9",
+    [
+     2,
+     2
+    ]
+   ],
+   [
+    "notapin",
+    [
+     3,
+     3
+    ]
+   ],
+   [
+    "c1.1",
+    [
+     4,
+     4
+    ]
+   ],
+   [
+    [
+     5.5,
+     6.25
+    ],
+    [
+     5.5,
+     9
+    ]
+   ]
+  ],
+  "labels": [
+   {
+    "text": "OUT",
+    "pin": "U1.OUT"
+   },
+   {
+    "text": "TRIG",
+    "at": [
+     50,
+     50
+    ]
+   }
+  ],
+  "power": [
+   {
+    "net": "GND",
+    "pin": "U1.GND"
+   },
+   {
+    "net": "+5V",
+    "pin": "U1.VCC",
+    "stub": 3
+   }
+  ],
+  "nc": [
+   "U1.CONT",
+   [
+    7,
+    7
+   ]
+  ],
+  "texts": [
+   {
+    "text": "note",
+    "at": [
+     5,
+     5
+    ]
+   }
+  ]
+ },
+ "resolved": {
+  "title": "pin reference resolution",
+  "paper": "A4",
+  "parts": [
+   {
+    "id": "R1",
+    "lib": "Device:R",
+    "at": [
+     40,
+     30
+    ],
+    "rot": 90,
+    "value": "1k"
+   },
+   {
+    "id": "C1",
+    "lib": "Device:C",
+    "at": [
+     60,
+     30
+    ],
+    "rot": 0,
+    "value": "100nF"
+   },
+   {
+    "id": "U1",
+    "lib": "Timer:NE555P",
+    "at": [
+     90,
+     40
+    ],
+    "value": "NE555",
+    "pins": {
+     "GND": "GND",
+     "VCC": "+5V",
+     "OUT": "OUT",
+     "TRIG": "TRIG",
+     "THRES": "TRIG",
+     "DISCH": "nc"
+    }
+   }
+  ],
+  "wires": [
+   [
+    [
+     43,
+     30
+    ],
+    [
+     60,
+     27
+    ]
+   ],
+   [
+    [
+     40,
+     30
+    ],
+    [
+     82,
+     44
+    ]
+   ],
+   [
+    [
+     0,
+     0
+    ],
+    [
+     1,
+     1
+    ]
+   ],
+   [
+    [
+     0,
+     0
+    ],
+    [
+     2,
+     2
+    ]
+   ],
+   [
+    [
+     0,
+     0
+    ],
+    [
+     3,
+     3
+    ]
+   ],
+   [
+    [
+     0,
+     0
+    ],
+    [
+     4,
+     4
+    ]
+   ],
+   [
+    [
+     5.5,
+     6
+    ],
+    [
+     5.5,
+     9
+    ]
+   ],
+   [
+    [
+     98,
+     40
+    ],
+    [
+     101,
+     40
+    ]
+   ],
+   [
+    [
+     90,
+     48
+    ],
+    [
+     90,
+     50
+    ]
+   ],
+   [
+    [
+     92,
+     32
+    ],
+    [
+     92,
+     29
+    ]
+   ]
+  ],
+  "labels": [
+   {
+    "text": "OUT",
+    "pin": "U1.OUT",
+    "at": [
+     101,
+     40
+    ],
+    "rot": 0
+   },
+   {
+    "text": "TRIG",
+    "at": [
+     50,
+     50
+    ]
+   }
+  ],
+  "power": [
+   {
+    "net": "GND",
+    "pin": "U1.GND",
+    "at": [
+     90,
+     50
+    ]
+   },
+   {
+    "net": "+5V",
+    "pin": "U1.VCC",
+    "stub": 3,
+    "at": [
+     92,
+     29
+    ]
+   }
+  ],
+  "nc": [
+   [
+    90,
+    32
+   ],
+   [
+    7,
+    7
+   ]
+  ],
+  "texts": [
+   {
+    "text": "note",
+    "at": [
+     5.0,
+     5.0
+    ]
+   }
+  ],
+  "rects": []
+ },
+ "errors": [
+  "wire 2: needs at least 2 points",
+  "wire 3: unknown part 'Z9' in pin reference 'Z9.1'",
+  "wire 4: part C1 has no pin '9' (available: 1, 2)",
+  "wire 5: bad point 'notapin' (use [x,y] or \"REF.PIN\"; net names are not points - use a power symbol or label at a coordinate instead)",
+  "wire 6: unknown part 'c1' in pin reference 'c1.1' (did you mean C1?)"
+ ],
+ "with_ids": {
+  "title": "pin reference resolution",
+  "paper": "A4",
+  "parts": [
+   {
+    "id": "R1",
+    "lib": "Device:R",
+    "at": [
+     40,
+     30
+    ],
+    "rot": 90,
+    "value": "1k"
+   },
+   {
+    "id": "C1",
+    "lib": "Device:C",
+    "at": [
+     60,
+     30
+    ],
+    "rot": 0,
+    "value": "100nF"
+   },
+   {
+    "id": "U1",
+    "lib": "Timer:NE555P",
+    "at": [
+     90,
+     40
+    ],
+    "value": "NE555",
+    "pins": {
+     "GND": "GND",
+     "VCC": "+5V",
+     "OUT": "OUT",
+     "TRIG": "TRIG",
+     "THRES": "TRIG",
+     "DISCH": "nc"
+    }
+   }
+  ],
+  "wires": [
+   {
+    "id": "w1",
+    "pts": [
+     [
+      43,
+      30
+     ],
+     [
+      60,
+      27
+     ]
+    ]
+   },
+   {
+    "id": "w2",
+    "pts": [
+     [
+      40,
+      30
+     ],
+     [
+      82,
+      44
+     ]
+    ]
+   },
+   {
+    "id": "w3",
+    "pts": [
+     [
+      0,
+      0
+     ],
+     [
+      1,
+      1
+     ]
+    ]
+   },
+   {
+    "id": "w4",
+    "pts": [
+     [
+      0,
+      0
+     ],
+     [
+      2,
+      2
+     ]
+    ]
+   },
+   {
+    "id": "w5",
+    "pts": [
+     [
+      0,
+      0
+     ],
+     [
+      3,
+      3
+     ]
+    ]
+   },
+   {
+    "id": "w6",
+    "pts": [
+     [
+      0,
+      0
+     ],
+     [
+      4,
+      4
+     ]
+    ]
+   },
+   {
+    "id": "w7",
+    "pts": [
+     [
+      5.5,
+      6
+     ],
+     [
+      5.5,
+      9
+     ]
+    ]
+   },
+   {
+    "id": "w8",
+    "pts": [
+     [
+      98,
+      40
+     ],
+     [
+      101,
+      40
+     ]
+    ]
+   },
+   {
+    "id": "w9",
+    "pts": [
+     [
+      90,
+      48
+     ],
+     [
+      90,
+      50
+     ]
+    ]
+   },
+   {
+    "id": "w10",
+    "pts": [
+     [
+      92,
+      32
+     ],
+     [
+      92,
+      29
+     ]
+    ]
+   }
+  ],
+  "labels": [
+   {
+    "text": "OUT",
+    "pin": "U1.OUT",
+    "at": [
+     101,
+     40
+    ],
+    "rot": 0,
+    "id": "l1"
+   },
+   {
+    "text": "TRIG",
+    "at": [
+     50,
+     50
+    ],
+    "id": "l2"
+   }
+  ],
+  "power": [
+   {
+    "net": "GND",
+    "pin": "U1.GND",
+    "at": [
+     90,
+     50
+    ],
+    "id": "p1"
+   },
+   {
+    "net": "+5V",
+    "pin": "U1.VCC",
+    "stub": 3,
+    "at": [
+     92,
+     29
+    ],
+    "id": "p2"
+   }
+  ],
+  "nc": [
+   "U1.CONT",
+   [
+    7,
+    7
+   ]
+  ],
+  "texts": [
+   {
+    "text": "note",
+    "at": [
+     5,
+     5
+    ]
+   }
+  ]
+ },
+ "annotated": {
+  "title": "pin reference resolution",
+  "paper": "A4",
+  "parts": [
+   {
+    "id": "R1",
+    "lib": "Device:R",
+    "at": [
+     40,
+     30
+    ],
+    "rot": 90,
+    "value": "1k"
+   },
+   {
+    "id": "C1",
+    "lib": "Device:C",
+    "at": [
+     60,
+     30
+    ],
+    "rot": 0,
+    "value": "100nF"
+   },
+   {
+    "id": "U1",
+    "lib": "Timer:NE555P",
+    "at": [
+     90,
+     40
+    ],
+    "value": "NE555",
+    "pins": {
+     "GND": "GND",
+     "VCC": "+5V",
+     "OUT": "OUT",
+     "TRIG": "TRIG",
+     "THRES": "TRIG",
+     "DISCH": "nc"
+    }
+   }
+  ],
+  "wires": [
+   {
+    "id": "w1",
+    "pts": [
+     [
+      43,
+      30
+     ],
+     [
+      60,
+      27
+     ]
+    ],
+    "touches": [
+     "C1.1",
+     "R1.2"
+    ]
+   },
+   {
+    "id": "w2",
+    "pts": [
+     [
+      40,
+      30
+     ],
+     [
+      82,
+      44
+     ]
+    ],
+    "touches": [
+     "U1.2"
+    ]
+   },
+   {
+    "id": "w3",
+    "pts": [
+     [
+      0,
+      0
+     ],
+     [
+      1,
+      1
+     ]
+    ],
+    "touches": [
+     "w4",
+     "w5",
+     "w6"
+    ]
+   },
+   {
+    "id": "w4",
+    "pts": [
+     [
+      0,
+      0
+     ],
+     [
+      2,
+      2
+     ]
+    ],
+    "touches": [
+     "w3",
+     "w5",
+     "w6"
+    ]
+   },
+   {
+    "id": "w5",
+    "pts": [
+     [
+      0,
+      0
+     ],
+     [
+      3,
+      3
+     ]
+    ],
+    "touches": [
+     "w3",
+     "w4",
+     "w6"
+    ]
+   },
+   {
+    "id": "w6",
+    "pts": [
+     [
+      0,
+      0
+     ],
+     [
+      4,
+      4
+     ]
+    ],
+    "touches": [
+     "w3",
+     "w4",
+     "w5"
+    ]
+   },
+   {
+    "id": "w7",
+    "pts": [
+     [
+      5.5,
+      6
+     ],
+     [
+      5.5,
+      9
+     ]
+    ],
+    "touches": []
+   },
+   {
+    "id": "w8",
+    "pts": [
+     [
+      98,
+      40
+     ],
+     [
+      101,
+      40
+     ]
+    ],
+    "touches": [
+     "U1.3",
+     "label:OUT"
+    ]
+   },
+   {
+    "id": "w9",
+    "pts": [
+     [
+      90,
+      48
+     ],
+     [
+      90,
+      50
+     ]
+    ],
+    "touches": [
+     "U1.1",
+     "power:GND"
+    ]
+   },
+   {
+    "id": "w10",
+    "pts": [
+     [
+      92,
+      32
+     ],
+     [
+      92,
+      29
+     ]
+    ],
+    "touches": [
+     "U1.8",
+     "power:+5V"
+    ]
+   }
+  ],
+  "labels": [
+   {
+    "text": "OUT",
+    "pin": "U1.OUT",
+    "at": [
+     101,
+     40
+    ],
+    "rot": 0,
+    "id": "l1"
+   },
+   {
+    "text": "TRIG",
+    "at": [
+     50,
+     50
+    ],
+    "id": "l2"
+   }
+  ],
+  "power": [
+   {
+    "net": "GND",
+    "pin": "U1.GND",
+    "at": [
+     90,
+     50
+    ],
+    "id": "p1"
+   },
+   {
+    "net": "+5V",
+    "pin": "U1.VCC",
+    "stub": 3,
+    "at": [
+     92,
+     29
+    ],
+    "id": "p2"
+   }
+  ],
+  "nc": [
+   "U1.CONT",
+   [
+    7,
+    7
+   ]
+  ],
+  "texts": [
+   {
+    "text": "note",
+    "at": [
+     5,
+     5
+    ]
+   }
+  ]
+ },
+ "nets": {
+  "+5V": [
+   "U1.8"
+  ],
+  "GND": [
+   "U1.1"
+  ],
+  "OUT": [
+   "U1.3"
+  ],
+  "N$1": [
+   "U1.2"
+  ],
+  "N$2": [
+   "U1.6"
+  ]
+ },
+ "netlist_mismatch": [
+  "net TRIG is split into 2 unconnected pieces: U1.2 | U1.6 - add a net label to each piece"
+ ]
+}

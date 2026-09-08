@@ -1,0 +1,457 @@
+{
+ "title": "12 V Discrete H-Bridge Motor Driver",
+ "rev": "1.0",
+ "date": "2026-09-02",
+ "company": "OpenAI Engineering",
+ "comments": [
+  "Discrete P/N MOSFET bridge for brushed DC motor",
+  "3.3 V complementary diagonal control inputs",
+  "Schottky flyback clamps and local bulk decoupling"
+ ],
+ "paper": "A4",
+ "parts": [
+  {
+   "id": "J1",
+   "lib": "Connector_Generic:Conn_01x02",
+   "value": "12V POWER",
+   "footprint": "Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical",
+   "pins": {
+    "1": "+12V",
+    "2": "GND"
+   }
+  },
+  {
+   "id": "J2",
+   "lib": "Connector_Generic:Conn_01x02",
+   "value": "MOTOR",
+   "footprint": "Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical",
+   "pins": {
+    "1": "MOTOR_A",
+    "2": "MOTOR_B"
+   }
+  },
+  {
+   "id": "J3",
+   "lib": "Connector_Generic:Conn_01x02",
+   "value": "3V3 LOGIC",
+   "footprint": "Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical",
+   "pins": {
+    "1": "IN_A",
+    "2": "IN_B"
+   }
+  },
+  {
+   "id": "Q1",
+   "lib": "Transistor_FET:Q_PMOS_GSD",
+   "value": "P-MOSFET LEFT",
+   "footprint": "Package_TO_SOT_THT:TO-220-3_Vertical",
+   "pins": {
+    "G": "PGATE_L",
+    "D": "MOTOR_A",
+    "S": "+12V"
+   }
+  },
+  {
+   "id": "Q2",
+   "lib": "Transistor_FET:Q_PMOS_GSD",
+   "value": "P-MOSFET RIGHT",
+   "footprint": "Package_TO_SOT_THT:TO-220-3_Vertical",
+   "pins": {
+    "G": "PGATE_R",
+    "D": "MOTOR_B",
+    "S": "+12V"
+   }
+  },
+  {
+   "id": "Q3",
+   "lib": "Transistor_FET:Q_NMOS_GSD",
+   "value": "N-MOSFET LEFT",
+   "footprint": "Package_TO_SOT_THT:TO-220-3_Vertical",
+   "pins": {
+    "G": "NGATE_L",
+    "D": "MOTOR_A",
+    "S": "GND"
+   }
+  },
+  {
+   "id": "Q4",
+   "lib": "Transistor_FET:Q_NMOS_GSD",
+   "value": "N-MOSFET RIGHT",
+   "footprint": "Package_TO_SOT_THT:TO-220-3_Vertical",
+   "pins": {
+    "G": "NGATE_R",
+    "D": "MOTOR_B",
+    "S": "GND"
+   }
+  },
+  {
+   "id": "Q5",
+   "lib": "Transistor_BJT:Q_NPN_BCE",
+   "value": "NPN P-GATE DRIVER L",
+   "footprint": "Package_TO_SOT_THT:TO-92_Inline",
+   "pins": {
+    "B": "BDRIVE_L",
+    "C": "PDRV_L",
+    "E": "GND"
+   }
+  },
+  {
+   "id": "Q6",
+   "lib": "Transistor_BJT:Q_NPN_BCE",
+   "value": "NPN P-GATE DRIVER R",
+   "footprint": "Package_TO_SOT_THT:TO-92_Inline",
+   "pins": {
+    "B": "BDRIVE_R",
+    "C": "PDRV_R",
+    "E": "GND"
+   }
+  },
+  {
+   "id": "R1",
+   "lib": "Device:R",
+   "value": "10k BASE L",
+   "pins": {
+    "1": "IN_A",
+    "2": "BDRIVE_L"
+   }
+  },
+  {
+   "id": "R2",
+   "lib": "Device:R",
+   "value": "10k BASE R",
+   "pins": {
+    "1": "IN_B",
+    "2": "BDRIVE_R"
+   }
+  },
+  {
+   "id": "R3",
+   "lib": "Device:R",
+   "value": "100k PGATE L PULLUP",
+   "pins": {
+    "1": "+12V",
+    "2": "PDRV_L"
+   }
+  },
+  {
+   "id": "R4",
+   "lib": "Device:R",
+   "value": "100k PGATE R PULLUP",
+   "pins": {
+    "1": "+12V",
+    "2": "PDRV_R"
+   }
+  },
+  {
+   "id": "R5",
+   "lib": "Device:R",
+   "value": "100R P-GATE L",
+   "pins": {
+    "1": "PDRV_L",
+    "2": "PGATE_L"
+   }
+  },
+  {
+   "id": "R6",
+   "lib": "Device:R",
+   "value": "100R P-GATE R",
+   "pins": {
+    "1": "PDRV_R",
+    "2": "PGATE_R"
+   }
+  },
+  {
+   "id": "R7",
+   "lib": "Device:R",
+   "value": "100R N-GATE L",
+   "pins": {
+    "1": "IN_B",
+    "2": "NGATE_L"
+   }
+  },
+  {
+   "id": "R8",
+   "lib": "Device:R",
+   "value": "100R N-GATE R",
+   "pins": {
+    "1": "IN_A",
+    "2": "NGATE_R"
+   }
+  },
+  {
+   "id": "R9",
+   "lib": "Device:R",
+   "value": "100k N-GATE L PULLDOWN",
+   "pins": {
+    "1": "NGATE_L",
+    "2": "GND"
+   }
+  },
+  {
+   "id": "R10",
+   "lib": "Device:R",
+   "value": "100k N-GATE R PULLDOWN",
+   "pins": {
+    "1": "NGATE_R",
+    "2": "GND"
+   }
+  },
+  {
+   "id": "R11",
+   "lib": "Device:R",
+   "value": "100k B-DRIVE L PULLDOWN",
+   "pins": {
+    "1": "BDRIVE_L",
+    "2": "GND"
+   }
+  },
+  {
+   "id": "R12",
+   "lib": "Device:R",
+   "value": "100k B-DRIVE R PULLDOWN",
+   "pins": {
+    "1": "BDRIVE_R",
+    "2": "GND"
+   }
+  },
+  {
+   "id": "D1",
+   "lib": "Device:D_Schottky",
+   "value": "SS34 HIGH-SIDE CLAMP L",
+   "pins": {
+    "K": "+12V",
+    "A": "MOTOR_A"
+   }
+  },
+  {
+   "id": "D2",
+   "lib": "Device:D_Schottky",
+   "value": "SS34 LOW-SIDE CLAMP L",
+   "pins": {
+    "K": "MOTOR_A",
+    "A": "GND"
+   }
+  },
+  {
+   "id": "D3",
+   "lib": "Device:D_Schottky",
+   "value": "SS34 HIGH-SIDE CLAMP R",
+   "pins": {
+    "K": "+12V",
+    "A": "MOTOR_B"
+   }
+  },
+  {
+   "id": "D4",
+   "lib": "Device:D_Schottky",
+   "value": "SS34 LOW-SIDE CLAMP R",
+   "pins": {
+    "K": "MOTOR_B",
+    "A": "GND"
+   }
+  },
+  {
+   "id": "C1",
+   "lib": "Device:C_Polarized",
+   "value": "470uF 25V BULK",
+   "pins": {
+    "1": "+12V",
+    "2": "GND"
+   }
+  },
+  {
+   "id": "C2",
+   "lib": "Device:C",
+   "value": "100nF 25V",
+   "pins": {
+    "1": "+12V",
+    "2": "GND"
+   }
+  }
+ ],
+ "layout": [
+  {
+   "title": "POWER INPUT",
+   "note": "Keep bulk capacitor close to bridge supply entry.",
+   "tree": {
+    "row": [
+     {
+      "part": "J1"
+     },
+     {
+      "part": "C1"
+     },
+     {
+      "part": "C2"
+     }
+    ],
+    "gap": 5
+   }
+  },
+  {
+   "title": "LEFT HALF-BRIDGE",
+   "note": "Q1/Q3 share MOTOR_A; clamp diodes limit switch-node excursions.",
+   "tree": {
+    "col": [
+     {
+      "part": "Q1"
+     },
+     {
+      "row": [
+       {
+        "part": "D1"
+       },
+       {
+        "part": "D2"
+       }
+      ],
+      "gap": 3
+     },
+     {
+      "part": "Q3"
+     },
+     {
+      "row": [
+       {
+        "part": "R7"
+       },
+       {
+        "part": "R9"
+       }
+      ],
+      "gap": 3
+     }
+    ],
+    "gap": 5
+   }
+  },
+  {
+   "title": "RIGHT HALF-BRIDGE",
+   "note": "Q2/Q4 share MOTOR_B; clamp diodes limit switch-node excursions.",
+   "tree": {
+    "col": [
+     {
+      "part": "Q2"
+     },
+     {
+      "row": [
+       {
+        "part": "D3"
+       },
+       {
+        "part": "D4"
+       }
+      ],
+      "gap": 3
+     },
+     {
+      "part": "Q4"
+     },
+     {
+      "row": [
+       {
+        "part": "R8"
+       },
+       {
+        "part": "R10"
+       }
+      ],
+      "gap": 3
+     }
+    ],
+    "gap": 5
+   }
+  },
+  {
+   "title": "MOTOR OUTPUT",
+   "tree": {
+    "row": [
+     {
+      "part": "J2"
+     }
+    ],
+    "gap": 4
+   }
+  },
+  {
+   "title": "LOGIC INPUT",
+   "tree": {
+    "row": [
+     {
+      "part": "J3"
+     }
+    ],
+    "gap": 4
+   }
+  },
+  {
+   "title": "LEFT P-GATE DRIVE",
+   "note": "IN_A drives Q5, which pulls the left P-channel gate low.",
+   "tree": {
+    "row": [
+     {
+      "part": "R1"
+     },
+     {
+      "part": "Q5"
+     },
+     {
+      "part": "R3"
+     },
+     {
+      "part": "R5"
+     }
+    ],
+    "gap": 4
+   }
+  },
+  {
+   "title": "RIGHT P-GATE DRIVE",
+   "note": "IN_B drives Q6, which pulls the right P-channel gate low.",
+   "tree": {
+    "row": [
+     {
+      "part": "R2"
+     },
+     {
+      "part": "Q6"
+     },
+     {
+      "part": "R4"
+     },
+     {
+      "part": "R6"
+     }
+    ],
+    "gap": 4
+   }
+  },
+  {
+   "title": "DRIVE DEFAULTS",
+   "tree": {
+    "row": [
+     {
+      "part": "R11"
+     },
+     {
+      "part": "R12"
+     }
+    ],
+    "gap": 4
+   }
+  }
+ ],
+ "flags": [
+  "+12V",
+  "GND"
+ ],
+ "power": [
+  "+12V"
+ ],
+ "notes": [
+  "Apply only one diagonal input high at a time; add firmware dead-time.",
+  "Logic inputs are 3.3 V; bridge power is nominally 12 V.",
+  "Use MOSFETs rated for motor stall current and at least 25 V VDS.",
+  "Flyback diodes are external Schottky clamps around each switch node."
+ ]
+}

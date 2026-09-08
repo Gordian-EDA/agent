@@ -1,0 +1,10 @@
+{
+ "issues": [
+  "U1 (MCU_Microchip_ATmega:ATmega328P-P): no pin '22' (did you mean '2', '28', '27'?); pins: 1=~{RESET}/PC6, 2=PD0, 3=PD1, 4=PD2, 5=PD3, 6=PD4, 7=VCC, 8=GND, 9=XTAL1/PB6, 10=XTAL2/PB7, 11=PD5, 12=PD6, 13=PD7, 14=PB0, 15=PB1, 16=PB2, 17=PB3, 18=PB4, 19=PB5, 20=AVCC, 21=AREF, 23=PC0, 24=PC1, 25=PC2, 26=PC3, 27=PC4, 28=PC5"
+ ],
+ "layout_failed": true,
+ "netlist": {},
+ "notes": [],
+ "paper": "A4",
+ "warnings": []
+}

@@ -1,0 +1,1516 @@
+{
+ "parts": [
+  {
+   "id": "J3",
+   "lib": "Connector_Generic:Conn_01x02",
+   "at": [
+    44,
+    64
+   ],
+   "rot": 0,
+   "mirror": "y",
+   "value": "3V3 LOGIC",
+   "footprint": "Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical"
+  },
+  {
+   "id": "R1",
+   "lib": "Device:R",
+   "at": [
+    82,
+    64
+   ],
+   "rot": 0,
+   "value": "10k BASE L",
+   "footprint": "Resistor_THT:R_Axial_DIN0207_L6.3mm_D2.5mm_P10.16mm_Horizontal"
+  },
+  {
+   "id": "Q5",
+   "lib": "Transistor_BJT:Q_NPN_BCE",
+   "at": [
+    82,
+    78
+   ],
+   "rot": 0,
+   "value": "NPN P-GATE DRIVER L",
+   "footprint": "Package_TO_SOT_THT:TO-92_Inline"
+  },
+  {
+   "id": "R3",
+   "lib": "Device:R",
+   "at": [
+    82,
+    106
+   ],
+   "rot": 0,
+   "value": "100k PGATE L PULLUP",
+   "footprint": "Resistor_THT:R_Axial_DIN0207_L6.3mm_D2.5mm_P10.16mm_Horizontal"
+  },
+  {
+   "id": "R5",
+   "lib": "Device:R",
+   "at": [
+    82,
+    116
+   ],
+   "rot": 0,
+   "value": "100R P-GATE L",
+   "footprint": "Resistor_THT:R_Axial_DIN0207_L6.3mm_D2.5mm_P10.16mm_Horizontal"
+  },
+  {
+   "id": "R11",
+   "lib": "Device:R",
+   "at": [
+    82,
+    134
+   ],
+   "rot": 0,
+   "value": "100k B-DRIVE L PULLDOWN",
+   "footprint": "Resistor_THT:R_Axial_DIN0207_L6.3mm_D2.5mm_P10.16mm_Horizontal"
+  },
+  {
+   "id": "R2",
+   "lib": "Device:R",
+   "at": [
+    122,
+    64
+   ],
+   "rot": 0,
+   "value": "10k BASE R",
+   "footprint": "Resistor_THT:R_Axial_DIN0207_L6.3mm_D2.5mm_P10.16mm_Horizontal"
+  },
+  {
+   "id": "Q6",
+   "lib": "Transistor_BJT:Q_NPN_BCE",
+   "at": [
+    122,
+    78
+   ],
+   "rot": 0,
+   "value": "NPN P-GATE DRIVER R",
+   "footprint": "Package_TO_SOT_THT:TO-92_Inline"
+  },
+  {
+   "id": "R4",
+   "lib": "Device:R",
+   "at": [
+    122,
+    108
+   ],
+   "rot": 0,
+   "value": "100k PGATE R PULLUP",
+   "footprint": "Resistor_THT:R_Axial_DIN0207_L6.3mm_D2.5mm_P10.16mm_Horizontal"
+  },
+  {
+   "id": "R6",
+   "lib": "Device:R",
+   "at": [
+    122,
+    116
+   ],
+   "rot": 0,
+   "value": "100R P-GATE R",
+   "footprint": "Resistor_THT:R_Axial_DIN0207_L6.3mm_D2.5mm_P10.16mm_Horizontal"
+  },
+  {
+   "id": "R12",
+   "lib": "Device:R",
+   "at": [
+    122,
+    134
+   ],
+   "rot": 0,
+   "value": "100k B-DRIVE R PULLDOWN",
+   "footprint": "Resistor_THT:R_Axial_DIN0207_L6.3mm_D2.5mm_P10.16mm_Horizontal"
+  },
+  {
+   "id": "Q1",
+   "lib": "Transistor_FET:Q_PMOS_GSD",
+   "at": [
+    170,
+    60
+   ],
+   "rot": 180,
+   "value": "P-MOSFET LEFT",
+   "footprint": "Package_TO_SOT_THT:TO-220-3_Vertical"
+  },
+  {
+   "id": "D1",
+   "lib": "Device:D_Schottky",
+   "at": [
+    170,
+    80
+   ],
+   "rot": 0,
+   "value": "SS34 HIGH-SIDE CLAMP L",
+   "footprint": "Diode_THT:D_DO-41_SOD81_P10.16mm_Horizontal"
+  },
+  {
+   "id": "D2",
+   "lib": "Device:D_Schottky",
+   "at": [
+    194,
+    80
+   ],
+   "rot": 0,
+   "value": "SS34 LOW-SIDE CLAMP L",
+   "footprint": "Diode_THT:D_DO-41_SOD81_P10.16mm_Horizontal"
+  },
+  {
+   "id": "Q3",
+   "lib": "Transistor_FET:Q_NMOS_GSD",
+   "at": [
+    170,
+    96
+   ],
+   "rot": 0,
+   "value": "N-MOSFET LEFT",
+   "footprint": "Package_TO_SOT_THT:TO-220-3_Vertical"
+  },
+  {
+   "id": "R7",
+   "lib": "Device:R",
+   "at": [
+    170,
+    122
+   ],
+   "rot": 90,
+   "value": "100R N-GATE L",
+   "footprint": "Resistor_THT:R_Axial_DIN0207_L6.3mm_D2.5mm_P10.16mm_Horizontal"
+  },
+  {
+   "id": "R9",
+   "lib": "Device:R",
+   "at": [
+    192,
+    122
+   ],
+   "rot": 90,
+   "value": "100k N-GATE L PULLDOWN",
+   "footprint": "Resistor_THT:R_Axial_DIN0207_L6.3mm_D2.5mm_P10.16mm_Horizontal"
+  },
+  {
+   "id": "J2",
+   "lib": "Connector_Generic:Conn_01x02",
+   "at": [
+    232,
+    60
+   ],
+   "rot": 0,
+   "value": "MOTOR",
+   "footprint": "Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical"
+  },
+  {
+   "id": "Q2",
+   "lib": "Transistor_FET:Q_PMOS_GSD",
+   "at": [
+    266,
+    60
+   ],
+   "rot": 180,
+   "value": "P-MOSFET RIGHT",
+   "footprint": "Package_TO_SOT_THT:TO-220-3_Vertical"
+  },
+  {
+   "id": "D3",
+   "lib": "Device:D_Schottky",
+   "at": [
+    266,
+    80
+   ],
+   "rot": 0,
+   "value": "SS34 HIGH-SIDE CLAMP R",
+   "footprint": "Diode_THT:D_DO-41_SOD81_P10.16mm_Horizontal"
+  },
+  {
+   "id": "D4",
+   "lib": "Device:D_Schottky",
+   "at": [
+    290,
+    80
+   ],
+   "rot": 0,
+   "value": "SS34 LOW-SIDE CLAMP R",
+   "footprint": "Diode_THT:D_DO-41_SOD81_P10.16mm_Horizontal"
+  },
+  {
+   "id": "Q4",
+   "lib": "Transistor_FET:Q_NMOS_GSD",
+   "at": [
+    266,
+    100
+   ],
+   "rot": 0,
+   "value": "N-MOSFET RIGHT",
+   "footprint": "Package_TO_SOT_THT:TO-220-3_Vertical"
+  },
+  {
+   "id": "R8",
+   "lib": "Device:R",
+   "at": [
+    266,
+    126
+   ],
+   "rot": 90,
+   "value": "100R N-GATE R",
+   "footprint": "Resistor_THT:R_Axial_DIN0207_L6.3mm_D2.5mm_P10.16mm_Horizontal"
+  },
+  {
+   "id": "R10",
+   "lib": "Device:R",
+   "at": [
+    286,
+    126
+   ],
+   "rot": 90,
+   "value": "100k N-GATE R PULLDOWN",
+   "footprint": "Resistor_THT:R_Axial_DIN0207_L6.3mm_D2.5mm_P10.16mm_Horizontal"
+  },
+  {
+   "id": "J1",
+   "lib": "Connector_Generic:Conn_01x02",
+   "at": [
+    44,
+    168
+   ],
+   "rot": 0,
+   "mirror": "y",
+   "value": "12V POWER",
+   "footprint": "Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical"
+  },
+  {
+   "id": "C1",
+   "lib": "Device:C_Polarized",
+   "at": [
+    66,
+    171
+   ],
+   "rot": 0,
+   "value": "470uF 25V BULK",
+   "footprint": "Capacitor_THT:CP_Radial_D8.0mm_P3.50mm"
+  },
+  {
+   "id": "C2",
+   "lib": "Device:C",
+   "at": [
+    92,
+    171
+   ],
+   "rot": 0,
+   "value": "100nF 25V",
+   "footprint": "Capacitor_THT:C_Disc_D5.0mm_W3.2mm_P5.00mm"
+  }
+ ],
+ "power": [
+  {
+   "net": "GND",
+   "at": [
+    84.0,
+    84.0
+   ],
+   "rot": 0
+  },
+  {
+   "net": "GND",
+   "at": [
+    82.0,
+    139.0
+   ],
+   "rot": 0
+  },
+  {
+   "net": "GND",
+   "at": [
+    124.0,
+    84.0
+   ],
+   "rot": 0
+  },
+  {
+   "net": "GND",
+   "at": [
+    122.0,
+    139.0
+   ],
+   "rot": 0
+  },
+  {
+   "net": "+12V",
+   "at": [
+    102,
+    96.0
+   ],
+   "rot": 0
+  },
+  {
+   "net": "+12V",
+   "at": [
+    168.0,
+    54.0
+   ],
+   "rot": 0
+  },
+  {
+   "net": "+12V",
+   "at": [
+    163.0,
+    76.0
+   ],
+   "rot": 0
+  },
+  {
+   "net": "GND",
+   "at": [
+    201.0,
+    84.0
+   ],
+   "rot": 0
+  },
+  {
+   "net": "GND",
+   "at": [
+    172.0,
+    102.0
+   ],
+   "rot": 0
+  },
+  {
+   "net": "GND",
+   "at": [
+    199.0,
+    126.0
+   ],
+   "rot": 0
+  },
+  {
+   "net": "+12V",
+   "at": [
+    264.0,
+    54.0
+   ],
+   "rot": 0
+  },
+  {
+   "net": "+12V",
+   "at": [
+    259.0,
+    76.0
+   ],
+   "rot": 0
+  },
+  {
+   "net": "GND",
+   "at": [
+    297.0,
+    84.0
+   ],
+   "rot": 0
+  },
+  {
+   "net": "GND",
+   "at": [
+    268.0,
+    106.0
+   ],
+   "rot": 0
+  },
+  {
+   "net": "GND",
+   "at": [
+    293.0,
+    130.0
+   ],
+   "rot": 0
+  },
+  {
+   "net": "GND",
+   "at": [
+    52.0,
+    174.0
+   ],
+   "rot": 0
+  },
+  {
+   "net": "GND",
+   "at": [
+    66.0,
+    176.0
+   ],
+   "rot": 0
+  },
+  {
+   "net": "GND",
+   "at": [
+    92.0,
+    176.0
+   ],
+   "rot": 0
+  },
+  {
+   "net": "+12V",
+   "at": [
+    78,
+    165.0
+   ],
+   "rot": 0
+  },
+  {
+   "net": "PWR_FLAG",
+   "at": [
+    102.0,
+    166.0
+   ],
+   "rot": 0
+  }
+ ],
+ "wires": [
+  [
+   [
+    82.0,
+    103.0
+   ],
+   [
+    82.0,
+    99.0
+   ],
+   [
+    122.0,
+    99.0
+   ],
+   [
+    122.0,
+    105.0
+   ]
+  ],
+  [
+   [
+    48.0,
+    64.0
+   ],
+   [
+    52.0,
+    64.0
+   ],
+   [
+    52.0,
+    61.0
+   ],
+   [
+    82.0,
+    61.0
+   ]
+  ],
+  [
+   [
+    48.0,
+    66.0
+   ],
+   [
+    58.0,
+    66.0
+   ]
+  ],
+  [
+   [
+    122.0,
+    61.0
+   ],
+   [
+    122.0,
+    55.0
+   ]
+  ],
+  [
+   [
+    82.0,
+    67.0
+   ],
+   [
+    82.0,
+    71.0
+   ],
+   [
+    79.0,
+    71.0
+   ],
+   [
+    79.0,
+    74.0
+   ],
+   [
+    78.0,
+    74.0
+   ],
+   [
+    78.0,
+    78.0
+   ]
+  ],
+  [
+   [
+    78.0,
+    78.0
+   ],
+   [
+    64.0,
+    78.0
+   ]
+  ],
+  [
+   [
+    82.0,
+    131.0
+   ],
+   [
+    82.0,
+    129.0
+   ],
+   [
+    72.0,
+    129.0
+   ]
+  ],
+  [
+   [
+    122.0,
+    67.0
+   ],
+   [
+    122.0,
+    71.0
+   ],
+   [
+    119.0,
+    71.0
+   ],
+   [
+    119.0,
+    74.0
+   ],
+   [
+    118.0,
+    74.0
+   ],
+   [
+    118.0,
+    78.0
+   ]
+  ],
+  [
+   [
+    118.0,
+    78.0
+   ],
+   [
+    114.0,
+    78.0
+   ]
+  ],
+  [
+   [
+    122.0,
+    131.0
+   ],
+   [
+    122.0,
+    129.0
+   ],
+   [
+    118.0,
+    129.0
+   ]
+  ],
+  [
+   [
+    84,
+    74
+   ],
+   [
+    84,
+    72
+   ],
+   [
+    78,
+    72
+   ]
+  ],
+  [
+   [
+    82,
+    109
+   ],
+   [
+    82,
+    111
+   ],
+   [
+    78,
+    111
+   ]
+  ],
+  [
+   [
+    82,
+    113
+   ],
+   [
+    82,
+    111
+   ],
+   [
+    78,
+    111
+   ]
+  ],
+  [
+   [
+    78,
+    72
+   ],
+   [
+    78,
+    111
+   ]
+  ],
+  [
+   [
+    124,
+    74
+   ],
+   [
+    124,
+    72
+   ],
+   [
+    118,
+    72
+   ]
+  ],
+  [
+   [
+    122,
+    111
+   ],
+   [
+    122,
+    113
+   ],
+   [
+    118,
+    113
+   ]
+  ],
+  [
+   [
+    122,
+    113
+   ],
+   [
+    122,
+    111
+   ],
+   [
+    118,
+    111
+   ]
+  ],
+  [
+   [
+    118,
+    72
+   ],
+   [
+    118,
+    113
+   ]
+  ],
+  [
+   [
+    84.0,
+    82.0
+   ],
+   [
+    84.0,
+    84.0
+   ]
+  ],
+  [
+   [
+    82.0,
+    119.0
+   ],
+   [
+    82.0,
+    122.0
+   ]
+  ],
+  [
+   [
+    82.0,
+    137.0
+   ],
+   [
+    82.0,
+    139.0
+   ]
+  ],
+  [
+   [
+    124.0,
+    82.0
+   ],
+   [
+    124.0,
+    84.0
+   ]
+  ],
+  [
+   [
+    122.0,
+    119.0
+   ],
+   [
+    122.0,
+    122.0
+   ]
+  ],
+  [
+   [
+    122.0,
+    137.0
+   ],
+   [
+    122.0,
+    139.0
+   ]
+  ],
+  [
+   [
+    102,
+    99.0
+   ],
+   [
+    102,
+    96.0
+   ]
+  ],
+  [
+   [
+    173.0,
+    122.0
+   ],
+   [
+    189.0,
+    122.0
+   ]
+  ],
+  [
+   [
+    166.0,
+    96.0
+   ],
+   [
+    162.0,
+    96.0
+   ],
+   [
+    162.0,
+    108.0
+   ],
+   [
+    178.0,
+    108.0
+   ],
+   [
+    178.0,
+    122.0
+   ]
+  ],
+  [
+   [
+    269.0,
+    126.0
+   ],
+   [
+    283.0,
+    126.0
+   ]
+  ],
+  [
+   [
+    262.0,
+    100.0
+   ],
+   [
+    258.0,
+    100.0
+   ],
+   [
+    258.0,
+    112.0
+   ],
+   [
+    274.0,
+    112.0
+   ],
+   [
+    274.0,
+    126.0
+   ]
+  ],
+  [
+   [
+    173.0,
+    80.0
+   ],
+   [
+    182.0,
+    80.0
+   ],
+   [
+    182.0,
+    92.0
+   ],
+   [
+    172.0,
+    92.0
+   ]
+  ],
+  [
+   [
+    173.0,
+    80.0
+   ],
+   [
+    191.0,
+    80.0
+   ]
+  ],
+  [
+   [
+    168.0,
+    64.0
+   ],
+   [
+    168.0,
+    68.0
+   ],
+   [
+    181.0,
+    68.0
+   ],
+   [
+    181.0,
+    80.0
+   ]
+  ],
+  [
+   [
+    168.0,
+    64.0
+   ],
+   [
+    228.0,
+    64.0
+   ],
+   [
+    228.0,
+    60.0
+   ]
+  ],
+  [
+   [
+    269.0,
+    80.0
+   ],
+   [
+    278.0,
+    80.0
+   ],
+   [
+    278.0,
+    96.0
+   ],
+   [
+    268.0,
+    96.0
+   ]
+  ],
+  [
+   [
+    269.0,
+    80.0
+   ],
+   [
+    287.0,
+    80.0
+   ]
+  ],
+  [
+   [
+    264.0,
+    64.0
+   ],
+   [
+    264.0,
+    68.0
+   ],
+   [
+    277.0,
+    68.0
+   ],
+   [
+    277.0,
+    80.0
+   ]
+  ],
+  [
+   [
+    228.0,
+    62.0
+   ],
+   [
+    214.0,
+    62.0
+   ]
+  ],
+  [
+   [
+    268.0,
+    96.0
+   ],
+   [
+    268.0,
+    94.0
+   ],
+   [
+    260.0,
+    94.0
+   ]
+  ],
+  [
+   [
+    174.0,
+    60.0
+   ],
+   [
+    177.0,
+    60.0
+   ]
+  ],
+  [
+   [
+    168.0,
+    56.0
+   ],
+   [
+    168.0,
+    54.0
+   ]
+  ],
+  [
+   [
+    167.0,
+    80.0
+   ],
+   [
+    163.0,
+    80.0
+   ]
+  ],
+  [
+   [
+    163.0,
+    80.0
+   ],
+   [
+    163.0,
+    76.0
+   ]
+  ],
+  [
+   [
+    197.0,
+    80.0
+   ],
+   [
+    201.0,
+    80.0
+   ]
+  ],
+  [
+   [
+    201.0,
+    80.0
+   ],
+   [
+    201.0,
+    84.0
+   ]
+  ],
+  [
+   [
+    172.0,
+    100.0
+   ],
+   [
+    172.0,
+    102.0
+   ]
+  ],
+  [
+   [
+    167.0,
+    122.0
+   ],
+   [
+    164.0,
+    122.0
+   ]
+  ],
+  [
+   [
+    195.0,
+    122.0
+   ],
+   [
+    199.0,
+    122.0
+   ]
+  ],
+  [
+   [
+    199.0,
+    122.0
+   ],
+   [
+    199.0,
+    126.0
+   ]
+  ],
+  [
+   [
+    270.0,
+    60.0
+   ],
+   [
+    273.0,
+    60.0
+   ]
+  ],
+  [
+   [
+    264.0,
+    56.0
+   ],
+   [
+    264.0,
+    54.0
+   ]
+  ],
+  [
+   [
+    263.0,
+    80.0
+   ],
+   [
+    259.0,
+    80.0
+   ]
+  ],
+  [
+   [
+    259.0,
+    80.0
+   ],
+   [
+    259.0,
+    76.0
+   ]
+  ],
+  [
+   [
+    293.0,
+    80.0
+   ],
+   [
+    297.0,
+    80.0
+   ]
+  ],
+  [
+   [
+    297.0,
+    80.0
+   ],
+   [
+    297.0,
+    84.0
+   ]
+  ],
+  [
+   [
+    268.0,
+    104.0
+   ],
+   [
+    268.0,
+    106.0
+   ]
+  ],
+  [
+   [
+    263.0,
+    126.0
+   ],
+   [
+    260.0,
+    126.0
+   ]
+  ],
+  [
+   [
+    289.0,
+    126.0
+   ],
+   [
+    293.0,
+    126.0
+   ]
+  ],
+  [
+   [
+    293.0,
+    126.0
+   ],
+   [
+    293.0,
+    130.0
+   ]
+  ],
+  [
+   [
+    48.0,
+    168.0
+   ],
+   [
+    66.0,
+    168.0
+   ]
+  ],
+  [
+   [
+    66.0,
+    168.0
+   ],
+   [
+    92.0,
+    168.0
+   ]
+  ],
+  [
+   [
+    48.0,
+    170.0
+   ],
+   [
+    52.0,
+    170.0
+   ]
+  ],
+  [
+   [
+    52.0,
+    170.0
+   ],
+   [
+    52.0,
+    174.0
+   ]
+  ],
+  [
+   [
+    66.0,
+    174.0
+   ],
+   [
+    66.0,
+    176.0
+   ]
+  ],
+  [
+   [
+    92.0,
+    174.0
+   ],
+   [
+    92.0,
+    176.0
+   ]
+  ],
+  [
+   [
+    78,
+    168.0
+   ],
+   [
+    78,
+    165.0
+   ]
+  ],
+  [
+   [
+    92.0,
+    168.0
+   ],
+   [
+    92.0,
+    166.0
+   ]
+  ],
+  [
+   [
+    92.0,
+    166.0
+   ],
+   [
+    102.0,
+    166.0
+   ]
+  ]
+ ],
+ "labels": [
+  {
+   "text": "IN_A",
+   "at": [
+    66,
+    61.0
+   ],
+   "rot": 0
+  },
+  {
+   "text": "IN_B",
+   "at": [
+    58.0,
+    66.0
+   ],
+   "rot": 0
+  },
+  {
+   "text": "IN_B",
+   "at": [
+    122.0,
+    55.0
+   ],
+   "rot": 90
+  },
+  {
+   "text": "BDRIVE_L",
+   "at": [
+    64.0,
+    78.0
+   ],
+   "rot": 180
+  },
+  {
+   "text": "BDRIVE_L",
+   "at": [
+    72.0,
+    129.0
+   ],
+   "rot": 180
+  },
+  {
+   "text": "BDRIVE_R",
+   "at": [
+    114.0,
+    78.0
+   ],
+   "rot": 180
+  },
+  {
+   "text": "BDRIVE_R",
+   "at": [
+    118.0,
+    129.0
+   ],
+   "rot": 180
+  },
+  {
+   "text": "PGATE_L",
+   "at": [
+    82.0,
+    122.0
+   ],
+   "rot": 270
+  },
+  {
+   "text": "PGATE_R",
+   "at": [
+    122.0,
+    122.0
+   ],
+   "rot": 270
+  },
+  {
+   "text": "MOTOR_B",
+   "at": [
+    214.0,
+    62.0
+   ],
+   "rot": 180
+  },
+  {
+   "text": "MOTOR_B",
+   "at": [
+    260.0,
+    94.0
+   ],
+   "rot": 180
+  },
+  {
+   "text": "PGATE_L",
+   "at": [
+    177.0,
+    60.0
+   ],
+   "rot": 0
+  },
+  {
+   "text": "IN_B",
+   "at": [
+    164.0,
+    122.0
+   ],
+   "rot": 180
+  },
+  {
+   "text": "PGATE_R",
+   "at": [
+    273.0,
+    60.0
+   ],
+   "rot": 0
+  },
+  {
+   "text": "IN_A",
+   "at": [
+    260.0,
+    126.0
+   ],
+   "rot": 180
+  }
+ ],
+ "nc": [],
+ "texts": [
+  {
+   "text": "LOGIC AND P-GATE DRIVE",
+   "at": [
+    33.25,
+    47.0
+   ],
+   "size": 2.5,
+   "bold": true
+  },
+  {
+   "text": "NPNs pull P-channel gates low; 100k resistors default off.",
+   "at": [
+    33.25,
+    147.0
+   ],
+   "size": 1.27,
+   "bold": false
+  },
+  {
+   "text": "H-BRIDGE POWER STAGE",
+   "at": [
+    153.05,
+    47.0
+   ],
+   "size": 2.5,
+   "bold": true
+  },
+  {
+   "text": "IN_A drives Q1/Q4; IN_B drives Q2/Q3. Never assert both.",
+   "at": [
+    153.05,
+    138.0
+   ],
+   "size": 1.27,
+   "bold": false
+  },
+  {
+   "text": "POWER INPUT",
+   "at": [
+    33.25,
+    158.0
+   ],
+   "size": 2.5,
+   "bold": true
+  },
+  {
+   "text": "Keep bulk capacitor close to bridge supply entry.",
+   "at": [
+    33.25,
+    184.0
+   ],
+   "size": 1.27,
+   "bold": false
+  },
+  {
+   "text": "NOTES",
+   "at": [
+    116,
+    159
+   ],
+   "size": 2.5,
+   "bold": true
+  },
+  {
+   "text": "Apply only one diagonal input high at a time; add firmware\ndead-time.",
+   "at": [
+    116,
+    164.0
+   ],
+   "size": 1.27,
+   "bold": false
+  },
+  {
+   "text": "Logic inputs are 3.3 V; bridge power is nominally 12 V.",
+   "at": [
+    116,
+    169.0
+   ],
+   "size": 1.27,
+   "bold": false
+  },
+  {
+   "text": "Use MOSFETs rated for motor stall current and at least 25 V\nVDS.",
+   "at": [
+    116,
+    172.5
+   ],
+   "size": 1.27,
+   "bold": false
+  },
+  {
+   "text": "Flyback diodes are external Schottky clamps around each\nswitch node.",
+   "at": [
+    116,
+    177.5
+   ],
+   "size": 1.27,
+   "bold": false
+  }
+ ],
+ "rects": [],
+ "paper": "A3",
+ "title": "12 V Discrete H-Bridge Motor Driver",
+ "rev": "1.0",
+ "date": "2026-09-02",
+ "company": "OpenAI Engineering",
+ "comments": [
+  "Discrete P/N MOSFET bridge for brushed DC motor",
+  "3.3 V complementary diagonal control inputs",
+  "Schottky flyback clamps and local bulk decoupling"
+ ]
+}

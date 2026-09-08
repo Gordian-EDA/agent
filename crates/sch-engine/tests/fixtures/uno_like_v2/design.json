@@ -1,0 +1,519 @@
+{
+ "title": "ATmega328P Arduino-style USB board",
+ "rev": "1.0",
+ "date": "2026-09-02",
+ "company": "Open Hardware",
+ "paper": "A4",
+ "comments": [
+  "ATmega328P board with USB-C and CH340C serial",
+  "5 V and 3.3 V regulated rails; 16 MHz crystal clock"
+ ],
+ "parts": [
+  {
+   "id": "U1",
+   "lib": "MCU_Microchip_ATmega:ATmega328P-P",
+   "value": "ATmega328P",
+   "footprint": "Package_DIP:DIP-28_W7.62mm",
+   "pins": {
+    "21": "AREF",
+    "13": "D7",
+    "12": "D6",
+    "11": "D5",
+    "6": "D4",
+    "5": "D3",
+    "4": "D2",
+    "3": "USB_TX",
+    "2": "USB_RX",
+    "1": "RESET",
+    "28": "A5",
+    "27": "A4",
+    "26": "A3",
+    "25": "A2",
+    "24": "A1",
+    "23": "A0",
+    "10": "XTAL2",
+    "9": "XTAL1",
+    "19": "D13",
+    "18": "D12",
+    "17": "D11",
+    "16": "D10",
+    "15": "D9",
+    "14": "D8",
+    "7": "+5V",
+    "20": "+5V",
+    "8": "GND"
+   }
+  },
+  {
+   "id": "U2",
+   "lib": "Interface_USB:CH340C",
+   "value": "CH340C",
+   "footprint": "Package_SO:SOIC-16_3.9x9.9mm_P1.27mm",
+   "pins": {
+    "6": "USB_DM",
+    "5": "USB_DP",
+    "15": "GND",
+    "14": "nc",
+    "13": "USB_DTR",
+    "12": "nc",
+    "11": "nc",
+    "10": "nc",
+    "9": "nc",
+    "3": "USB_RX",
+    "2": "USB_TX",
+    "16": "+5V",
+    "4": "+3V3",
+    "8": "nc",
+    "7": "nc",
+    "1": "GND"
+   }
+  },
+  {
+   "id": "U3",
+   "lib": "Regulator_Linear:AMS1117-5.0",
+   "value": "AMS1117-5.0",
+   "footprint": "Package_TO_SOT_SMD:SOT-223-3_TabPin2",
+   "pins": {
+    "3": "VBUS_FUSED",
+    "2": "+5V",
+    "1": "GND"
+   }
+  },
+  {
+   "id": "U4",
+   "lib": "Regulator_Linear:AMS1117-3.3",
+   "value": "AMS1117-3.3",
+   "footprint": "Package_TO_SOT_SMD:SOT-223-3_TabPin2",
+   "pins": {
+    "3": "+5V",
+    "2": "+3V3",
+    "1": "GND"
+   }
+  },
+  {
+   "id": "J1",
+   "lib": "Connector:USB_C_Receptacle_USB2.0_16P",
+   "value": "USB-C",
+   "footprint": "Connector_USB:USB_C_Receptacle_GCT_USB4105-xx-A_16P_TopMnt_Horizontal",
+   "pins": {
+    "B8": "nc",
+    "A8": "nc",
+    "D+": "USB_DP",
+    "D-": "USB_DM",
+    "CC2": "CC2",
+    "CC1": "CC1",
+    "VBUS": "VBUS",
+    "SH": "GND",
+    "GND": "GND"
+   }
+  },
+  {
+   "id": "F1",
+   "lib": "Device:Polyfuse",
+   "value": "500mA PTC",
+   "footprint": "Fuse:Fuse_1206_3216Metric",
+   "pins": {
+    "1": "VBUS",
+    "2": "VBUS_FUSED"
+   }
+  },
+  {
+   "id": "R1",
+   "lib": "Device:R",
+   "value": "5.1k",
+   "footprint": "Resistor_SMD:R_0603_1608Metric",
+   "pins": {
+    "1": "GND",
+    "2": "CC1"
+   }
+  },
+  {
+   "id": "R2",
+   "lib": "Device:R",
+   "value": "5.1k",
+   "footprint": "Resistor_SMD:R_0603_1608Metric",
+   "pins": {
+    "1": "GND",
+    "2": "CC2"
+   }
+  },
+  {
+   "id": "R3",
+   "lib": "Device:R",
+   "value": "10k",
+   "footprint": "Resistor_SMD:R_0603_1608Metric",
+   "pins": {
+    "1": "+5V",
+    "2": "RESET"
+   }
+  },
+  {
+   "id": "SW1",
+   "lib": "Switch:SW_Push",
+   "value": "RESET",
+   "footprint": "Button_Switch_SMD:SW_SPST_TL3301N160QG",
+   "pins": {
+    "1": "RESET",
+    "2": "GND"
+   }
+  },
+  {
+   "id": "C1",
+   "lib": "Device:C",
+   "value": "100nF",
+   "footprint": "Capacitor_SMD:C_0603_1608Metric",
+   "pins": {
+    "1": "USB_DTR",
+    "2": "RESET"
+   }
+  },
+  {
+   "id": "C2",
+   "lib": "Device:C",
+   "value": "22pF",
+   "footprint": "Capacitor_SMD:C_0603_1608Metric",
+   "pins": {
+    "1": "XTAL1",
+    "2": "GND"
+   }
+  },
+  {
+   "id": "C3",
+   "lib": "Device:C",
+   "value": "22pF",
+   "footprint": "Capacitor_SMD:C_0603_1608Metric",
+   "pins": {
+    "1": "XTAL2",
+    "2": "GND"
+   }
+  },
+  {
+   "id": "Y1",
+   "lib": "Device:Crystal",
+   "value": "16MHz",
+   "footprint": "Crystal:Crystal_SMD_3225-4Pin_3.2x2.5mm",
+   "pins": {
+    "1": "XTAL1",
+    "2": "XTAL2"
+   }
+  },
+  {
+   "id": "C4",
+   "lib": "Device:C",
+   "value": "100nF",
+   "footprint": "Capacitor_SMD:C_0603_1608Metric",
+   "pins": {
+    "1": "+5V",
+    "2": "GND"
+   }
+  },
+  {
+   "id": "C5",
+   "lib": "Device:C",
+   "value": "10uF",
+   "footprint": "Capacitor_SMD:C_0805_2012Metric",
+   "pins": {
+    "1": "VBUS_FUSED",
+    "2": "GND"
+   }
+  },
+  {
+   "id": "C6",
+   "lib": "Device:C",
+   "value": "10uF",
+   "footprint": "Capacitor_SMD:C_0805_2012Metric",
+   "pins": {
+    "1": "+5V",
+    "2": "GND"
+   }
+  },
+  {
+   "id": "C7",
+   "lib": "Device:C",
+   "value": "10uF",
+   "footprint": "Capacitor_SMD:C_0805_2012Metric",
+   "pins": {
+    "1": "+3V3",
+    "2": "GND"
+   }
+  },
+  {
+   "id": "C8",
+   "lib": "Device:C",
+   "value": "100nF",
+   "footprint": "Capacitor_SMD:C_0603_1608Metric",
+   "pins": {
+    "1": "AREF",
+    "2": "GND"
+   }
+  },
+  {
+   "id": "R4",
+   "lib": "Device:R",
+   "value": "1k",
+   "footprint": "Resistor_SMD:R_0603_1608Metric",
+   "pins": {
+    "1": "+5V",
+    "2": "LED_PWR"
+   }
+  },
+  {
+   "id": "D1",
+   "lib": "Device:LED",
+   "value": "POWER GREEN",
+   "footprint": "LED_SMD:LED_0603_1608Metric",
+   "pins": {
+    "1": "LED_PWR",
+    "2": "GND"
+   }
+  },
+  {
+   "id": "R5",
+   "lib": "Device:R",
+   "value": "330",
+   "footprint": "Resistor_SMD:R_0603_1608Metric",
+   "pins": {
+    "1": "D13",
+    "2": "LED13_A"
+   }
+  },
+  {
+   "id": "D2",
+   "lib": "Device:LED",
+   "value": "L D13",
+   "footprint": "LED_SMD:LED_0603_1608Metric",
+   "pins": {
+    "1": "LED13_A",
+    "2": "GND"
+   }
+  },
+  {
+   "id": "J2",
+   "lib": "Connector_Generic:Conn_02x03_Odd_Even",
+   "value": "ICSP",
+   "footprint": "Connector_PinHeader_2.54mm:PinHeader_2x03_P2.54mm_Vertical",
+   "pins": {
+    "1": "D12",
+    "2": "+5V",
+    "3": "D13",
+    "4": "D11",
+    "5": "RESET",
+    "6": "GND"
+   }
+  },
+  {
+   "id": "J3",
+   "lib": "Connector_Generic:Conn_01x08",
+   "value": "DIGITAL D0-D7",
+   "footprint": "Connector_PinHeader_2.54mm:PinHeader_1x08_P2.54mm_Vertical",
+   "pins": {
+    "1": "USB_RX",
+    "2": "USB_TX",
+    "3": "D2",
+    "4": "D3",
+    "5": "D4",
+    "6": "D5",
+    "7": "D6",
+    "8": "D7"
+   }
+  },
+  {
+   "id": "J4",
+   "lib": "Connector_Generic:Conn_01x08",
+   "value": "DIGITAL D8-D13 A0-A1",
+   "footprint": "Connector_PinHeader_2.54mm:PinHeader_1x08_P2.54mm_Vertical",
+   "pins": {
+    "1": "D8",
+    "2": "D9",
+    "3": "D10",
+    "4": "D11",
+    "5": "D12",
+    "6": "D13",
+    "7": "A0",
+    "8": "A1"
+   }
+  },
+  {
+   "id": "J5",
+   "lib": "Connector_Generic:Conn_01x04",
+   "value": "ANALOG A2-A5",
+   "footprint": "Connector_PinHeader_2.54mm:PinHeader_1x04_P2.54mm_Vertical",
+   "pins": {
+    "1": "A2",
+    "2": "A3",
+    "3": "A4",
+    "4": "A5"
+   }
+  },
+  {
+   "id": "J6",
+   "lib": "Connector_Generic:Conn_01x02",
+   "value": "POWER 5V/GND",
+   "footprint": "Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical",
+   "pins": {
+    "1": "+5V",
+    "2": "GND"
+   }
+  }
+ ],
+ "flags": [
+  "VBUS",
+  "GND"
+ ],
+ "power": [
+  "VBUS_FUSED"
+ ],
+ "notes": [
+  "USB-C CC pins use 5.1k sink resistors for device mode.",
+  "DTR edge through C1 provides CH340C auto-reset."
+ ],
+ "layout": [
+  {
+   "title": "POWER",
+   "note": "USB input, protection and dual regulated rails.",
+   "tree": {
+    "row": [
+     {
+      "part": "J1"
+     },
+     {
+      "part": "F1"
+     },
+     {
+      "col": [
+       {
+        "part": "C5"
+       },
+       {
+        "part": "U3"
+       },
+       {
+        "part": "C6"
+       }
+      ],
+      "gap": 5
+     },
+     {
+      "part": "U4"
+     },
+     {
+      "part": "C7"
+     }
+    ],
+    "gap": 8
+   }
+  },
+  {
+   "title": "MCU CLOCK AND RESET",
+   "note": "16 MHz clock, reset pull-up and user reset switch.",
+   "tree": {
+    "row": [
+     {
+      "col": [
+       {
+        "part": "R3"
+       },
+       {
+        "part": "SW1"
+       },
+       {
+        "part": "C1"
+       }
+      ],
+      "gap": 5
+     },
+     {
+      "part": "U1"
+     },
+     {
+      "col": [
+       {
+        "part": "Y1"
+       },
+       {
+        "part": "C2"
+       },
+       {
+        "part": "C3"
+       }
+      ],
+      "gap": 5
+     }
+    ],
+    "gap": 10
+   }
+  },
+  {
+   "title": "USB SERIAL",
+   "note": "CH340C USB-UART bridge with local 3.3 V core rail.",
+   "tree": {
+    "row": [
+     {
+      "part": "U2"
+     },
+     {
+      "col": [
+       {
+        "part": "C4"
+       },
+       {
+        "part": "R1"
+       },
+       {
+        "part": "R2"
+       }
+      ],
+      "gap": 5
+     }
+    ],
+    "gap": 8
+   }
+  },
+  {
+   "title": "HEADERS AND INDICATORS",
+   "note": "All ATmega digital and analog I/O is brought to headers.",
+   "tree": {
+    "row": [
+     {
+      "part": "J3"
+     },
+     {
+      "part": "J4"
+     },
+     {
+      "part": "J5"
+     },
+     {
+      "col": [
+       {
+        "part": "R4"
+       },
+       {
+        "part": "D1"
+       }
+      ],
+      "gap": 5
+     },
+     {
+      "col": [
+       {
+        "part": "R5"
+       },
+       {
+        "part": "D2"
+       }
+      ],
+      "gap": 5
+     },
+     {
+      "part": "J2"
+     },
+     {
+      "part": "J6"
+     }
+    ],
+    "gap": 6
+   }
+  }
+ ]
+}

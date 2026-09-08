@@ -1,0 +1,10 @@
+{
+ "issues": [
+  "U2 (Interface_USB:CH340C): no pin '8'; pins: 1=GND, 2=TXD, 3=RXD, 4=V3, 5=UD+, 6=UD-, 9=~{CTS}, 10=~{DSR}, 11=~{RI}, 12=~{DCD}, 13=~{DTR}, 14=~{RTS}, 15=R232, 16=VCC"
+ ],
+ "layout_failed": true,
+ "netlist": {},
+ "notes": [],
+ "paper": "A4",
+ "warnings": []
+}

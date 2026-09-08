@@ -1,0 +1,649 @@
+{
+ "parts": [
+  {
+   "id": "BT1",
+   "lib": "Device:Battery",
+   "at": [
+    32,
+    44
+   ],
+   "rot": 0,
+   "value": "9V BATTERY",
+   "footprint": "Battery:BatteryHolder_Keystone_1294_1xAA"
+  },
+  {
+   "id": "C4",
+   "lib": "Device:C",
+   "at": [
+    56,
+    43
+   ],
+   "rot": 0,
+   "value": "100nF",
+   "footprint": "Capacitor_SMD:C_0603_1608Metric"
+  },
+  {
+   "id": "J1",
+   "lib": "Connector_Generic:Conn_01x02",
+   "at": [
+    94,
+    42
+   ],
+   "rot": 0,
+   "mirror": "y",
+   "value": "AUDIO IN",
+   "footprint": "Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical"
+  },
+  {
+   "id": "C1",
+   "lib": "Device:C",
+   "at": [
+    118,
+    42
+   ],
+   "rot": 90,
+   "value": "10uF",
+   "footprint": "Capacitor_SMD:C_0603_1608Metric"
+  },
+  {
+   "id": "R1",
+   "lib": "Device:R",
+   "at": [
+    140,
+    42
+   ],
+   "rot": 0,
+   "value": "100k",
+   "footprint": "Resistor_SMD:R_0603_1608Metric"
+  },
+  {
+   "id": "R2",
+   "lib": "Device:R",
+   "at": [
+    140,
+    54
+   ],
+   "rot": 0,
+   "value": "22k",
+   "footprint": "Resistor_SMD:R_0603_1608Metric"
+  },
+  {
+   "id": "R3",
+   "lib": "Device:R",
+   "at": [
+    40,
+    90
+   ],
+   "rot": 90,
+   "value": "4.7k",
+   "footprint": "Resistor_SMD:R_0603_1608Metric"
+  },
+  {
+   "id": "Q1",
+   "lib": "Transistor_BJT:2N3904",
+   "at": [
+    64,
+    90
+   ],
+   "rot": 0,
+   "value": "2N3904",
+   "footprint": "Package_TO_SOT_THT:TO-92_Inline"
+  },
+  {
+   "id": "R4",
+   "lib": "Device:R",
+   "at": [
+    86,
+    98
+   ],
+   "rot": 0,
+   "value": "1k",
+   "footprint": "Resistor_SMD:R_0603_1608Metric"
+  },
+  {
+   "id": "C3",
+   "lib": "Device:C",
+   "at": [
+    86,
+    118
+   ],
+   "rot": 0,
+   "value": "100uF",
+   "footprint": "Capacitor_SMD:C_0603_1608Metric"
+  },
+  {
+   "id": "C2",
+   "lib": "Device:C",
+   "at": [
+    104,
+    90
+   ],
+   "rot": 90,
+   "value": "10uF",
+   "footprint": "Capacitor_SMD:C_0603_1608Metric"
+  },
+  {
+   "id": "J2",
+   "lib": "Connector_Generic:Conn_01x02",
+   "at": [
+    126,
+    90
+   ],
+   "rot": 0,
+   "value": "AUDIO OUT",
+   "footprint": "Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical"
+  }
+ ],
+ "power": [
+  {
+   "net": "GND",
+   "at": [
+    32.0,
+    50.0
+   ],
+   "rot": 0
+  },
+  {
+   "net": "GND",
+   "at": [
+    56.0,
+    48.0
+   ],
+   "rot": 0
+  },
+  {
+   "net": "+9V",
+   "at": [
+    44,
+    37.0
+   ],
+   "rot": 0
+  },
+  {
+   "net": "GND",
+   "at": [
+    102.0,
+    48.0
+   ],
+   "rot": 0
+  },
+  {
+   "net": "+9V",
+   "at": [
+    140.0,
+    37.0
+   ],
+   "rot": 0
+  },
+  {
+   "net": "GND",
+   "at": [
+    140.0,
+    59.0
+   ],
+   "rot": 0
+  },
+  {
+   "net": "GND",
+   "at": [
+    118.0,
+    96.0
+   ],
+   "rot": 0
+  },
+  {
+   "net": "+9V",
+   "at": [
+    33.0,
+    86.0
+   ],
+   "rot": 0
+  },
+  {
+   "net": "GND",
+   "at": [
+    86.0,
+    103.0
+   ],
+   "rot": 0
+  },
+  {
+   "net": "GND",
+   "at": [
+    86.0,
+    123.0
+   ],
+   "rot": 0
+  }
+ ],
+ "wires": [
+  [
+   [
+    32.0,
+    40.0
+   ],
+   [
+    56.0,
+    40.0
+   ]
+  ],
+  [
+   [
+    32.0,
+    48.0
+   ],
+   [
+    32.0,
+    50.0
+   ]
+  ],
+  [
+   [
+    56.0,
+    46.0
+   ],
+   [
+    56.0,
+    48.0
+   ]
+  ],
+  [
+   [
+    44,
+    40.0
+   ],
+   [
+    44,
+    37.0
+   ]
+  ],
+  [
+   [
+    98.0,
+    42.0
+   ],
+   [
+    115.0,
+    42.0
+   ]
+  ],
+  [
+   [
+    121,
+    42
+   ],
+   [
+    123,
+    42
+   ],
+   [
+    123,
+    45
+   ]
+  ],
+  [
+   [
+    140,
+    51
+   ],
+   [
+    140,
+    45
+   ]
+  ],
+  [
+   [
+    123,
+    45
+   ],
+   [
+    140,
+    45
+   ]
+  ],
+  [
+   [
+    121.0,
+    42.0
+   ],
+   [
+    131.0,
+    42.0
+   ]
+  ],
+  [
+   [
+    98.0,
+    44.0
+   ],
+   [
+    102.0,
+    44.0
+   ]
+  ],
+  [
+   [
+    102.0,
+    44.0
+   ],
+   [
+    102.0,
+    48.0
+   ]
+  ],
+  [
+   [
+    140.0,
+    39.0
+   ],
+   [
+    140.0,
+    37.0
+   ]
+  ],
+  [
+   [
+    140.0,
+    57.0
+   ],
+   [
+    140.0,
+    59.0
+   ]
+  ],
+  [
+   [
+    107.0,
+    90.0
+   ],
+   [
+    122.0,
+    90.0
+   ]
+  ],
+  [
+   [
+    43.0,
+    90.0
+   ],
+   [
+    47.0,
+    90.0
+   ],
+   [
+    47.0,
+    87.0
+   ],
+   [
+    60.0,
+    87.0
+   ],
+   [
+    60.0,
+    86.0
+   ],
+   [
+    66.0,
+    86.0
+   ]
+  ],
+  [
+   [
+    66.0,
+    86.0
+   ],
+   [
+    101.0,
+    86.0
+   ],
+   [
+    101.0,
+    90.0
+   ]
+  ],
+  [
+   [
+    66,
+    94
+   ],
+   [
+    66,
+    96
+   ],
+   [
+    82,
+    96
+   ]
+  ],
+  [
+   [
+    86,
+    95
+   ],
+   [
+    86,
+    93
+   ],
+   [
+    82,
+    93
+   ]
+  ],
+  [
+   [
+    86,
+    115
+   ],
+   [
+    86,
+    113
+   ],
+   [
+    82,
+    113
+   ]
+  ],
+  [
+   [
+    82,
+    93
+   ],
+   [
+    82,
+    113
+   ]
+  ],
+  [
+   [
+    122.0,
+    92.0
+   ],
+   [
+    118.0,
+    92.0
+   ]
+  ],
+  [
+   [
+    118.0,
+    92.0
+   ],
+   [
+    118.0,
+    96.0
+   ]
+  ],
+  [
+   [
+    37.0,
+    90.0
+   ],
+   [
+    33.0,
+    90.0
+   ]
+  ],
+  [
+   [
+    33.0,
+    90.0
+   ],
+   [
+    33.0,
+    86.0
+   ]
+  ],
+  [
+   [
+    60.0,
+    90.0
+   ],
+   [
+    57.0,
+    90.0
+   ]
+  ],
+  [
+   [
+    86.0,
+    101.0
+   ],
+   [
+    86.0,
+    103.0
+   ]
+  ],
+  [
+   [
+    86.0,
+    121.0
+   ],
+   [
+    86.0,
+    123.0
+   ]
+  ]
+ ],
+ "labels": [
+  {
+   "text": "BIAS",
+   "at": [
+    131.0,
+    42.0
+   ],
+   "rot": 0
+  },
+  {
+   "text": "BIAS",
+   "at": [
+    57.0,
+    90.0
+   ],
+   "rot": 180
+  }
+ ],
+ "nc": [],
+ "texts": [
+  {
+   "text": "POWER",
+   "at": [
+    29.0,
+    30.0
+   ],
+   "size": 2.5,
+   "bold": true
+  },
+  {
+   "text": "Battery input with local supply bypass capacitor.",
+   "at": [
+    29.0,
+    58.0
+   ],
+   "size": 1.27,
+   "bold": false
+  },
+  {
+   "text": "INPUT AND BIAS",
+   "at": [
+    84.2,
+    30.0
+   ],
+   "size": 2.5,
+   "bold": true
+  },
+  {
+   "text": "R1/R2 establish the quiescent base voltage; C1 blocks DC.",
+   "at": [
+    84.2,
+    67.0
+   ],
+   "size": 1.27,
+   "bold": false
+  },
+  {
+   "text": "AMPLIFIER OUTPUT",
+   "at": [
+    30.0,
+    79.0
+   ],
+   "size": 2.5,
+   "bold": true
+  },
+  {
+   "text": "Collector load, transistor, emitter network, and output\ncoupling.",
+   "at": [
+    30.0,
+    131.0
+   ],
+   "size": 1.27,
+   "bold": false
+  },
+  {
+   "text": "NOTES",
+   "at": [
+    154,
+    31
+   ],
+   "size": 2.5,
+   "bold": true
+  },
+  {
+   "text": "Q1 operates as a voltage amplifier with approximately 1 kOhm\nemitter degeneration.",
+   "at": [
+    154,
+    36.0
+   ],
+   "size": 1.27,
+   "bold": false
+  },
+  {
+   "text": "C3 bypasses AC emitter feedback for increased midband gain.",
+   "at": [
+    154,
+    41.0
+   ],
+   "size": 1.27,
+   "bold": false
+  },
+  {
+   "text": "C1 and C2 provide DC isolation at the input and output.",
+   "at": [
+    154,
+    44.5
+   ],
+   "size": 1.27,
+   "bold": false
+  }
+ ],
+ "rects": [],
+ "paper": "A4",
+ "title": "Common-Emitter BJT Audio Preamplifier",
+ "rev": "1.0",
+ "date": "2026-09-02",
+ "company": "Analog Audio Circuits",
+ "comments": [
+  "9 V single-transistor voltage amplifier",
+  "Voltage-divider bias with emitter degeneration",
+  "Input and output via coupling capacitors"
+ ]
+}

@@ -1,0 +1,82 @@
+[
+ {
+  "name": "bjt_amp_v2",
+  "blocks": 3
+ },
+ {
+  "name": "bjt_amp_v3",
+  "blocks": 3
+ },
+ {
+  "name": "bjt_amp_v4",
+  "blocks": 2
+ },
+ {
+  "name": "bjt_amp_v5",
+  "blocks": 2
+ },
+ {
+  "name": "bjt_amp_v6",
+  "blocks": 2
+ },
+ {
+  "name": "bluepill_v2",
+  "blocks": 4
+ },
+ {
+  "name": "bluepill_v3",
+  "blocks": 4
+ },
+ {
+  "name": "hbridge_v2",
+  "blocks": 4
+ },
+ {
+  "name": "hbridge_v3",
+  "blocks": 3
+ },
+ {
+  "name": "hbridge_v4",
+  "blocks": 5
+ },
+ {
+  "name": "hbridge_v5",
+  "blocks": 6
+ },
+ {
+  "name": "ne555_netlist",
+  "blocks": 2
+ },
+ {
+  "name": "opamp_filter_v1",
+  "blocks": 3
+ },
+ {
+  "name": "opamp_filter_v3",
+  "blocks": 3
+ },
+ {
+  "name": "opamp_filter_v4",
+  "blocks": 3
+ },
+ {
+  "name": "opamp_filter_v5",
+  "blocks": 3
+ },
+ {
+  "name": "opamp_filter_v6",
+  "blocks": 3
+ },
+ {
+  "name": "uno_like_v3",
+  "blocks": 5
+ },
+ {
+  "name": "uno_like_v4",
+  "blocks": 4
+ },
+ {
+  "name": "uno_like_v5",
+  "blocks": 4
+ }
+]

@@ -1,0 +1,494 @@
+{
+ "title": "STM32F103C8T6 Blue Pill",
+ "rev": "1.0",
+ "date": "2026-09-02",
+ "company": "Open Hardware",
+ "paper": "A4",
+ "comments": [
+  "STM32F103C8T6 development board",
+  "USB, reset, boot selection and SWD"
+ ],
+ "parts": [
+  {
+   "id": "U1",
+   "lib": "MCU_ST_STM32F1:STM32F103C8Tx",
+   "value": "STM32F103C8T6",
+   "footprint": "Package_QFP:LQFP-48_7x7mm_P0.5mm",
+   "pins": {
+    "VBAT": "+3V3",
+    "VDD": "+3V3",
+    "VDDA": "+3V3",
+    "VSS": "GND",
+    "VSSA": "GND",
+    "PA0": "PA0",
+    "PA1": "PA1",
+    "PA2": "PA2",
+    "PA3": "PA3",
+    "PA4": "PA4",
+    "PA5": "PA5",
+    "PA6": "PA6",
+    "PA7": "PA7",
+    "PA8": "PA8",
+    "PA9": "PA9",
+    "PA10": "PA10",
+    "PA11": "USB_DM",
+    "PA12": "USB_DP",
+    "PA13": "SWDIO",
+    "PA14": "SWCLK",
+    "PA15": "PA15",
+    "PB0": "PB0",
+    "PB1": "PB1",
+    "PB2": "PB2",
+    "PB3": "PB3",
+    "PB4": "PB4",
+    "PB5": "PB5",
+    "PB6": "PB6",
+    "PB7": "PB7",
+    "PB8": "PB8",
+    "PB9": "PB9",
+    "PB10": "PB10",
+    "PB11": "PB11",
+    "PB12": "PB12",
+    "PB13": "PB13",
+    "PB14": "PB14",
+    "PB15": "PB15",
+    "PC13": "LED_K",
+    "PC14": "PC14",
+    "PC15": "PC15",
+    "PD0": "OSC_IN",
+    "PD1": "OSC_OUT",
+    "BOOT0": "BOOT0",
+    "NRST": "NRST"
+   }
+  },
+  {
+   "id": "J1",
+   "lib": "Connector_Generic:Conn_02x20_Odd_Even",
+   "value": "GPIO HEADER A",
+   "footprint": "Connector_PinHeader_2.54mm:PinHeader_2x20_P2.54mm_Vertical",
+   "pins": {
+    "1": "+3V3",
+    "2": "GND",
+    "3": "PA0",
+    "4": "PA1",
+    "5": "PA2",
+    "6": "PA3",
+    "7": "PA4",
+    "8": "PA5",
+    "9": "PA6",
+    "10": "PA7",
+    "11": "PB0",
+    "12": "PB1",
+    "13": "PB2",
+    "14": "PB3",
+    "15": "PB4",
+    "16": "PB5",
+    "17": "PB6",
+    "18": "PB7",
+    "19": "PB8",
+    "20": "PB9",
+    "21": "+3V3",
+    "22": "GND",
+    "23": "PA8",
+    "24": "PA9",
+    "25": "PA10",
+    "26": "USB_DM",
+    "27": "PA13",
+    "28": "PA14",
+    "29": "PA15",
+    "30": "LED_K",
+    "31": "PC14",
+    "32": "PC15",
+    "33": "OSC_IN",
+    "34": "OSC_OUT",
+    "35": "+3V3",
+    "36": "GND",
+    "37": "PB10",
+    "38": "PB11",
+    "39": "PB12",
+    "40": "PB13"
+   }
+  },
+  {
+   "id": "J2",
+   "lib": "Connector_Generic:Conn_02x20_Odd_Even",
+   "value": "GPIO HEADER B",
+   "footprint": "Connector_PinHeader_2.54mm:PinHeader_2x20_P2.54mm_Vertical",
+   "pins": {
+    "1": "PB14",
+    "2": "PB15",
+    "3": "PA0",
+    "4": "PA1",
+    "5": "PA2",
+    "6": "PA3",
+    "7": "PA4",
+    "8": "PA5",
+    "9": "PA6",
+    "10": "PA7",
+    "11": "PB0",
+    "12": "PB1",
+    "13": "PB2",
+    "14": "PB3",
+    "15": "PB4",
+    "16": "PB5",
+    "17": "PB6",
+    "18": "PB7",
+    "19": "PB8",
+    "20": "PB9",
+    "21": "PA8",
+    "22": "PA9",
+    "23": "PA10",
+    "24": "USB_DM",
+    "25": "USB_DP",
+    "26": "SWDIO",
+    "27": "SWCLK",
+    "28": "NRST",
+    "29": "BOOT0",
+    "30": "GND",
+    "31": "+3V3",
+    "32": "GND",
+    "33": "PB10",
+    "34": "PB11",
+    "35": "PB12",
+    "36": "PB13",
+    "37": "PB14",
+    "38": "PB15",
+    "39": "PC13",
+    "40": "GND"
+   }
+  },
+  {
+   "id": "J3",
+   "lib": "Connector_Generic:Conn_01x06",
+   "value": "SWD DEBUG",
+   "footprint": "Connector_PinHeader_2.54mm:PinHeader_1x06_P2.54mm_Vertical",
+   "pins": {
+    "1": "+3V3",
+    "2": "SWDIO",
+    "3": "GND",
+    "4": "SWCLK",
+    "5": "GND",
+    "6": "NRST"
+   }
+  },
+  {
+   "id": "J4",
+   "lib": "Connector:USB_B_Micro",
+   "value": "USB MICRO B",
+   "footprint": "Connector_USB:USB_Micro-B_Molex_47346-0001_1.6mm_Angled",
+   "pins": {
+    "1": "+5V",
+    "2": "USB_DM",
+    "3": "USB_DP",
+    "4": "nc",
+    "5": "GND",
+    "SH": "GND"
+   }
+  },
+  {
+   "id": "U2",
+   "lib": "Regulator_Linear:AMS1117-3.3",
+   "value": "AMS1117-3.3",
+   "footprint": "Package_TO_SOT_SMD:SOT-223-3_TabPin2",
+   "pins": {
+    "VI": "+5V",
+    "VO": "+3V3",
+    "GND": "GND"
+   }
+  },
+  {
+   "id": "C1",
+   "lib": "Device:C",
+   "value": "100nF",
+   "footprint": "Capacitor_SMD:C_0603_1608Metric",
+   "pins": {
+    "1": "+5V",
+    "2": "GND"
+   }
+  },
+  {
+   "id": "C2",
+   "lib": "Device:C",
+   "value": "10uF",
+   "footprint": "Capacitor_SMD:C_0603_1608Metric",
+   "pins": {
+    "1": "+5V",
+    "2": "GND"
+   }
+  },
+  {
+   "id": "C3",
+   "lib": "Device:C",
+   "value": "100nF",
+   "footprint": "Capacitor_SMD:C_0603_1608Metric",
+   "pins": {
+    "1": "+3V3",
+    "2": "GND"
+   }
+  },
+  {
+   "id": "C4",
+   "lib": "Device:C",
+   "value": "10uF",
+   "footprint": "Capacitor_SMD:C_0603_1608Metric",
+   "pins": {
+    "1": "+3V3",
+    "2": "GND"
+   }
+  },
+  {
+   "id": "Y1",
+   "lib": "Device:Crystal",
+   "value": "8MHz",
+   "footprint": "Crystal:Crystal_SMD_3225-4Pin_3.2x2.5mm",
+   "pins": {
+    "1": "OSC_IN",
+    "2": "OSC_OUT"
+   }
+  },
+  {
+   "id": "C5",
+   "lib": "Device:C",
+   "value": "22pF",
+   "footprint": "Capacitor_SMD:C_0603_1608Metric",
+   "pins": {
+    "1": "OSC_IN",
+    "2": "GND"
+   }
+  },
+  {
+   "id": "C6",
+   "lib": "Device:C",
+   "value": "22pF",
+   "footprint": "Capacitor_SMD:C_0603_1608Metric",
+   "pins": {
+    "1": "OSC_OUT",
+    "2": "GND"
+   }
+  },
+  {
+   "id": "R1",
+   "lib": "Device:R",
+   "value": "10k",
+   "footprint": "Resistor_SMD:R_0603_1608Metric",
+   "pins": {
+    "1": "+3V3",
+    "2": "NRST"
+   }
+  },
+  {
+   "id": "SW1",
+   "lib": "Switch:SW_MEC_5G",
+   "value": "RESET",
+   "footprint": "Button_Switch_THT:SW_PUSH_6mm",
+   "pins": {
+    "A": "NRST",
+    "B": "GND"
+   }
+  },
+  {
+   "id": "R2",
+   "lib": "Device:R",
+   "value": "10k",
+   "footprint": "Resistor_SMD:R_0603_1608Metric",
+   "pins": {
+    "1": "BOOT0",
+    "2": "GND"
+   }
+  },
+  {
+   "id": "JP1",
+   "lib": "Jumper:Jumper_2_Bridged",
+   "value": "BOOT0 HIGH",
+   "footprint": "Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical",
+   "pins": {
+    "1": "BOOT0",
+    "2": "+3V3"
+   }
+  },
+  {
+   "id": "R3",
+   "lib": "Device:R",
+   "value": "1k5",
+   "footprint": "Resistor_SMD:R_0603_1608Metric",
+   "pins": {
+    "1": "+3V3",
+    "2": "USB_DP"
+   }
+  },
+  {
+   "id": "R4",
+   "lib": "Device:R",
+   "value": "1k",
+   "footprint": "Resistor_SMD:R_0603_1608Metric",
+   "pins": {
+    "1": "+3V3",
+    "2": "LED_K"
+   }
+  },
+  {
+   "id": "D1",
+   "lib": "Device:LED",
+   "value": "BLUE USER LED",
+   "footprint": "LED_SMD:LED_0603_1608Metric",
+   "pins": {
+    "1": "LED_K",
+    "2": "GND"
+   }
+  }
+ ],
+ "flags": [
+  "+5V",
+  "GND",
+  "+3V3"
+ ],
+ "notes": [
+  "USB VBUS powers the 3.3 V LDO.",
+  "BOOT0 jumper selects system memory boot.",
+  "PA13/PA14 and NRST are routed to SWD."
+ ],
+ "layout": [
+  {
+   "title": "POWER + USB",
+   "note": "USB input and local regulator bypassing",
+   "tree": {
+    "row": [
+     {
+      "part": "J4"
+     },
+     {
+      "col": [
+       {
+        "part": "C1"
+       },
+       {
+        "part": "C2"
+       }
+      ],
+      "gap": 5
+     },
+     {
+      "part": "U2"
+     },
+     {
+      "col": [
+       {
+        "part": "C3"
+       },
+       {
+        "part": "C4"
+       }
+      ],
+      "gap": 5
+     }
+    ],
+    "gap": 8
+   }
+  },
+  {
+   "title": "MCU + CLOCK",
+   "note": "8 MHz HSE with matched load capacitors",
+   "tree": {
+    "row": [
+     {
+      "col": [
+       {
+        "part": "Y1"
+       },
+       {
+        "row": [
+         {
+          "part": "C5"
+         },
+         {
+          "part": "C6"
+         }
+        ],
+        "gap": 5
+       }
+      ],
+      "gap": 6
+     },
+     {
+      "part": "U1"
+     },
+     {
+      "col": [
+       {
+        "part": "R4"
+       },
+       {
+        "part": "D1"
+       }
+      ],
+      "gap": 5
+     }
+    ],
+    "gap": 10
+   }
+  },
+  {
+   "title": "CONTROL",
+   "note": "Reset pull-up and boot-mode strap",
+   "tree": {
+    "row": [
+     {
+      "col": [
+       {
+        "part": "R1"
+       },
+       {
+        "part": "SW1"
+       }
+      ],
+      "gap": 5
+     },
+     {
+      "part": "col",
+      "children": [
+       {
+        "part": "R2"
+       },
+       {
+        "part": "JP1"
+       }
+      ]
+     }
+    ],
+    "gap": 8
+   }
+  },
+  {
+   "title": "HEADERS",
+   "note": "Both GPIO headers expose the complete MCU interface",
+   "tree": {
+    "row": [
+     {
+      "part": "J1"
+     },
+     {
+      "part": "U1"
+     },
+     {
+      "part": "J2"
+     }
+    ],
+    "gap": 10
+   }
+  },
+  {
+   "title": "DEBUG",
+   "tree": {
+    "row": [
+     {
+      "part": "J3"
+     },
+     {
+      "part": "R3"
+     }
+    ],
+    "gap": 8
+   }
+  }
+ ]
+}

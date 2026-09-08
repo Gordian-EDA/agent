@@ -1,0 +1,14 @@
+{
+ "issues": [
+  "layout block 'LOGIC AND GATE DRIVE': part 'R5' appears twice",
+  "layout block 'LOGIC AND GATE DRIVE': part 'R6' appears twice"
+ ],
+ "layout_failed": true,
+ "netlist": {},
+ "notes": [
+  "note: block 'LEFT HALF-BRIDGE' was a column of 4 items; it was split into two side-by-side columns for a balanced block (compose it that way yourself next time)",
+  "note: block 'RIGHT HALF-BRIDGE' was a column of 4 items; it was split into two side-by-side columns for a balanced block (compose it that way yourself next time)"
+ ],
+ "paper": "A4",
+ "warnings": []
+}

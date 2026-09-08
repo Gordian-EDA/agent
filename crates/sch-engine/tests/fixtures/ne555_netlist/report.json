@@ -1,0 +1,57 @@
+{
+ "issues": [],
+ "netlist": {
+  "+5V": [
+   "C4.1",
+   "R1.1",
+   "U1.4",
+   "U1.8",
+   "U2.3"
+  ],
+  "GND": [
+   "C1.2",
+   "C2.2",
+   "C3.2",
+   "C4.2",
+   "D1.2",
+   "J1.2",
+   "U1.1",
+   "U2.2"
+  ],
+  "N$1": [
+   "C2.1",
+   "U1.5"
+  ],
+  "N$2": [
+   "D1.1",
+   "R3.2"
+  ],
+  "N$3": [
+   "R3.1",
+   "U1.3"
+  ],
+  "N$4": [
+   "R1.2",
+   "R2.1",
+   "U1.7"
+  ],
+  "N$5": [
+   "C1.1",
+   "R2.2",
+   "U1.2",
+   "U1.6"
+  ],
+  "VIN": [
+   "C3.1",
+   "J1.1",
+   "U2.1"
+  ]
+ },
+ "notes": [
+  "note: block 'POWER' is 110 x 19 units - very wide; rebalance its tree (put sub-circuits side by side in a row / stack them in a col)"
+ ],
+ "paper": "A4",
+ "warnings": [
+  "wire (104,21)-(128,21) runs through power text '+5V' of #PWR003 at (106,21.2)"
+ ]
+}

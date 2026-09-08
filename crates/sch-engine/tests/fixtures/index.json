@@ -1,0 +1,192 @@
+[
+ {
+  "name": "bjt_amp_v1",
+  "source": "/home/mimi/sch-agent/out/bench/bjt_amp_work/v1.json",
+  "layout_failed": true
+ },
+ {
+  "name": "bjt_amp_v2",
+  "source": "/home/mimi/sch-agent/out/bench/bjt_amp_work/v2.json",
+  "parts": 12,
+  "nets": 7,
+  "issues": 0,
+  "paper": "A4"
+ },
+ {
+  "name": "bjt_amp_v3",
+  "source": "/home/mimi/sch-agent/out/bench/bjt_amp_work/v3.json",
+  "parts": 12,
+  "nets": 7,
+  "issues": 0,
+  "paper": "A4"
+ },
+ {
+  "name": "bjt_amp_v4",
+  "source": "/home/mimi/sch-agent/out/bench/bjt_amp_work/v4.json",
+  "parts": 12,
+  "nets": 7,
+  "issues": 0,
+  "paper": "A4"
+ },
+ {
+  "name": "bjt_amp_v5",
+  "source": "/home/mimi/sch-agent/out/bench/bjt_amp_work/v5.json",
+  "parts": 12,
+  "nets": 7,
+  "issues": 0,
+  "paper": "A4"
+ },
+ {
+  "name": "bjt_amp_v6",
+  "source": "/home/mimi/sch-agent/out/bench/bjt_amp_work/v6.json",
+  "parts": 12,
+  "nets": 7,
+  "issues": 0,
+  "paper": "A4"
+ },
+ {
+  "name": "bluepill_v1",
+  "source": "/home/mimi/sch-agent/out/runs/bluepill_work/v1.json",
+  "layout_failed": true
+ },
+ {
+  "name": "bluepill_v2",
+  "source": "/home/mimi/sch-agent/out/runs/bluepill_work/v2.json",
+  "parts": 20,
+  "nets": 45,
+  "issues": 0,
+  "paper": "A3"
+ },
+ {
+  "name": "bluepill_v3",
+  "source": "/home/mimi/sch-agent/out/runs/bluepill_work/v3.json",
+  "parts": 20,
+  "nets": 42,
+  "issues": 0,
+  "paper": "A3"
+ },
+ {
+  "name": "hbridge_v1",
+  "source": "/home/mimi/sch-agent/out/bench/hbridge_work/v1.json",
+  "layout_failed": true
+ },
+ {
+  "name": "hbridge_v2",
+  "source": "/home/mimi/sch-agent/out/bench/hbridge_work/v2.json",
+  "parts": 27,
+  "nets": 14,
+  "issues": 0,
+  "paper": "A2"
+ },
+ {
+  "name": "hbridge_v3",
+  "source": "/home/mimi/sch-agent/out/bench/hbridge_work/v3.json",
+  "parts": 27,
+  "nets": 11,
+  "issues": 0,
+  "paper": "A3"
+ },
+ {
+  "name": "hbridge_v4",
+  "source": "/home/mimi/sch-agent/out/bench/hbridge_work/v4.json",
+  "parts": 27,
+  "nets": 13,
+  "issues": 0,
+  "paper": "A3"
+ },
+ {
+  "name": "hbridge_v5",
+  "source": "/home/mimi/sch-agent/out/bench/hbridge_work/v5.json",
+  "parts": 29,
+  "nets": 14,
+  "issues": 0,
+  "paper": "A3"
+ },
+ {
+  "name": "ne555_netlist",
+  "source": "/home/mimi/sch-agent/examples/ne555_netlist.json",
+  "parts": 11,
+  "nets": 8,
+  "issues": 0,
+  "paper": "A4"
+ },
+ {
+  "name": "opamp_filter_v1",
+  "source": "/home/mimi/sch-agent/out/bench/opamp_filter_work/v1.json",
+  "parts": 21,
+  "nets": 10,
+  "issues": 0,
+  "paper": "A3"
+ },
+ {
+  "name": "opamp_filter_v2",
+  "source": "/home/mimi/sch-agent/out/bench/opamp_filter_work/v2.json",
+  "layout_failed": true
+ },
+ {
+  "name": "opamp_filter_v3",
+  "source": "/home/mimi/sch-agent/out/bench/opamp_filter_work/v3.json",
+  "parts": 21,
+  "nets": 10,
+  "issues": 0,
+  "paper": "A4"
+ },
+ {
+  "name": "opamp_filter_v4",
+  "source": "/home/mimi/sch-agent/out/bench/opamp_filter_work/v4.json",
+  "parts": 21,
+  "nets": 11,
+  "issues": 0,
+  "paper": "A3"
+ },
+ {
+  "name": "opamp_filter_v5",
+  "source": "/home/mimi/sch-agent/out/bench/opamp_filter_work/v5.json",
+  "parts": 23,
+  "nets": 9,
+  "issues": 0,
+  "paper": "A4"
+ },
+ {
+  "name": "opamp_filter_v6",
+  "source": "/home/mimi/sch-agent/out/bench/opamp_filter_work/v6.json",
+  "parts": 23,
+  "nets": 9,
+  "issues": 0,
+  "paper": "A3"
+ },
+ {
+  "name": "uno_like_v1",
+  "source": "/home/mimi/sch-agent/out/bench/uno_like_work/v1.json",
+  "layout_failed": true
+ },
+ {
+  "name": "uno_like_v2",
+  "source": "/home/mimi/sch-agent/out/bench/uno_like_work/v2.json",
+  "layout_failed": true
+ },
+ {
+  "name": "uno_like_v3",
+  "source": "/home/mimi/sch-agent/out/bench/uno_like_work/v3.json",
+  "parts": 28,
+  "nets": 36,
+  "issues": 0,
+  "paper": "A2"
+ },
+ {
+  "name": "uno_like_v4",
+  "source": "/home/mimi/sch-agent/out/bench/uno_like_work/v4.json",
+  "parts": 29,
+  "nets": 37,
+  "issues": 0,
+  "paper": "A2"
+ },
+ {
+  "name": "uno_like_v5",
+  "source": "/home/mimi/sch-agent/out/bench/uno_like_work/v5.json",
+  "parts": 29,
+  "nets": 37,
+  "issues": 0,
+  "paper": "A2"
+ }
+]
