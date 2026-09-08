@@ -46,9 +46,11 @@ const HOLE_COURTYARD_MM: f64 = 6.4;
 /// A repair only has to finish the handful of nets the whole-board route left; it gets a short
 /// ladder so it fits in what is left of the budget instead of being killed mid-session.
 const REPAIR_PASSES: u32 = 6;
+/// A touch-up asks the router for a handful of named nets on a board that is otherwise finished.
+const TOUCH_UP_PASSES: u32 = 4;
 /// A stitching pass changes the fill it just measured, so it is worth repeating — but a board
 /// that still fragments after this many rounds has a placement problem, not a stitching one.
-const STITCH_ROUNDS: usize = 4;
+const STITCH_ROUNDS: usize = 2;
 
 /// What outline the board should end up with.
 #[derive(Debug, Clone)]
@@ -186,6 +188,17 @@ fn ground_net(board: &Board) -> Option<crate::model::Net> {
         .find(|n| n.id != 0 && rules::is_ground_name(&n.name))
 }
 
+/// Do the mounting holes have to sit in the corners, or may they take the short edges' centres?
+///
+/// A corner hole blocks the ends of BOTH edges that meet there, which on a board whose long edges
+/// carry a breakout pair costs 16 mm of length the design does not need — a Blue Pill is 53 mm,
+/// not 71. When a pair owns the two long edges, two holes on the short-edge centres are out of
+/// everyone's way and the corner allowance disappears.
+fn holes_in_corners(edge_for: &BTreeMap<String, String>) -> bool {
+    let claimed = |e: &str| edge_for.values().any(|v| v == e);
+    !((claimed("left") && claimed("right")) || (claimed("top") && claimed("bottom")))
+}
+
 /// A pair of connectors is "the same header" when their seated lengths agree this closely.
 const TWIN_TOLERANCE: f64 = 0.05;
 /// Below this a connector is a jumper or a debug header, not something that defines an edge.
@@ -295,7 +308,7 @@ fn suggest_outline_for_edges(
     // Mounting holes sit at the corners, so both ends of every side are spoken for and a header
     // has only the middle of its edge to stand in. Sizing without this is why a 51 mm header did
     // not fit a 55 mm board that also carried four holes.
-    let corner = if holes >= 2 {
+    let corner = if holes >= 2 && holes_in_corners(edge_for) {
         2.0 * (HOLE_INSET + HOLE_COURTYARD_MM / 2.0 + margin)
     } else {
         0.0
@@ -407,7 +420,13 @@ fn step_holes(run: &mut Run, board: &mut Board) {
     // A hole's courtyard is wider than its drill, so the inset has to clear the courtyard, not
     // the hole: too small an inset hangs it over the edge.
     let inset = HOLE_INSET;
-    let pos = hole_positions(&bb, run.opts.holes, inset);
+    let pos = if holes_in_corners(&run.edge_for) {
+        hole_positions(&bb, run.opts.holes, inset)
+    } else {
+        // the two short edges' centres: clear of the headers on the long edges, and of each other
+        let (cx, _) = bb.center();
+        vec![(cx, bb.y0 + inset), (cx, bb.y1 - inset)]
+    };
     if pos.is_empty() {
         run.note(format!(
             "outline {:.1}x{:.1} mm too small for a {inset} mm hole inset",
@@ -609,6 +628,7 @@ pub fn auto_layout(
     let mut route_rules = rules.clone();
     route_rules.clearance = ((route_rules.clearance + CLEARANCE_MARGIN_MM).min(0.5) * 1000.0).round() / 1000.0;
     let net_widths = rules::router_net_widths(&board, &rules);
+    let touch_up_rules = route_rules.clone();
 
     // ---- route -------------------------------------------------------------------
     let budget = (run.left_s() - ROUTE_RESERVE_S).max(10.0) as u64;
@@ -702,6 +722,50 @@ pub fn auto_layout(
             Err(e) => {
                 std::fs::write(pcb, &before)?;
                 run.note(format!("reroute failed: {}", first_line(&e.to_string())));
+            }
+        }
+    }
+
+    // One more short pass on just the nets DRC still names. The fanout is already in place, so
+    // this costs a few seconds, and a handful of signals is a job the router can finish.
+    if report.unconnected > 0 && !report.unrouted_nets.is_empty() && run.left_s() > 12.0 {
+        let left = report.unrouted_nets.clone();
+        let before = std::fs::read(pcb)?;
+        let mut last = Board::load(pcb)?;
+        let budget = (run.left_s() - 6.0).max(5.0) as u64;
+        match freerouting::route(
+            &mut last,
+            &RouteOptions {
+                passes: TOUCH_UP_PASSES,
+                timeout_s: budget,
+                rules: touch_up_rules,
+                net_widths: BTreeMap::new(),
+                only_nets: left.clone(),
+                ..Default::default()
+            },
+            kicad,
+        ) {
+            Ok(r) => {
+                crate::tidy::tidy(&mut last);
+                last.strip_zone_fills();
+                last.save(Some(pcb))?;
+                stitch(&mut run, &mut last, pcb, rules.clearance)?;
+                let after = checks::check(kicad, pcb)?;
+                if after.unconnected < report.unconnected {
+                    run.note(format!(
+                        "touch-up on {:?}: {} track(s), {} left",
+                        &left[..left.len().min(4)],
+                        r.tracks_added,
+                        after.unconnected
+                    ));
+                    report = after;
+                } else {
+                    std::fs::write(pcb, &before)?;
+                }
+            }
+            Err(e) => {
+                std::fs::write(pcb, &before)?;
+                run.note(format!("touch-up failed: {}", first_line(&e.to_string())));
             }
         }
     }
