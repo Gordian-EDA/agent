@@ -169,8 +169,10 @@ pub fn render(
     // composite exactly; a fill that somehow reframes is dropped rather than misregistered.
     if let Some(fill) = fill.filter(|f| svg_frame(f) == Some((w_mm, h_mm))) {
         let faded = rasterise(&fill, w_px, h_px)?;
-        let mut paint = resvg::tiny_skia::PixmapPaint::default();
-        paint.opacity = ZONE_FILL_ALPHA;
+        let paint = resvg::tiny_skia::PixmapPaint {
+            opacity: ZONE_FILL_ALPHA,
+            ..Default::default()
+        };
         pixmap.draw_pixmap(
             0,
             0,

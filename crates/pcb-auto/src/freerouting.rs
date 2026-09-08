@@ -18,7 +18,7 @@ use crate::ses::apply_ses;
 /// Diminishing returns beyond ~10 passes once the board is connected.
 pub const DEFAULT_PASSES: u32 = 10;
 /// More threads means more candidate boards held in memory, not more speed.
-pub const DEFAULT_THREADS: u32 = 2;
+pub const DEFAULT_THREADS: u32 = 4;
 pub const DEFAULT_TIMEOUT_SECS: u64 = 180;
 
 const BUNDLED_JAR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../vendor/freerouting.jar");

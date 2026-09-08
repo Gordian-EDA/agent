@@ -478,11 +478,10 @@ impl Board {
         node.set("at", args);
         if delta != 0.0 {
             for child in node.items.iter_mut() {
-                if let Node::List(c) = child {
-                    if matches!(c.head(), Some("pad") | Some("property") | Some("fp_text")) {
+                if let Node::List(c) = child
+                    && matches!(c.head(), Some("pad") | Some("property") | Some("fp_text")) {
                         set_child_at(c, |a| a + delta, false);
                     }
-                }
             }
         }
     }
@@ -543,6 +542,9 @@ impl Board {
     }
 
     /// Insert a footprint parsed from a `.kicad_mod`, assigning reference and value.
+    // every argument is a distinct field of the node being written; grouping them would only
+    // move the same list one call further out
+    #[allow(clippy::too_many_arguments)]
     pub fn add_footprint(
         &mut self,
         module: &SList,
@@ -803,11 +805,10 @@ impl Board {
             self.ensure_net(net_name)
         };
         let mut connect = l("connect_pads", vec![l("clearance", vec![Node::num(connect_clearance)])]);
-        if solid_pads {
-            if let Node::List(c) = &mut connect {
+        if solid_pads
+            && let Node::List(c) = &mut connect {
                 c.items.insert(1, Node::sym("yes"));
             }
-        }
         let n = l(
             "zone",
             vec![
@@ -842,12 +843,11 @@ impl Board {
     /// Drop every `(filled_polygon ..)` a refill left behind, so the file stays the model's truth.
     pub fn strip_zone_fills(&mut self) {
         for item in self.tree.items.iter_mut() {
-            if let Node::List(z) = item {
-                if z.is("zone") {
+            if let Node::List(z) = item
+                && z.is("zone") {
                     z.remove("filled_polygon");
                     z.remove("fill_segments");
                 }
-            }
         }
     }
 
@@ -914,7 +914,7 @@ impl Board {
     }
 
     pub fn outline_bbox(&self) -> Option<BBox> {
-        self.outline_polygon().map(|p| BBox::of_points(p))
+        self.outline_polygon().map(BBox::of_points)
     }
 
     pub fn clear_outline(&mut self) -> usize {
@@ -1185,11 +1185,10 @@ fn graphic_points(g: &SList) -> Vec<Point> {
             1.0,
         );
     }
-    if h.ends_with("_poly") {
-        if let Some(pts) = g.find("pts") {
+    if h.ends_with("_poly")
+        && let Some(pts) = g.find("pts") {
             return pts.lists(Some("xy")).iter().map(|p| xy(Some(p))).collect();
         }
-    }
     vec![]
 }
 
@@ -1326,12 +1325,11 @@ fn mirror_graphic_y(c: &mut SList) {
     }
     if let Some(pts) = c.find_mut("pts") {
         for item in pts.items.iter_mut() {
-            if let Node::List(p) = item {
-                if p.is("xy") {
+            if let Node::List(p) = item
+                && p.is("xy") {
                     let (x, y) = (p.arg_f64(0).unwrap_or(0.0), p.arg_f64(1).unwrap_or(0.0));
                     p.set_args(vec![Node::num(x), Node::num(-y)]);
                 }
-            }
         }
     }
 }

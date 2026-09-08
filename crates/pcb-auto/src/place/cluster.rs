@@ -149,14 +149,10 @@ pub fn plan_once(board: &Board, fps: &[Footprint], opts: &PlanOptions, seed: u64
             .filter(|r| opts.edge_for.contains_key(*r))
             .map(|r| format!("edge seating: {r} fits on no edge at all; it keeps its pose"))
             .collect();
-        head.extend(seated_report.iter().filter_map(|(r, row)| {
-            (row.side_requested != row.side_used && row.side_requested != edges::EDGE_ANY).then(|| {
-                format!(
+        head.extend(seated_report.iter().filter(|&(_r, row)| row.side_requested != row.side_used && row.side_requested != edges::EDGE_ANY).map(|(r, row)| format!(
                     "edge seating: {r} asked {}, seated {} ({} edge full)",
                     row.side_requested, row.side_used, row.side_requested
-                )
-            })
-        }));
+                )));
         head.extend(notes);
         notes = head;
     }
@@ -267,7 +263,7 @@ pub fn plan_once(board: &Board, fps: &[Footprint], opts: &PlanOptions, seed: u64
                     continue;
                 };
                 let d = (pos.0 - px).hypot(pos.1 - py);
-                if best.as_ref().map_or(true, |b| d < b.0) {
+                if best.as_ref().is_none_or(|b| d < b.0) {
                     best = Some((d, q.ref_.clone(), pos));
                 }
             }
@@ -289,7 +285,7 @@ pub fn plan_once(board: &Board, fps: &[Footprint], opts: &PlanOptions, seed: u64
                 continue;
             }
             let key = (*c, q.pads.len());
-            if best.as_ref().map_or(true, |b| key.0 > b.0 || (key.0 == b.0 && key.1 < b.1)) {
+            if best.as_ref().is_none_or(|b| key.0 > b.0 || (key.0 == b.0 && key.1 < b.1)) {
                 best = Some((key.0, key.1, r.clone()));
             }
         }
@@ -592,16 +588,14 @@ pub fn plan_once(board: &Board, fps: &[Footprint], opts: &PlanOptions, seed: u64
     let mut sats_of: Vec<(String, Vec<String>)> = Vec::new();
     for r in &order {
         let p = parts.get(r).unwrap();
-        if p.role == Role::Satellite {
-            if let Some(par) = p.parent.clone() {
-                if parts.get(&par).is_some() {
+        if p.role == Role::Satellite
+            && let Some(par) = p.parent.clone()
+                && parts.get(&par).is_some() {
                     match sats_of.iter_mut().find(|(k, _)| *k == par) {
                         Some((_, v)) => v.push(r.clone()),
                         None => sats_of.push((par, vec![r.clone()])),
                     }
                 }
-            }
-        }
     }
     let mut ordered: Vec<String> = Vec::new();
     for r in &order {
@@ -829,7 +823,7 @@ fn cluster_parts(
                     continue;
                 }
                 let s = v / (clusters[i].len() * clusters[j].len()) as f64;
-                if best.map_or(true, |b| s > b.0) {
+                if best.is_none_or(|b| s > b.0) {
                     best = Some((s, i, j));
                 }
             }
@@ -844,6 +838,7 @@ fn cluster_parts(
                 *w[k].entry(i).or_insert(0.0) += v;
             }
         }
+        #[allow(clippy::needless_range_loop)] // k indexes the parallel `w`/`h` pair
         for k in 0..w.len() {
             w[k].remove(&j);
         }
@@ -876,11 +871,10 @@ fn cluster_parts(
 fn blocks(groups: &[Vec<String>], parts: &Parts, box_: BBox) -> Vec<BBox> {
     let mut sat_area: BTreeMap<String, f64> = BTreeMap::new();
     for s in parts.iter() {
-        if s.role == Role::Satellite {
-            if let Some(par) = &s.parent {
+        if s.role == Role::Satellite
+            && let Some(par) = &s.parent {
                 *sat_area.entry(par.clone()).or_insert(0.0) += s.area();
             }
-        }
     }
     let areas: Vec<f64> = groups
         .iter()
@@ -907,6 +901,7 @@ fn cut(lo: usize, hi: usize, b: BBox, areas: &[f64], out: &mut Vec<Option<BBox>>
     }
     let total: f64 = areas[lo..hi].iter().sum();
     let (mut half, mut k) = (0.0, lo);
+    #[allow(clippy::needless_range_loop)] // the window is a half-open range, not the whole slice
     for i in lo..hi - 1 {
         k = i;
         half += areas[i];
@@ -935,7 +930,7 @@ fn center(parts: &mut Parts, region: &Region, grid: f64, spacing: f64) {
             p.movable
                 && !(p.role == Role::Satellite
                     && p.parent.as_ref().is_some_and(|r| {
-                        parts.get(r).map_or(false, |q| !q.movable)
+                        parts.get(r).is_some_and(|q| !q.movable)
                     }))
         })
         .collect();
@@ -1076,6 +1071,8 @@ pub(crate) fn box_cost(
 
 /// Greedy local search: each movable part to the nearby legal pose with the least wirelength.
 /// `weights` scales a net -- one ending on a bolted-down part can only be shortened here.
+// the pass takes the whole placement context; a struct here would be the same list, boxed
+#[allow(clippy::too_many_arguments)]
 fn improve(
     parts: &mut Parts,
     region: &Region,
@@ -1173,7 +1170,7 @@ fn slots(parent: &Part, sat: &Part, spacing: f64, grid: f64) -> Vec<(f64, f64, f
         for c in snapped {
             if lo + short / 2.0 - 1e-6 <= c
                 && c <= hi - short / 2.0 + 1e-6
-                && out.last().map_or(true, |o| c - o >= pitch - 1e-6)
+                && out.last().is_none_or(|o| c - o >= pitch - 1e-6)
             {
                 out.push(c);
             }
@@ -1272,7 +1269,7 @@ fn place_satellites(
                     continue;
                 }
                 let cost = pad_hops(s, x, y, rr, &targets, power, weights).0 + 1.5 * ring as f64;
-                if best.map_or(true, |b| cost < b.0) {
+                if best.is_none_or(|b| cost < b.0) {
                     best = Some((cost, x, y, rr));
                 }
             }
@@ -1363,18 +1360,17 @@ fn seat_peripheral(
                 continue;
             };
             let g = edge_gap(&p.bbox_at(spot.0, spot.1, spot.2), region);
-            if best.map_or(true, |b| g < b.0) {
+            if best.is_none_or(|b| g < b.0) {
                 best = Some((g, spot));
             }
         }
-        if let Some((g, spot)) = best {
-            if g < gap {
+        if let Some((g, spot)) = best
+            && g < gap {
                 let p = &mut parts.list[i];
                 p.x = spot.0;
                 p.y = spot.1;
                 p.rot = spot.2;
             }
-        }
     }
 }
 
@@ -1720,7 +1716,7 @@ fn seat_holes(
                             .map(|(sx, sy)| (x - sx).hypot(y - sy))
                             .fold(f64::INFINITY, f64::min);
                 }
-                if best.map_or(true, |b| score > b.0) {
+                if best.is_none_or(|b| score > b.0) {
                     best = Some((score, x, y));
                 }
             }
@@ -1735,11 +1731,10 @@ fn seat_holes(
                 .map(|j| (parts.list[j].ref_.clone(), parts.list[j].bbox()))
                 .collect();
             spot = sweep(&parts.list[hi], &heavy);
-            if let Some(s) = spot {
-                if !shove_for(hi, s, parts, region, grid, spacing) {
+            if let Some(s) = spot
+                && !shove_for(hi, s, parts, region, grid, spacing) {
                     spot = None;
                 }
-            }
         }
         let Some(spot) = spot else {
             // the least-illegal spot when nothing is legal, ties going to the spot furthest out
@@ -1885,13 +1880,11 @@ fn families(parts: &Parts, skip: &BTreeSet<String>) -> BTreeMap<String, Vec<Stri
             continue;
         }
         let mut head = p.ref_.clone();
-        if p.role == Role::Satellite {
-            if let Some(par) = p.parent.as_ref().and_then(|r| parts.get(r)) {
-                if par.movable && !skip.contains(&par.ref_) {
+        if p.role == Role::Satellite
+            && let Some(par) = p.parent.as_ref().and_then(|r| parts.get(r))
+                && par.movable && !skip.contains(&par.ref_) {
                     head = par.ref_.clone();
                 }
-            }
-        }
         heads.entry(head).or_default().insert(p.ref_.clone());
     }
     heads
@@ -1900,7 +1893,7 @@ fn families(parts: &Parts, skip: &BTreeSet<String>) -> BTreeMap<String, Vec<Stri
         .collect()
 }
 
-fn median(vals: &mut Vec<f64>) -> f64 {
+fn median(vals: &mut [f64]) -> f64 {
     vals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     vals[vals.len() / 2]
 }
@@ -2245,12 +2238,11 @@ impl<'a> Refine<'a> {
             &members.iter().cloned().collect(),
             REFINE_REACH,
         );
-        if let Some(ov) = ov {
-            if self.delta(&keys, &ov) < -1e-6 && self.collide(&ov).map_or(false, |h| h.is_empty()) {
+        if let Some(ov) = ov
+            && self.delta(&keys, &ov) < -1e-6 && self.collide(&ov).is_some_and(|h| h.is_empty()) {
                 self.commit(&ov, &nets);
                 return true;
             }
-        }
         false
     }
 

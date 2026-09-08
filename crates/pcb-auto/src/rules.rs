@@ -156,11 +156,10 @@ fn matches_signal_name(name: &str) -> bool {
     if name.starts_with("Net-(") || name.starts_with("unconnected-") {
         return true;
     }
-    if let Some(rest) = name.strip_prefix("N$") {
-        if rest.chars().next().is_some_and(|c| c.is_ascii_digit()) {
+    if let Some(rest) = name.strip_prefix("N$")
+        && rest.chars().next().is_some_and(|c| c.is_ascii_digit()) {
             return true;
         }
-    }
     let up = name.to_ascii_uppercase();
     if SIGNAL_NAMES
         .iter()
@@ -285,7 +284,7 @@ pub fn room_width(board: &Board) -> f64 {
             w = EMPTY_TRACK_WIDTH; // packed this tight and the room is gone whatever the pitch says
         }
     }
-    w.max(EMPTY_TRACK_WIDTH).min(POLICY_MAX)
+    w.clamp(EMPTY_TRACK_WIDTH, POLICY_MAX)
 }
 
 /// A signal width the board is itself evidence for, or `None` when there is only silence to fill.

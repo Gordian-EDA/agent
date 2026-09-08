@@ -282,11 +282,10 @@ pub fn seat_on_edges(
             if obst.iter().chain(seated).any(|o| hits(&gb, o, spacing)) {
                 continue;
             }
-            if let Some(poly) = poly {
-                if !box_in_polygon(&bb, poly) {
+            if let Some(poly) = poly
+                && !box_in_polygon(&bb, poly) {
                     continue;
                 }
-            }
             return Some((cx, cy, rot));
         }
         None
@@ -378,11 +377,10 @@ pub fn seat_on_edges(
                 .into_iter()
                 .map(|e| (e, pack_sides.contains(e)))
                 .collect();
-            if allow_fallback {
-                if let Some(e) = want.get(r) {
+            if allow_fallback
+                && let Some(e) = want.get(r) {
                     tries.extend(fallback_sides(e, &used, &side_len).into_iter().map(|s| (s, true)));
                 }
-            }
             let mut placed = None;
             let mut chosen = "";
             for (edge, pack) in tries {
@@ -601,21 +599,20 @@ pub fn reseat_along_edge(
                 x,
                 y,
             );
-            let better = best.map_or(true, |b| {
+            let better = best.is_none_or(|b| {
                 (cand.0, cand.1, cand.2, cand.3, cand.4) < (b.0, b.1, b.2, b.3, b.4)
             });
             if better {
                 best = Some(cand);
             }
         }
-        if let Some(b) = best {
-            if (b.3 - p.x).abs() > 1e-6 || (b.4 - p.y).abs() > 1e-6 {
+        if let Some(b) = best
+            && ((b.3 - p.x).abs() > 1e-6 || (b.4 - p.y).abs() > 1e-6) {
                 let p = parts.get_mut(ref_).unwrap();
                 p.x = b.3;
                 p.y = b.4;
                 moved.push(ref_.clone());
             }
-        }
     }
     moved
 }

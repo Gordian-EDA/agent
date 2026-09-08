@@ -20,6 +20,7 @@ pub mod schematic;
 pub mod ses;
 pub mod sexp;
 pub mod stitch;
+pub mod tidy;
 
 pub use checks::{check, CheckReport};
 pub use fab::export_fab;

@@ -84,7 +84,7 @@ pub fn board_from_schematic(
         }
         placed += 1;
         x += STAGE_STEP.0;
-        if placed % STAGE_COLS == 0 {
+        if placed.is_multiple_of(STAGE_COLS) {
             x = STAGE_ORIGIN.0;
             y += STAGE_STEP.1;
         }

@@ -6,7 +6,7 @@
 //! gets what is left, so a call keeps its `timeout_s` promise instead of finishing at any cost.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::Instant;
 
 use kicad::KicadInstallation;
@@ -30,11 +30,11 @@ const LAYOUT_DENSITY: f64 = 0.6;
 const CLEARANCE_MARGIN_MM: f64 = 0.02;
 /// Router effort. Measured on a placed Blue Pill: the auto-routing stage stops improving around
 /// pass 15, and every pass past that is a no-op that still costs two seconds of wall clock.
-const ROUTER_PASSES: u32 = 20;
+const ROUTER_PASSES: u32 = 14;
 /// Seconds held back from the router for the DRC run and the renders that follow it. A router
 /// that overruns is killed and its whole session is lost, so the budget it is given must be one
 /// it can actually finish inside.
-const ROUTE_RESERVE_S: f64 = 26.0;
+const ROUTE_RESERVE_S: f64 = 22.0;
 /// A repair only has to finish the handful of nets the whole-board route left; it gets a short
 /// ladder so it fits in what is left of the budget instead of being killed mid-session.
 const REPAIR_PASSES: u32 = 8;
@@ -91,7 +91,6 @@ pub struct AutoReport {
 
 struct Run<'a> {
     kicad: &'a KicadInstallation,
-    path: PathBuf,
     opts: &'a AutoOptions,
     notes: Vec<String>,
     started: Instant,
@@ -346,10 +345,40 @@ fn step_holes(run: &mut Run, board: &mut Board) {
     }
 }
 
+/// How thinly to spread the parts: just above the courtyard fraction the board actually has, so
+/// the placer's uniform-density push covers the WHOLE outline.
+///
+/// The placer confines the cloud to `sqrt(courtyard_fraction / spread)` of the region. A board
+/// sized by its connectors rather than by its copper — a Blue Pill is 55 mm long because a 1x20
+/// header is — has far less courtyard than the human 0.6, so a fixed 0.6 packed every part into
+/// two thirds of the board and left the rest empty. Asking for the fraction the board already has
+/// makes that ratio 1 and still leaves the repulsion term switched on.
+fn spread_for(board: &Board) -> f64 {
+    let Some(bb) = board.outline_bbox() else {
+        return LAYOUT_DENSITY;
+    };
+    let region = (bb.w() - 2.0).max(1.0) * (bb.h() - 2.0).max(1.0);
+    // the placer's own box -- courtyard unioned with pad copper and half the clearance -- so the
+    // fraction here is the one it compares `spread` against
+    let clearance = place::copper_clearance(board);
+    let occupied: f64 = board
+        .footprints()
+        .iter()
+        .filter(|f| !f.is_dnp())
+        .map(|f| {
+            let c = place::keepout_bbox(f, clearance);
+            if c.valid() { c.w().max(0.0) * c.h().max(0.0) } else { 0.0 }
+        })
+        .sum();
+    // just above it: equal would read as "already packed" and switch the repulsion off
+    (occupied / region * 1.02).clamp(0.05, 0.95)
+}
+
 fn step_placement(run: &mut Run, board: &mut Board, seed: u64) -> place::PlacementPlan {
     let mut opts = PlanOptions {
         edge_for: run.opts.edge_for.clone(),
         seat_connectors: true,
+        spread: spread_for(board),
         seed,
         ..Default::default()
     };
@@ -449,7 +478,6 @@ pub fn auto_layout(
     let started = Instant::now();
     let mut run = Run {
         kicad,
-        path: pcb.to_path_buf(),
         opts,
         notes: Vec::new(),
         started,
@@ -506,6 +534,12 @@ pub fn auto_layout(
         )),
         Err(e) => run.note(format!("freerouting failed: {}", first_line(&e.to_string()))),
     }
+    let (attached, pruned) = crate::tidy::tidy(&mut board);
+    if attached + pruned > 0 {
+        run.note(format!(
+            "tidy: {attached} track end(s) pulled onto their pad, {pruned} dead fragment(s) removed"
+        ));
+    }
     board.strip_zone_fills();
     board.save(Some(pcb))?;
 
@@ -518,6 +552,7 @@ pub fn auto_layout(
     let mut report = checks::check(kicad, pcb)?;
     if report.unconnected > 0 && run.left_s() > 20.0 {
         let left: Vec<String> = report.unrouted_nets.clone();
+        let _ = &left;
         run.note(format!(
             "{} connection(s) left on {:?}; retrying those nets",
             report.unconnected,
@@ -534,7 +569,11 @@ pub fn auto_layout(
                 timeout_s: budget,
                 rules: route_rules,
                 net_widths: BTreeMap::new(),
-                only_nets: left,
+                // A whole-board pass, not a per-net one: the pour the first route fragmented is
+                // only offered to the router as separate islands once it IS fragmented, so the
+                // ground pads it stranded are visible to a second export and to nothing else.
+                // Existing copper goes out as protected wiring, so this adds rather than re-lays.
+                only_nets: Vec::new(),
                 ..Default::default()
             },
             kicad,
@@ -547,6 +586,9 @@ pub fn auto_layout(
                     "reroute: {} tracks, {} vias in {:.0}s",
                     r.tracks_added, r.vias_added, r.seconds
                 ));
+                crate::tidy::tidy(&mut retry);
+                retry.strip_zone_fills();
+                retry.save(Some(pcb))?;
                 stitch(&mut run, &mut retry, pcb, rules.clearance)?;
                 let after = checks::check(kicad, pcb)?;
                 if after.unconnected <= report.unconnected {

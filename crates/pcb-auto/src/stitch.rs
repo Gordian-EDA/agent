@@ -102,6 +102,15 @@ pub fn stitch_pours(
     if islands.len() < 2 {
         return Ok(0);
     }
+    // Where the pour is ALLOWED to be on each layer, as opposed to where it currently fills. A
+    // via dropped on bare copper-free space inside the far layer's zone is absorbed by that pour
+    // on the next refill, so an island with no fill under it is still stitchable.
+    let zone_outline: HashMap<String, Vec<Point>> = board
+        .zones()
+        .into_iter()
+        .filter(|z| z.keepout.is_none() && z.net_name == net && z.polygon.len() >= 3)
+        .filter_map(|z| z.layers.first().cloned().map(|l| (l, z.polygon)))
+        .collect();
     let Some(gnd) = board.net_by_name(net) else {
         return Ok(0);
     };
@@ -133,16 +142,17 @@ pub fn stitch_pours(
         }
     }
     let mut uf = crate::geom::UnionFind::new(islands.len());
-    let hits = |p: Point| -> Vec<usize> {
+    // `layer: None` means "any layer": only a via or a plated through-hole bridges the stack.
+    let hits = |p: Point, layer: Option<&str>| -> Vec<usize> {
         islands
             .iter()
             .enumerate()
-            .filter(|(_, i)| point_in_polygon(p, &i.poly))
+            .filter(|(_, i)| layer.is_none_or(|l| i.layer == l) && point_in_polygon(p, &i.poly))
             .map(|(k, _)| k)
             .collect()
     };
     for t in &ties {
-        let h = hits(*t);
+        let h = hits(*t, None);
         for w in h.windows(2) {
             uf.join(w[0], w[1]);
         }
@@ -151,9 +161,12 @@ pub fn stitch_pours(
         if t.net_id != gnd.id {
             continue;
         }
-        let (a, b) = (hits(t.start), hits(t.end));
-        for i in a.iter().chain(b.iter()).skip(1) {
-            uf.join(a.first().copied().unwrap_or(*i), *i);
+        // ON ITS OWN LAYER: a back-side track running over a front-side island joins nothing,
+        // and treating it as a join is what left islands looking connected and unstitched.
+        let mut h = hits(t.start, Some(&t.layer));
+        h.extend(hits(t.end, Some(&t.layer)));
+        for w in h.windows(2) {
+            uf.join(w[0], w[1]);
         }
     }
     // the component holding the largest island is the plane; everything else has to reach it
@@ -184,6 +197,20 @@ pub fn stitch_pours(
         }
     }
     let need = r + clearance;
+    // a stitch via is copper like any other: it owes the board edge its edge clearance
+    let edge_keep = r + rules.edge_clearance;
+    let outline = board.outline_polygon().unwrap_or_default();
+    let inside_edge = |p: Point| -> bool {
+        outline.is_empty()
+            || (point_in_polygon(p, &outline)
+                && (0..RIM_SAMPLES).all(|k| {
+                    let a = std::f64::consts::TAU * k as f64 / RIM_SAMPLES as f64;
+                    point_in_polygon(
+                        (p.0 + edge_keep * a.cos(), p.1 + edge_keep * a.sin()),
+                        &outline,
+                    )
+                }))
+    };
 
     fn clear(obstacles: &[Obstacle], p: Point, need: f64) -> bool {
         obstacles.iter().all(|o| o.clears(p, need))
@@ -227,6 +254,7 @@ pub fn stitch_pours(
                     .unwrap()
             });
             let mut placed = None;
+            let far_zone = zone_outline.get(other);
             'search: for target in targets {
                 let b = &isl.bbox;
                 let nx = ((b.w() / PROBE_STEP) as usize).max(1);
@@ -237,13 +265,34 @@ pub fn stitch_pours(
                             b.x0 + i as f64 * PROBE_STEP,
                             b.y0 + j as f64 * PROBE_STEP,
                         );
-                        if well_inside(p, isl) && well_inside(p, target) && clear(&obstacles, p, need) {
+                        if well_inside(p, isl) && well_inside(p, target) && clear(&obstacles, p, need)
+                            && inside_edge(p)
+                        {
                             placed = Some(p);
                             break 'search;
                         }
                     }
                 }
             }
+            if placed.is_none()
+                && let Some(poly) = far_zone {
+                    let b = &isl.bbox;
+                    let nx = ((b.w() / PROBE_STEP) as usize).max(1);
+                    let ny = ((b.h() / PROBE_STEP) as usize).max(1);
+                    'fallback: for j in 0..=ny {
+                        for i in 0..=nx {
+                            let p = (b.x0 + i as f64 * PROBE_STEP, b.y0 + j as f64 * PROBE_STEP);
+                            if well_inside(p, isl)
+                                && point_in_polygon(p, poly)
+                                && clear(&obstacles, p, need)
+                                && inside_edge(p)
+                            {
+                                placed = Some(p);
+                                break 'fallback;
+                            }
+                        }
+                    }
+                }
             if let Some(p) = placed {
                 board.add_via(p, via_size, via_drill, gnd.id, (top, bottom));
                 obstacles.push(Obstacle::Disc(p, r));

@@ -83,11 +83,17 @@ pub struct SeatReport {
 }
 
 /// The outcome of one [`plan_placement`] call.
+/// One pad as the placer sees it: its number, its net and its offset from the part origin.
+pub type PadOffset = (String, i64, Point);
+
+/// A part the placer could not seat: its reference, why, and the pose it would have used.
+pub type Unplaced = (String, String, Option<(f64, f64, f64)>);
+
 #[derive(Debug, Clone, Default)]
 pub struct PlacementPlan {
     pub moves: Vec<Move>,
     /// `(ref, reason, least-illegal pose)` for a part that could not be seated.
-    pub unplaced: Vec<(String, String, Option<(f64, f64, f64)>)>,
+    pub unplaced: Vec<Unplaced>,
     pub wirelength_before: f64,
     pub wirelength_after: f64,
     pub overlaps_after: usize,
@@ -259,7 +265,7 @@ pub fn local_geometry(
     fp: &Footprint,
     flip: bool,
     clearance: f64,
-) -> (Vec<(String, i64, Point)>, (f64, f64, f64, f64)) {
+) -> (Vec<PadOffset>, (f64, f64, f64, f64)) {
     let mut pads = Vec::new();
     for p in &fp.pads {
         if p.net_id == 0 {
@@ -623,7 +629,7 @@ pub fn plan_placement(board: &Board, opts: &PlanOptions) -> PlacementPlan {
     for k in 0..tries {
         let plan = cluster::plan_once(board, &fps, opts, opts.seed + k as u64 * SEED_STRIDE);
         done = k + 1;
-        if best.as_ref().map_or(true, |b| {
+        if best.as_ref().is_none_or(|b| {
             let (a, c) = (key(&plan), key(b));
             a.0 < c.0 || (a.0 == c.0 && (a.1 < c.1 || (a.1 == c.1 && a.2 < c.2)))
         }) {

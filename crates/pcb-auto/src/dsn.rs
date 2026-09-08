@@ -20,7 +20,7 @@ pub const SCALE: f64 = 1000.0;
 
 /// Freerouting's own defaults make a layer hop nearly free, so it answers a congested board
 /// with a via instead of routing around. These state the cost model in `(autoroute_settings)`.
-const DEFAULT_VIA_COSTS: i64 = 100;
+const DEFAULT_VIA_COSTS: i64 = 30;
 const PREFERRED_TRACE_COSTS: f64 = 1.0;
 const AGAINST_PREFERRED_TRACE_COSTS: f64 = 2.5;
 
@@ -232,7 +232,7 @@ impl Placement {
 
 
 /// The pad's copper box.
-pub(crate) fn pad_bbox(f: &Footprint, p: &Pad) -> BBox {
+pub(crate) fn pad_bbox(_f: &Footprint, p: &Pad) -> BBox {
     let (w, h) = p.size;
     let rot = p.rot;
     BBox::of_points([(-w / 2.0, -h / 2.0), (w / 2.0, -h / 2.0), (w / 2.0, h / 2.0), (-w / 2.0, h / 2.0)]
@@ -246,7 +246,7 @@ pub(crate) fn pad_bbox(f: &Footprint, p: &Pad) -> BBox {
 /// Pad geometry in the KiCad board frame: `(kind, points, width)` where kind is
 /// `circle` (points = [centre], width = diameter), `path` (two ends, width) or
 /// `polygon` (closed outline, width 0). A plain hole grows by `hole_margin` mm.
-fn pad_outline_board(f: &Footprint, p: &Pad, hole_margin: f64) -> (&'static str, Vec<Point>, f64) {
+fn pad_outline_board(_f: &Footprint, p: &Pad, hole_margin: f64) -> (&'static str, Vec<Point>, f64) {
     let (w, h) = p.size;
     if p.kind == "np_thru_hole" {
         let bare = if w > 0.0 && h > 0.0 { w.min(h) } else { 0.0 };
