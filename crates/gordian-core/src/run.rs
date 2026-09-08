@@ -13,7 +13,7 @@ use serde_json::{Value, json};
 use crate::agent::{Agent, Budget, event};
 use crate::board::{self, BoardOutcome};
 use crate::critic;
-use crate::{compose, render, skills};
+use crate::{compose, inputs, render, skills};
 
 /// What one `gordian agent` invocation was asked for.
 pub struct RunOptions {
@@ -53,7 +53,8 @@ pub async fn run(
         options.budget.clone(),
     )?;
     agent.open_existing()?;
-    let skill_block = skills::prompt_block(&options.prompt);
+    let skill_block =
+        skills::prompt_block(&options.prompt) + &inputs::prompt_block(&options.project_dir);
     if !skill_block.is_empty() {
         event("skills: a matching starter design was attached to the prompt");
     }

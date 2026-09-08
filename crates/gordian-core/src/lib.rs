@@ -12,6 +12,7 @@ pub mod board;
 pub mod compose;
 pub mod critic;
 mod engines;
+pub mod inputs;
 pub mod prompt;
 pub mod render;
 pub mod run;
