@@ -240,6 +240,8 @@ pub struct Power {
     /// Displayed net name if different from the symbol name.
     pub value: String,
     pub val_at: Option<Vec<Value>>,
+    /// The sheet hid the displayed net name; kept so an edit does not reveal it.
+    pub hide_value: bool,
     pub mirror: String,
 }
 
@@ -267,6 +269,9 @@ impl Power {
         }
         if !self.mirror.is_empty() {
             d.insert("mirror".into(), json!(self.mirror));
+        }
+        if self.hide_value {
+            d.insert("hide_value".into(), json!(true));
         }
         Value::Object(d)
     }
@@ -829,6 +834,10 @@ pub fn design_from_json(d: &Value, base: Option<&Design>) -> Design {
             rot: o.get("rot").and_then(|v| v.as_f64()).unwrap_or(0.0) as i32,
             lib,
             mirror: str_of(&o, "mirror"),
+            hide_value: o
+                .get("hide_value")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
             ..Default::default()
         };
         if let Some(old) =
@@ -838,6 +847,7 @@ pub fn design_from_json(d: &Value, base: Option<&Design>) -> Design {
             p.uuid = old.uuid.clone();
             p.reference = old.reference.clone();
             p.val_at = old.val_at.clone();
+            p.hide_value = old.hide_value;
         }
         des.power.push(p);
     }

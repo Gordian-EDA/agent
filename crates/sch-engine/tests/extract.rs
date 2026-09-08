@@ -5,17 +5,24 @@
 //! `~/sch-agent/out/runs/bluepill.kicad_sch` reproduces it exactly modulo uuids. The same does NOT
 //! hold for arbitrary human sheets - KiCad wraps `(xy ...)` points differently from this
 //! pretty-printer - so the round trip is asserted on engine-written sheets only.
+//!
+//! The sheet each fixture round-trips is this port's own, not the reference's: `compile` fuses
+//! overlapping wire fragments (see `tests/compile.rs`), so re-compiling a reference sheet is the
+//! fusion, not the round trip. Fusing is idempotent, which is what makes this an equality.
 
 mod common;
 
 use common::{Case, cases, library, normalise_uuids};
+use sch_engine::check;
 
 #[test]
 fn round_trip_is_byte_for_byte() {
     let Some(_lib) = library() else { return };
     let mut failures = Vec::new();
-    for Case { name, sheet, .. } in cases() {
-        let Some(sheet) = sheet else { continue };
+    for Case { name, raw, .. } in cases() {
+        let mut d = raw.clone();
+        assert!(check::resolve_pin_refs(&mut d, None).is_empty(), "{name}");
+        let (sheet, _) = sch_engine::compile::compile_design(sch_engine::model::design_from_json(&d, None));
         let des = sch_engine::extract::parse(&sheet).unwrap();
         let (text, comp) = sch_engine::compile::compile_design(des);
         let errs = comp.errors.borrow().clone();

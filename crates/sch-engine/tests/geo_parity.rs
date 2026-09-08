@@ -159,6 +159,7 @@ fn connect_pins_matches_python() {
             c["pinmap"].as_object().unwrap(),
             &c["default"],
             &skip,
+            &Default::default(),
         );
         if let Err(e) = r {
             failures.push(format!("case {i}: {e}"));

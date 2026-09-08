@@ -964,9 +964,11 @@ impl<'a> Checker<'a> {
             ));
         }
         for l in &self.des().labels {
-            let w = CW * 1.27 * l.text.chars().count() as f64
-                + if l.kind != "local" { 3.0 } else { 0.6 };
-            let h = CH * 1.27;
+            let flag = l.kind != "local";
+            let w = CW * 1.27 * l.text.chars().count() as f64 + if flag { 3.0 } else { 0.6 };
+            // KiCad draws a global/hierarchical label's outline one text margin clear of the text on
+            // every side, so the flag is half a millimetre taller than its letters at each edge.
+            let h = CH * 1.27 + if flag { 0.75 * 1.27 } else { 0.0 };
             let (x, y) = (l.at[0], l.at[1]);
             let bb = if l.kind == "local" {
                 // text sits above the anchor line, extending in the rot direction
@@ -1588,6 +1590,31 @@ pub fn netlist_mismatch(d: &Value, nets: &BTreeMap<String, BTreeSet<String>>) ->
                 "net {net} is split into {} unconnected pieces: {} - add a net label to each piece",
                 order.len(),
                 parts.join(" | ")
+            ));
+        }
+    }
+    // the mirror fault: two intended nets landing in one group is a short, and a
+    // short changes the circuit just as much as a split does
+    let mut merged: BTreeMap<&String, Vec<&String>> = BTreeMap::new();
+    for (net, pins) in &intended {
+        for group in pins.iter().filter_map(|p| where_.get(p).copied()) {
+            if group == &unknown {
+                continue;
+            }
+            let seen = merged.entry(group).or_default();
+            if !seen.contains(&net) {
+                seen.push(net);
+            }
+        }
+    }
+    for (group, nets) in merged {
+        if nets.len() > 1 {
+            issues.push(format!(
+                "nets {} are shorted together as '{group}' - their wires touch or run along each other",
+                nets.iter()
+                    .map(|n| format!("'{n}'"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
             ));
         }
     }

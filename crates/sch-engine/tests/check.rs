@@ -1,5 +1,11 @@
 //! `check.rs` parity: the checker must report the same issues, warnings and netlist as Python for
 //! every laid-out fixture design.
+//!
+//! DELIBERATE DIVERGENCE — a global label's flag is taller than its letters. Python measures every
+//! label as bare text, so a global label's drawn outline can sit on top of a neighbouring label
+//! without the overlap check seeing it; `bluepill_v2`/`bluepill_v3` both render a `GND` flag across
+//! the `PA9` label and the reference reports nothing. This port measures the flag KiCad draws, so it
+//! reports those as issues. Extra label-overlap issues are therefore allowed; anything else is not.
 
 mod common;
 
@@ -30,10 +36,18 @@ fn report_matches_python() {
             check::build(&raw, &tmp.path().join(format!("{name}.kicad_sch")), None).unwrap();
         let want_issues = strings(&report, "issues");
         let want_warnings = strings(&report, "warnings");
-        if built.issues != want_issues {
+        let extra_label_overlap = |s: &String| {
+            !want_issues.contains(s) && s.starts_with("label '") && s.contains("overlaps label")
+        };
+        let issues: Vec<String> = built
+            .issues
+            .iter()
+            .filter(|s| !extra_label_overlap(s))
+            .cloned()
+            .collect();
+        if issues != want_issues {
             failures.push(format!(
-                "{name} issues:\n  rust:   {:#?}\n  python: {want_issues:#?}",
-                built.issues
+                "{name} issues:\n  rust:   {issues:#?}\n  python: {want_issues:#?}"
             ));
         }
         if built.warnings != want_warnings {

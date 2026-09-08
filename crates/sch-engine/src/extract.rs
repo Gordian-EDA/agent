@@ -175,7 +175,7 @@ pub fn parse(text: &str) -> Result<Design> {
                         Some(pin) => rot_point(pin.x, pin.y, rot, &mirror),
                         None => (0.0, 0.0),
                     };
-                    let (val_at, _) = prop_pos(node, "Value");
+                    let (val_at, hide_value) = prop_pos(node, "Value");
                     let net = if value.is_empty() {
                         lib_id
                             .split_once(':')
@@ -193,6 +193,7 @@ pub fn parse(text: &str) -> Result<Design> {
                         uuid,
                         value,
                         val_at,
+                        hide_value,
                         mirror,
                     });
                     continue;

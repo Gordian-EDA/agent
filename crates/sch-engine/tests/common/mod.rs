@@ -92,3 +92,69 @@ pub fn normalise_uuids(text: &str) -> String {
     }
     String::from_utf8(out).expect("sheet text stays valid utf-8")
 }
+
+/// One top-level `(wire ...)`: its two endpoints.
+pub type WireSeg = ([f64; 2], [f64; 2]);
+
+fn nums(line: &str) -> Vec<f64> {
+    line.split(|c: char| !(c.is_ascii_digit() || c == '.' || c == '-'))
+        .filter_map(|t| t.parse().ok())
+        .collect()
+}
+
+/// Split a sheet into everything that is not a conductor, its wire segments and its junctions.
+///
+/// The engine fuses overlapping wire fragments and so writes fewer wires and fewer junction dots
+/// than the reference; the parity tests compare those two lists on their own terms.
+pub fn conductors(text: &str) -> (String, Vec<WireSeg>, Vec<[f64; 2]>) {
+    let (mut rest, mut wires, mut junctions) = (String::new(), Vec::new(), Vec::new());
+    let mut block: Vec<&str> = Vec::new();
+    let mut kind = "";
+    for line in text.lines() {
+        if kind.is_empty() {
+            if line == "\t(wire" || line == "\t(junction" {
+                kind = line.trim_start_matches("\t(");
+                block.clear();
+                continue;
+            }
+            rest.push_str(line);
+            rest.push('\n');
+            continue;
+        }
+        if line == "\t)" {
+            let pts: Vec<Vec<f64>> = block
+                .iter()
+                .filter(|l| l.contains("(xy ") || l.contains("(at "))
+                .map(|l| nums(l))
+                .collect();
+            match kind {
+                "wire" => wires.push((
+                    [pts[0][0], pts[0][1]],
+                    [pts[1][0], pts[1][1]],
+                )),
+                _ => junctions.push([pts[0][0], pts[0][1]]),
+            }
+            kind = "";
+            continue;
+        }
+        block.push(line);
+    }
+    (rest, wires, junctions)
+}
+
+/// Segments as an order-and-direction-independent set of rounded endpoints.
+pub fn seg_set(segs: &[WireSeg]) -> std::collections::BTreeSet<[i64; 4]> {
+    let h = |v: f64| (v * 100.0).round() as i64;
+    segs.iter()
+        .map(|(a, b)| {
+            let (p, q) = ([h(a[0]), h(a[1])], [h(b[0]), h(b[1])]);
+            let (p, q) = if p <= q { (p, q) } else { (q, p) };
+            [p[0], p[1], q[0], q[1]]
+        })
+        .collect()
+}
+
+pub fn point_set(pts: &[[f64; 2]]) -> std::collections::BTreeSet<[i64; 2]> {
+    let h = |v: f64| (v * 100.0).round() as i64;
+    pts.iter().map(|p| [h(p[0]), h(p[1])]).collect()
+}

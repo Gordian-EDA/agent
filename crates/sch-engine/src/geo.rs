@@ -600,6 +600,7 @@ pub fn connect_pins(
     pinmap: &Map<String, Value>,
     default: &Value,
     skip: &std::collections::BTreeSet<String>,
+    wire_nets: &HashMap<(i64, i64), String>,
 ) -> Result<(), LayoutError> {
     let pins: Vec<&crate::symlib::Pin> = sym
         .pins_for_unit(unit)
@@ -741,6 +742,13 @@ pub fn connect_pins(
     };
 
     for ((d, net), mut lst) in groups {
+        // a point already carrying another net's wire cannot host this net's stub
+        let mut occupied = occupied.clone();
+        for (pt, other) in wire_nets {
+            if *other != net {
+                occupied.insert(*pt);
+            }
+        }
         lst.sort_by(|a, b| {
             (a.0[0], a.0[1])
                 .partial_cmp(&(b.0[0], b.0[1]))

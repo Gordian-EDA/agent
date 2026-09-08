@@ -294,16 +294,23 @@ impl Compiler {
 
     // ---- junction inference -----------------------------------------
 
-    /// Points where three or more connections meet.
-    pub fn compute_junctions(&self) -> Vec<[f64; 2]> {
-        let segs: Vec<(Key, Key)> = self
+    /// The sheet's wire segments with collinear fragments fused; see [`fuse_segments`].
+    pub fn fused_wires(&self) -> Vec<Seg> {
+        let segs: Vec<Seg> = self
             .des
             .wires
             .iter()
-            .flat_map(|w| {
-                w.windows(2)
-                    .map(|ab| (Key::of(ab[0][0], ab[0][1]), Key::of(ab[1][0], ab[1][1])))
-            })
+            .flat_map(|w| w.windows(2).map(|ab| (ab[0], ab[1])))
+            .collect();
+        fuse_segments(&segs)
+    }
+
+    /// Points where three or more connections meet.
+    pub fn compute_junctions(&self) -> Vec<[f64; 2]> {
+        let segs: Vec<(Key, Key)> = self
+            .fused_wires()
+            .iter()
+            .map(|(a, b)| (Key::of(a[0], a[1]), Key::of(b[0], b[1])))
             .collect();
         let mut order: Vec<Key> = Vec::new();
         let mut deg: HashMap<Key, i32> = HashMap::new();
@@ -869,19 +876,21 @@ impl Compiler {
             vp.x,
             vp.y,
             vp.rot as f64,
-            false,
+            pw.hide_value,
             &vp.justify,
         ));
-        self.text_items.borrow_mut().push(TextItem {
-            owner: reference.clone(),
-            kind: "power".into(),
-            text: shown,
-            x: vp.x,
-            y: vp.y,
-            rot: vp.rot,
-            justify: vp.justify.clone(),
-            size: 1.27,
-        });
+        if !pw.hide_value {
+            self.text_items.borrow_mut().push(TextItem {
+                owner: reference.clone(),
+                kind: "power".into(),
+                text: shown,
+                x: vp.x,
+                y: vp.y,
+                rot: vp.rot,
+                justify: vp.justify.clone(),
+                size: 1.27,
+            });
+        }
         node.push(property("Footprint", "", ax, ay, 0.0, true, ""));
         node.push(property("Datasheet", "", ax, ay, 0.0, true, ""));
         node.push(property(
@@ -985,6 +994,7 @@ impl Compiler {
         }
         root.push(Sexp::List(lib_syms));
 
+        let wires = self.fused_wires();
         for j in self.compute_junctions() {
             root.push(Sexp::List(vec![
                 Sexp::sym("junction"),
@@ -1008,19 +1018,17 @@ impl Compiler {
                 Sexp::List(vec![Sexp::sym("uuid"), Sexp::str(new_uuid())]),
             ]));
         }
-        for w in &des.wires {
-            for ab in w.windows(2) {
-                root.push(Sexp::List(vec![
-                    Sexp::sym("wire"),
-                    Sexp::List(vec![
-                        Sexp::sym("pts"),
-                        Sexp::List(vec![Sexp::sym("xy"), num(ab[0][0]), num(ab[0][1])]),
-                        Sexp::List(vec![Sexp::sym("xy"), num(ab[1][0]), num(ab[1][1])]),
-                    ]),
-                    stroke(),
-                    Sexp::List(vec![Sexp::sym("uuid"), Sexp::str(new_uuid())]),
-                ]));
-            }
+        for (a, b) in wires {
+            root.push(Sexp::List(vec![
+                Sexp::sym("wire"),
+                Sexp::List(vec![
+                    Sexp::sym("pts"),
+                    Sexp::List(vec![Sexp::sym("xy"), num(a[0]), num(a[1])]),
+                    Sexp::List(vec![Sexp::sym("xy"), num(b[0]), num(b[1])]),
+                ]),
+                stroke(),
+                Sexp::List(vec![Sexp::sym("uuid"), Sexp::str(new_uuid())]),
+            ]));
         }
         for r in &des.rects {
             root.push(Sexp::List(vec![
@@ -1197,6 +1205,95 @@ pub fn on_segment(p: (f64, f64), a: (f64, f64), b: (f64, f64), eps: f64) -> bool
     }
     let (cx, cy) = (ax + t * (bx - ax), ay + t * (by - ay));
     (cx - px).abs() < eps && (cy - py).abs() < eps
+}
+
+/// Fuse wire fragments that lie on the same axis-aligned line and overlap.
+///
+/// The router emits a pin's stub and the trunk leaving the same pin as separate wires, so a sheet
+/// carries segments drawn on top of each other. Their two coincident ends read as two conductors, and
+/// [`Compiler::compute_junctions`] then dots the pin — plus a second dot a grid step away, at the
+/// fragment seam — where only a pin and one wire meet. Fusing first makes the inference see the one
+/// conductor that is actually drawn. It is connectivity-neutral: overlapping fragments are already
+/// one net, and every point they covered stays covered.
+///
+/// Fragments that merely touch end to end are left alone: they draw the same line and carry the same
+/// degrees either way, and keeping them keeps the sheet byte-identical to the reference's.
+///
+/// Segments are returned in the order their first fragment appeared. Non-axis-aligned segments are
+/// passed through.
+pub fn fuse_segments(segs: &[Seg]) -> Vec<Seg> {
+    #[derive(PartialEq, Eq, Hash, Clone, Copy)]
+    enum Line {
+        Horizontal(i64),
+        Vertical(i64),
+        Free(usize),
+    }
+    let hundredths = |v: f64| (r2(v) * 100.0).round() as i64;
+    let line_of = |i: usize, (a, b): Seg| {
+        let (ax, ay, bx, by) = (
+            hundredths(a[0]),
+            hundredths(a[1]),
+            hundredths(b[0]),
+            hundredths(b[1]),
+        );
+        match () {
+            _ if ay == by && ax != bx => (Line::Horizontal(ay), ax.min(bx), ax.max(bx)),
+            _ if ax == bx && ay != by => (Line::Vertical(ax), ay.min(by), ay.max(by)),
+            _ => (Line::Free(i), 0, 0),
+        }
+    };
+
+    // runs: per line, the disjoint spans the fragments cover
+    let mut runs: HashMap<Line, Vec<(i64, i64)>> = HashMap::new();
+    for (i, s) in segs.iter().enumerate() {
+        let (line, lo, hi) = line_of(i, *s);
+        let spans = runs.entry(line).or_default();
+        let (mut lo, mut hi) = (lo, hi);
+        spans.retain(|&(a, b)| {
+            let joins = a < hi && lo < b;
+            if joins {
+                lo = lo.min(a);
+                hi = hi.max(b);
+            }
+            !joins
+        });
+        spans.push((lo, hi));
+    }
+
+    let mut out = Vec::with_capacity(segs.len());
+    let mut done: Vec<(Line, (i64, i64))> = Vec::new();
+    for (i, s) in segs.iter().enumerate() {
+        let (line, lo, hi) = line_of(i, *s);
+        let run = *runs[&line]
+            .iter()
+            .find(|&&(a, b)| a <= lo && hi <= b)
+            .expect("every fragment lies in one run");
+        if done.contains(&(line, run)) {
+            continue;
+        }
+        done.push((line, run));
+        out.push(if (lo, hi) == run {
+            *s
+        } else {
+            let (lo, hi) = (run.0 as f64 / 100.0, run.1 as f64 / 100.0);
+            let forward = match line {
+                Line::Horizontal(_) => s.0[0] <= s.1[0],
+                _ => s.0[1] <= s.1[1],
+            };
+            let (near, far) = if forward { (lo, hi) } else { (hi, lo) };
+            match line {
+                Line::Horizontal(y) => {
+                    let y = y as f64 / 100.0;
+                    ([near, y], [far, y])
+                }
+                _ => {
+                    let x = s.0[0];
+                    ([x, near], [x, far])
+                }
+            }
+        });
+    }
+    out
 }
 
 /// Compile a design into sheet text, returning the compiler so the checker can reuse its caches.

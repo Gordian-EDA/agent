@@ -729,6 +729,23 @@ fn seg_hits_box(a: Pt, b: Pt, bx: &Box4, eps: f64) -> bool {
     true
 }
 
+/// True when point `p` lies anywhere on the axis-aligned segment `a`-`b`, ends included.
+fn on_axis_segment(p: Pt, a: Pt, b: Pt) -> bool {
+    let between = |v: f64, lo: f64, hi: f64| lo.min(hi) - 1e-6 <= v && v <= lo.max(hi) + 1e-6;
+    ((a[0] - b[0]).abs() < 1e-6 && (p[0] - a[0]).abs() < 1e-6 && between(p[1], a[1], b[1]))
+        || ((a[1] - b[1]).abs() < 1e-6 && (p[1] - a[1]).abs() < 1e-6 && between(p[0], a[0], b[0]))
+}
+
+/// True when drawing `a`-`b` would electrically merge with `c`-`d` of another net.
+///
+/// KiCad joins collinear wires that overlap over any length, so a route may cross
+/// a foreign wire but never run along one.
+fn segs_short(a: Pt, b: Pt, c: Pt, d: Pt) -> bool {
+    let va = (a[0] - b[0]).abs() < 1e-6;
+    let vc = (c[0] - d[0]).abs() < 1e-6;
+    va == vc && segs_cross(a, b, c, d)
+}
+
 fn segs_cross(a: Pt, b: Pt, c: Pt, d: Pt) -> bool {
     let va = (a[0] - b[0]).abs() < 1e-6;
     let vc = (c[0] - d[0]).abs() < 1e-6;
@@ -836,6 +853,9 @@ pub struct GroupLayout {
     /// Draw long connections whose path is straight or single-bend instead of labelling them.
     pub long_simple: bool,
     reserved: Vec<(Box4, Option<String>)>,
+    /// Every pin's connection point -> its net, so a route never ends on a
+    /// foreign pin (which would silently short the two nets).
+    pin_nets: HashMap<(i64, i64), String>,
     bus_pairs: HashSet<(String, String)>,
     power_symbol_pins: HashSet<PinKey>,
     symbol_on_wire: Vec<(String, Pt)>,
@@ -867,6 +887,7 @@ impl GroupLayout {
             max_wire: MAX_WIRE,
             long_simple: true,
             reserved: Vec::new(),
+            pin_nets: HashMap::new(),
             bus_pairs: HashSet::new(),
             power_symbol_pins: HashSet::new(),
             symbol_on_wire: Vec::new(),
@@ -996,8 +1017,11 @@ impl GroupLayout {
                 let Some(net) = p.pinmap.get(&pin.number) else {
                     continue;
                 };
+                // every supply/ground pin keeps its stub zone clear, whether or not the
+                // net is routed in this block: a signal wire crossing it shorts the two
                 if net.is_empty()
-                    || !self.nets.contains_key(net)
+                    || net == "nc"
+                    || net == "float"
                     || self.signal_nets.contains_key(net)
                 {
                     continue;
@@ -1017,6 +1041,19 @@ impl GroupLayout {
             }
         }
         self.reserved = reserved;
+        self.pin_nets = self
+            .parts
+            .iter()
+            .flat_map(|p| {
+                p.pins.iter().map(move |pin| {
+                    let pos = p.pin_pos(pin);
+                    (
+                        (ri(pos[0]), ri(pos[1])),
+                        p.pinmap.get(&pin.number).cloned().unwrap_or_default(),
+                    )
+                })
+            })
+            .collect();
         let mut labelled_nets: Vec<String> = Vec::new();
 
         // pairs of multi-pin parts sharing many nets (MCU <-> header): humans use net labels, not
@@ -1108,7 +1145,7 @@ impl GroupLayout {
                 }
             }
             if n >= 3 && !is_supply && span <= 44f64.max(self.max_wire + 4.0) && !any_bus {
-                if let Some(trunk) = self.route_trunk(&ends) {
+                if let Some(trunk) = self.route_trunk(&ends, &net) {
                     for path in trunk {
                         let wi = self.wires.len();
                         self.wires.push(path);
@@ -1404,6 +1441,12 @@ impl GroupLayout {
                 free.insert((pt.0 + d.0 as i64 * k, pt.1 + d.1 as i64 * k));
             }
         }
+        for (cell, net) in &self.pin_nets {
+            if net != routing_net {
+                free.remove(cell);
+                blocked.insert(*cell);
+            }
+        }
         // existing wires: cells with direction (other nets = obstacles/crossings; same net = joins)
         let same_net: Vec<usize> = self.net_wires.get(routing_net).cloned().unwrap_or_default();
         let same_idx: HashSet<usize> = same_net.iter().copied().collect();
@@ -1602,12 +1645,23 @@ impl GroupLayout {
         if shape > limit_shape {
             return None; // a net label is cleaner than a snake
         }
+        // the grid search allows crossing another net's wire; merging with one is a short
+        let foreign: Vec<(Pt, Pt)> = self
+            .wires
+            .iter()
+            .enumerate()
+            .filter(|(wi, _)| !same_idx.contains(wi))
+            .flat_map(|(_, w)| seg_pairs(w).collect::<Vec<_>>())
+            .collect();
+        if seg_pairs(&out).any(|(u, v)| foreign.iter().any(|(c, d)| segs_short(u, v, *c, *d))) {
+            return None;
+        }
         Some((out, joined))
     }
 
     /// Straight node wire (horizontal or vertical) with every pin dropping onto it by a straight or
     /// L path. Returns the wire paths, or `None` when no trunk works.
-    fn route_trunk(&self, ends: &[End]) -> Option<Vec<Path>> {
+    fn route_trunk(&self, ends: &[End], routing_net: &str) -> Option<Vec<Path>> {
         let mut best: Option<Vec<Path>> = None;
         let mut best_s = f64::INFINITY;
         // per box: a wide value text must not wall off pins
@@ -1624,7 +1678,23 @@ impl GroupLayout {
             .collect();
 
         // `None` = blocked, `Some(n)` = crosses n existing segments
+        let foreign: Vec<Pt> = self
+            .pin_nets
+            .iter()
+            .filter(|(_, net)| *net != routing_net)
+            .map(|(c, _)| [c.0 as f64, c.1 as f64])
+            .collect();
         let clear = |u: Pt, v: Pt, own: Option<usize>| -> Option<f64> {
+            for pin in &foreign {
+                if on_axis_segment(*pin, u, v) {
+                    return None; // ending on or crossing another net's pin shorts them
+                }
+            }
+            for (bx, net) in &self.reserved {
+                if net.as_deref() != Some(routing_net) && seg_hits_box(u, v, bx, 0.3) {
+                    return None; // another net's power-stub zone
+                }
+            }
             for (qi, ob) in &obstacles {
                 if seg_hits_box(u, v, ob, 0.3) {
                     // leaving own part outward along the pin direction is fine
@@ -1634,12 +1704,16 @@ impl GroupLayout {
                     return None;
                 }
             }
-            Some(
-                others
-                    .iter()
-                    .filter(|(c, d)| segs_cross(u, v, *c, *d))
-                    .count() as f64,
-            )
+            let mut crossings = 0.0;
+            for (c, d) in &others {
+                if segs_short(u, v, *c, *d) {
+                    return None; // another net's wire: a crossing is fine, a merge is a short
+                }
+                if segs_cross(u, v, *c, *d) {
+                    crossings += 1.0;
+                }
+            }
+            Some(crossings)
         };
 
         for horizontal in [true, false] {
@@ -1895,7 +1969,7 @@ impl GroupLayout {
         let mut chosen: Option<(Path, Pt, i32)> = None;
         for (path, far, rot) in &cands {
             let bx = self.geo.label_box(net, *far, *rot, "local");
-            if self.label_spot_free(e.p, pos, &bx, path) {
+            if self.label_spot_free(e.p, pos, &bx, path, *far, net) {
                 chosen = Some((path.clone(), *far, *rot));
                 break;
             }
@@ -1917,7 +1991,35 @@ impl GroupLayout {
         true
     }
 
-    fn label_spot_free(&self, p_idx: usize, pos: Pt, bx: &Box4, path: &[Pt]) -> bool {
+    fn label_spot_free(
+        &self,
+        p_idx: usize,
+        pos: Pt,
+        bx: &Box4,
+        path: &[Pt],
+        far: Pt,
+        net: &str,
+    ) -> bool {
+        // the label point and its stub carry `net`; touching another net's wire there
+        // silently joins the two
+        let mine: HashSet<usize> = self
+            .net_wires
+            .get(net)
+            .map(|v| v.iter().copied().collect())
+            .unwrap_or_default();
+        for (wi, w) in self.wires.iter().enumerate() {
+            if mine.contains(&wi) {
+                continue;
+            }
+            for (a, b) in seg_pairs(w) {
+                if on_axis_segment(far, a, b) {
+                    return false;
+                }
+                if seg_pairs(path).any(|(u, v)| segs_short(u, v, a, b)) {
+                    return false;
+                }
+            }
+        }
         for (qi, q) in self.parts.iter().enumerate() {
             if qi != p_idx && overlap(bx, &q.extent(), 0.0) {
                 return false;
@@ -1978,6 +2080,26 @@ impl GroupLayout {
         let wires = self.wires.clone();
         for w in &wires {
             self.geo.add_wire(w);
+        }
+        // where each routed net runs, so a power stub is never turned into a
+        // foreign wire (that would short the two nets)
+        let mut wire_nets: HashMap<(i64, i64), String> = HashMap::new();
+        for (net, idx) in self.net_wires.iter() {
+            for &wi in idx {
+                for (a, b) in seg_pairs(&self.wires[wi]) {
+                    let steps = ((b[0] - a[0]).abs() + (b[1] - a[1]).abs()).round() as i64;
+                    let step = [(b[0] - a[0]).signum(), (b[1] - a[1]).signum()];
+                    for k in 0..=steps {
+                        wire_nets.insert(
+                            (
+                                ((a[0] + step[0] * k as f64) * 100.0).round() as i64,
+                                ((a[1] + step[1] * k as f64) * 100.0).round() as i64,
+                            ),
+                            net.clone(),
+                        );
+                    }
+                }
+            }
         }
         // connectors first: a PWR_FLAG placed beside a symbol lands on the input connector, where
         // humans put it
@@ -2048,6 +2170,7 @@ impl GroupLayout {
                 &pinmap,
                 &json!("nc"),
                 &skip,
+                &wire_nets,
             )?;
         }
         for (net, pt) in self.symbol_on_wire.clone() {
