@@ -187,9 +187,13 @@ pub struct Rules {
 impl Default for Rules {
     fn default() -> Self {
         Self {
-            track_width: 0.2,
-            clearance: 0.2,
-            via_size: 0.6,
+            // JLCPCB's standard two-layer process, which is what a board with no stated rules
+            // is actually going to be made on. The old 0.2/0.2/0.6 was KiCad's built-in
+            // constraint set, which is a floor for any fab and leaves the router room it
+            // does not have to give up.
+            track_width: 0.15,
+            clearance: 0.15,
+            via_size: 0.45,
             via_drill: 0.3,
             edge_clearance: 0.5,
             hole_clearance: 0.25,

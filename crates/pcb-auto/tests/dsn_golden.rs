@@ -5,15 +5,28 @@
 use std::collections::BTreeMap;
 
 use pcb_auto::dsn::write_dsn;
-use pcb_auto::model::Board;
-use pcb_auto::rules::{infer_rules, router_net_widths};
+use pcb_auto::model::{Board, Rules};
+use pcb_auto::rules::router_net_widths;
 
 const BOARD: &str = include_str!("fixtures/bluepill_outlined.kicad_pcb");
 const GOLDEN: &str = include_str!("fixtures/bluepill.dsn");
 
+/// The rules the golden file was dumped at — KiCad's built-in constraints, which is what the
+/// Python reference defaults to. The crate now defaults to a standard fab process instead, so the
+/// comparison states the rules explicitly: this test is about the WRITER, not the rule policy.
+fn python_rules() -> Rules {
+    Rules {
+        track_width: 0.2,
+        clearance: 0.2,
+        via_size: 0.6,
+        via_drill: 0.3,
+        ..Rules::default()
+    }
+}
+
 fn ours() -> String {
     let board = Board::parse(BOARD).expect("fixture board parses");
-    let rules = infer_rules(&board);
+    let rules = python_rules();
     let widths: BTreeMap<String, f64> = router_net_widths(&board, &rules);
     let kicad = kicad::KicadInstallation::detect();
     let doc = write_dsn(&board, &widths, &rules, kicad.as_ref()).expect("write_dsn");

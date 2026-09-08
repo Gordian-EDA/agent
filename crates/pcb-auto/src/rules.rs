@@ -9,9 +9,9 @@ use std::collections::BTreeMap;
 use crate::geom::{dist, polygon_area, BBox};
 use crate::model::{Board, Footprint, Pad, Rules};
 
-/// What an empty board gets: KiCad's own built-in constraints, which any fabricator pools.
-pub const EMPTY_TRACK_WIDTH: f64 = 0.2;
-pub const EMPTY_CLEARANCE: f64 = 0.2;
+/// What an empty board gets: a standard two-layer fab process (see `model::Rules::default`).
+pub const EMPTY_TRACK_WIDTH: f64 = 0.15;
+pub const EMPTY_CLEARANCE: f64 = 0.15;
 
 /// Manufacturability limits, not KiCad defaults: DRC is checked against the inferred rule, so a
 /// board routed to 0.13 mm can be reworked at 0.13 mm.
@@ -53,8 +53,9 @@ pub fn infer_rules(board: &Board) -> Rules {
     r.clearance = clamp(r.clearance, CLEARANCE_BOUNDS);
     r.via_size = clamp(r.via_size, VIA_SIZE_BOUNDS);
     r.via_drill = clamp(r.via_drill, VIA_DRILL_BOUNDS);
-    if r.via_drill > r.via_size - 0.2 {
-        r.via_drill = clamp(r.via_size - 0.2, VIA_DRILL_BOUNDS);
+    // the ring a standard process holds: 0.075 mm a side on a 0.45/0.30 via
+    if r.via_drill > r.via_size - 0.15 + 1e-9 {
+        r.via_drill = clamp(r.via_size - 0.15, VIA_DRILL_BOUNDS);
     }
     r
 }
@@ -227,7 +228,7 @@ pub fn power_width(signal_width: f64, pads: &[&Pad]) -> f64 {
 // A human's signal width follows the finest pad pitch on the board. The policy only ever WIDENS
 // the empty-board default, and never overrides a width the board states itself.
 
-const PITCH_WIDTH: &[(f64, f64)] = &[(1.30, 0.20), (2.80, 0.50), (f64::INFINITY, 0.80)];
+const PITCH_WIDTH: &[(f64, f64)] = &[(1.30, 0.15), (2.80, 0.50), (f64::INFINITY, 0.80)];
 const CROWDED_PARTS_PER_CM2: f64 = 3.0;
 const POLICY_MAX: f64 = 1.0;
 

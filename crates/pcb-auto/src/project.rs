@@ -89,7 +89,8 @@ fn limit(default: Option<f64>, derived: Option<f64>, measured: Option<f64>) -> f
 pub fn write_project_rules(board_path: &Path, rules: &Rules, board: &Board) -> anyhow::Result<PathBuf> {
     let m = board_minimums(board);
     let clearance = rules.clearance;
-    let annular = ((rules.via_size - rules.via_drill) / 2.0).max(0.1);
+    // follow the via the board is actually routed with; a standard process rings 0.075 mm
+    let annular = ((rules.via_size - rules.via_drill) / 2.0).max(0.05);
     // Hole and edge rules relax only when the copper itself is finer than KiCad's default.
     let fine = (clearance < defaults::MIN_CLEARANCE).then_some(clearance);
 
